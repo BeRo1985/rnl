@@ -92,7 +92,7 @@ end;
 
 constructor TServer.Create(const aCreateSuspended:boolean);
 begin
- fReadyEvent:=TPasMPEvent.Create;
+ fReadyEvent:=TPasMPEvent.Create(nil,false,false,'');
  inherited Create(aCreateSuspended);
 end;
 
@@ -165,12 +165,13 @@ begin
   Client.Compressor:=RNLCompressorClass.Create;
   Client.Start;
   ConsoleOutput('Client: Connecting');
+  Address.Port:=64242;
   if ParamCount>1 then begin
    RNLNetwork.AddressSetHost(Address,TRNLRawByteString(ParamStr(2)));
   end else begin
    RNLNetwork.AddressSetHost(Address,'127.0.0.1');
   end;
-  Address.port:=64242;
+  Address.Port:=64242;
   Peer:=Client.Connect(Address,4,0);
   if assigned(Peer) then begin
    try

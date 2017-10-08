@@ -9084,7 +9084,7 @@ begin
  if fOwnObjects then begin
   FreeAndNil(fItems[pIndex]);
  end;
- fItems[pIndex]:=nil;
+ pointer(fItems[pIndex]):=nil;
  Move(fItems[pIndex+1],fItems[pIndex],(fCount-pIndex)*SizeOf(T));
  dec(fCount);
  FillChar(fItems[fCount],SizeOf(T),#0);
@@ -9223,7 +9223,7 @@ begin
  if aID<fCount then begin
   result:=fItems[aID];
  end else begin
-  result:=nil;
+  pointer(result):=nil;
  end;
 end;
 
