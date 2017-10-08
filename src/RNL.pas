@@ -467,7 +467,7 @@ uses {$if defined(Posix)}
 {    Generics.Defaults,
      Generics.Collections;}
 
-const RNL_VERSION='1.00.2017.10.08.02.52.0000';
+const RNL_VERSION='1.00.2017.10.08.08.26.0000';
 
 type PPRNLInt8=^PRNLInt8;
      PRNLInt8=^TRNLInt8;
@@ -5261,744 +5261,6 @@ begin
  end;
 end;
 
-{$if defined(Windows)}
-type HCRYPTPROV=PRNLUInt32;
-
-const PROV_RSA_FULL=1;
-      CRYPT_VERIFYCONTEXT=$f0000000;
-      CRYPT_SILENT=$00000040;
-      CRYPT_NEWKEYSET=$00000008;
-
-function CryptAcquireContext(var phProv:HCRYPTPROV;pszContainer:PAnsiChar;pszProvider:PAnsiChar;dwProvType:TRNLUInt32;dwFlags:TRNLUInt32):LONGBOOL; stdcall; external advapi32 name 'CryptAcquireContextA';
-function CryptReleaseContext(hProv:HCRYPTPROV;dwFlags:TRNLUInt32):BOOL; stdcall; external advapi32 name 'CryptReleaseContext';
-function CryptGenRandom(hProv:HCRYPTPROV;dwLen:TRNLUInt32;pbBuffer:Pointer):BOOL; stdcall; external advapi32 name 'CryptGenRandom';
-
-function CoCreateGuid(var aGuid:TGUID):HResult; stdcall; external 'ole32.dll';
-{$ifend}
-
-constructor TRNLRandomGenerator.Create;
-begin
- inherited Create;
-{$if defined(Windows)}
- fWindowsCryptProviderInitialized:=false;
- if CryptAcquireContext(HCRYPTPROV(fWindowsCryptProvider),nil,nil,PROV_RSA_FULL,CRYPT_VERIFYCONTEXT) then begin
-  fWindowsCryptProviderInitialized:=true;
- end else if GetLastError=TRNLUInt32(NTE_BAD_KEYSET) then begin
-  if CryptAcquireContext(HCRYPTPROV(fWindowsCryptProvider),nil,nil,PROV_RSA_FULL,CRYPT_NEWKEYSET) then begin
-   fWindowsCryptProviderInitialized:=true;
-  end;
- end;
-{$ifend}
- fPosition:=0;
- fHave:=0;
- fInitialized:=false;
- fGuassianFloatUseLast:=false;
- fGuassianDoubleUseLast:=false;
-end;
-
-destructor TRNLRandomGenerator.Destroy;
-begin
-{$if defined(Windows)}
- if fWindowsCryptProviderInitialized then begin
-  fWindowsCryptProviderInitialized:=false;
-  CryptReleaseContext(HCRYPTPROV(fWindowsCryptProvider),0);
- end;
-{$ifend}
- inherited Destroy;
-end;
-
-procedure TRNLRandomGenerator.Initialize(const aData;const aDataLength:TRNLSizeUInt);
-begin
- if aDataLength>=SizeOf(TRNLRandomGeneratorSeed) then begin
-  fChaCha20Context.XChaCha20Initialize(PRNLRandomGeneratorSeed(TRNLPointer(@aData))^.Key,
-                                       PRNLRandomGeneratorSeed(TRNLPointer(@aData))^.Nonce,
-                                       0);
- end;
-end;
-
-procedure TRNLRandomGenerator.Rekey(const aData;const aDataLength:TRNLSizeUInt);
-var Index:TRNLSizeUInt;
-begin
- fChaCha20Context.Process(fBuffer,fBuffer,SizeOf(TRNLRandomGeneratorBuffer));
- if aDataLength>0 then begin
-  for Index:=1 to Min(aDataLength,SizeOf(TRNLRandomGeneratorSeed)) do begin
-   fBuffer[Index]:=fBuffer[Index] xor PRNLUInt8Array(TRNLPointer(@aData))^[Index];
-  end;
- end;
- Initialize(fBuffer[0],SizeOf(TRNLRandomGeneratorSeed));
- FillChar(fBuffer[0],SizeOf(TRNLRandomGeneratorSeed),#0);
- fPosition:=SizeOf(TRNLRandomGeneratorSeed);
- fHave:=SizeOf(TRNLRandomGeneratorBuffer)-SizeOf(TRNLRandomGeneratorSeed);
-end;
-
-procedure TRNLRandomGenerator.Reseed;
-var EntropyData:TRNLRandomGeneratorEntropyData;
- procedure GetEntropyData;
-{$if defined(Windows)}
-  function WindowsGetEntropyData(out aBuffer;const aSize:TRNLSizeUInt):boolean;
-  begin
-   if fWindowsCryptProviderInitialized then begin
-    FillChar(aBuffer,aSize,#0);
-    result:=CryptGenRandom(HCRYPTPROV(fWindowsCryptProvider),aSize,@aBuffer);
-   end else begin
-    result:=false;
-   end;
-  end;
-  function WindowsEnvironmentStringsGetEntropyData(out aBuffer;const aSize:TRNLSizeUInt):boolean;
-  var Index,SubIndex:TRNLSizeUInt;
-      HashState:TRNLUInt64;
-      pp,p:PWideChar;
-  begin
-   result:=false;
-   HashState:=TRNLUInt64(4695981039346656037);
-   pp:=GetEnvironmentStringsW;
-   if assigned(pp) then begin
-    p:=pp;
-    try
-     FillChar(aBuffer,aSize,#0);
-     Index:=0;
-     while assigned(p) and (p^<>#0) do begin
-      while assigned(p) and (p^<>#0) do begin
-       HashState:=(HashState xor TRNLUInt16(WideChar(p^)))*TRNLUInt64(1099511628211);
-       for SubIndex:=0 to SizeOf(TRNLUInt64)-1 do begin
-        PRNLUInt8Array(TRNLPointer(@aBuffer))^[Index]:=HashState shr (SubIndex shl 3);
-        inc(Index);
-        if Index>=aSize then begin
-         Index:=0;
-        end;
-       end;
-       inc(p);
-      end;
-      inc(p);
-     end;
-     result:=true;
-    finally
-     FreeEnvironmentStringsW(TRNLPointer(p));
-    end;
-   end;
-  end;
-  function WindowsCommandLineGetEntropyData(out aBuffer;const aSize:TRNLSizeUInt):boolean;
-  var Index,SubIndex:TRNLSizeUInt;
-      HashState:TRNLUInt64;
-      pp,p:PWideChar;
-  begin
-   result:=false;
-   HashState:=TRNLUInt64(91734284728269012);
-   pp:=GetCommandLineW;
-   if assigned(pp) then begin
-    p:=pp;
-    try
-     FillChar(aBuffer,aSize,#0);
-     Index:=0;
-     while assigned(p) and (p^<>#0) do begin
-      while assigned(p) and (p^<>#0) do begin
-       HashState:=(HashState xor TRNLUInt16(WideChar(p^)))*TRNLUInt64(1099511628211);
-       for SubIndex:=0 to SizeOf(TRNLUInt64)-1 do begin
-        PRNLUInt8Array(TRNLPointer(@aBuffer))^[Index]:=HashState shr (SubIndex shl 3);
-        inc(Index);
-        if Index>=aSize then begin
-         Index:=0;
-        end;
-       end;
-       inc(p);
-      end;
-      inc(p);
-     end;
-     result:=true;
-    finally
-     FreeEnvironmentStringsW(TRNLPointer(p));
-    end;
-   end;
-  end;
-{$elseif defined(Unix) or defined(Posix)}
-  function PosixGetEntropyData(out aBuffer;const aSize:TRNLInt32):boolean;
-  const Paths:array[0..2] of string=('/dev/srandom','/dev/urandom','/dev/random');
-  var Index:TRNLSizeUInt;
-      Path:string;
- {$ifdef fpc}
-      fd:TRNLInt32;
- {$else}
-      FileStream:TFileStream;
- {$endif}
-  begin
-   result:=false;
-   FillChar(aBuffer,aSize,#0);
-   for Index:=low(Paths) to high(Paths) do begin
-    Path:=Paths[Index];
-    try
- {$ifdef fpc}
-     fd:=fpopen(Path,O_RDONLY);
-     if fd>=0 then begin
-      try
-       result:=fpread(fd,aBuffer,aSize)=aSize;
-      finally
-       fpclose(fd);
-      end;
-     end;
- {$else}
-     if FileExists(Path) then begin
-      FileStream:=TFileStream.Create(Path,fmOpenRead or fmShareDenyNone);
-      try
-       result:=FileStream.Read(aBuffer,aSize)=aSize;
-      finally
-       FileStream.Free;
-      end;
-     end;
- {$endif}
-    except
-    end;
-    if result then begin
-     break;
-    end;
-   end;
-  end;
-{$ifend}
-  function GetAdditionalEntropyData(out aBuffer;const aSize:TRNLInt32):boolean;
-  type PRNLRandomGeneratorPCG32=^TRNLRandomGeneratorPCG32;
-       TRNLRandomGeneratorPCG32=record
-        State:TRNLUInt64;
-        Increment:TRNLUInt64;
-       end;
-       PRNLRandomGeneratorSplitMix64=^TRNLRandomGeneratorSplitMix64;
-       TRNLRandomGeneratorSplitMix64=TRNLUInt64;
-       PRNLRandomGeneratorLCG64=^TRNLRandomGeneratorLCG64;
-       TRNLRandomGeneratorLCG64=TRNLUInt64;
-       PRNLRandomGeneratorMWC=^TRNLRandomGeneratorMWC;
-       TRNLRandomGeneratorMWC=record
-        x:TRNLUInt32;
-        y:TRNLUInt32;
-        c:TRNLUInt32;
-       end;
-       PRNLRandomGeneratorXorShift128=^TRNLRandomGeneratorXorShift128;
-       TRNLRandomGeneratorXorShift128=record
-        x,y,z,w:TRNLUInt32;
-       end;
-       PRNLRandomGeneratorXorShift128Plus=^TRNLRandomGeneratorXorShift128Plus;
-       TRNLRandomGeneratorXorShift128Plus=record
-        s:array[0..1] of TRNLUInt64;
-       end;
-       PRNLRandomGeneratorXorShift1024=^TRNLRandomGeneratorXorShift1024;
-       TRNLRandomGeneratorXorShift1024=record
-        s:array[0..15] of TRNLUInt64;
-        p:TRNLInt32;
-       end;
-       PRNLRandomGeneratorCMWC4096=^TRNLRandomGeneratorCMWC4096;
-       TRNLRandomGeneratorCMWC4096=record
-        Q:array[0..4095] of TRNLUInt64;
-        QC:TRNLUInt64;
-        QJ:TRNLUInt64;
-       end;
-       PRNLRandomGeneratorState=^TRNLRandomGeneratorState;
-       TRNLRandomGeneratorState=record
-        LCG64:TRNLRandomGeneratorLCG64;
-        XorShift1024:TRNLRandomGeneratorXorShift1024;
-        CMWC4096:TRNLRandomGeneratorCMWC4096;
-        PCG32:TRNLRandomGeneratorPCG32;
-       end;
-   function PCG32Next(var State:TRNLRandomGeneratorPCG32):TRNLUInt64; {$ifdef caninline}inline;{$endif}
-   var OldState:TRNLUInt64;
-       XorShifted,Rot:TRNLUInt32;
-   begin
-    OldState:=State.State;
-    State.State:=(OldState*TRNLUInt64(6364136223846793005))+(State.Increment or 1);
-    XorShifted:=TRNLUInt64((OldState shr 18) xor OldState) shr 27;
-    Rot:=OldState shr 59;
-    result:=(XorShifted shr rot) or (TRNLUInt64(XorShifted) shl ((-Rot) and 31));
-   end;
-   function SplitMix64Next(var State:TRNLRandomGeneratorSplitMix64):TRNLUInt64; {$ifdef caninline}inline;{$endif}
-   var z:TRNLUInt64;
-   begin
-    State:=State+{$ifndef fpc}TRNLUInt64{$endif}($9e3779b97f4a7c15);
-    z:=State;
-    z:=(z xor (z shr 30))*{$ifndef fpc}TRNLUInt64{$endif}($bf58476d1ce4e5b9);
-    z:=(z xor (z shr 27))*{$ifndef fpc}TRNLUInt64{$endif}($94d049bb133111eb);
-    result:=z xor (z shr 31);
-   end;
-   function LCG64Next(var State:TRNLRandomGeneratorLCG64):TRNLUInt64; {$ifdef caninline}inline;{$endif}
-   begin
-    State:=(State*TRNLUInt64(2862933555777941757))+TRNLUInt64(3037000493);
-    result:=State;
-   end;
-   function XorShift128Next(var State:TRNLRandomGeneratorXorShift128):TRNLUInt32; {$ifdef caninline}inline;{$endif}
-   var t:TRNLUInt32;
-   begin
-    t:=State.x xor (State.x shl 11);
-    State.x:=State.y;
-    State.y:=State.z;
-    State.z:=State.w;
-    State.w:=(State.w xor (State.w shr 19)) xor (t xor (t shr 8));
-    result:=State.w;
-   end;
-   function XorShift128PlusNext(var State:TRNLRandomGeneratorXorShift128Plus):TRNLUInt64; {$ifdef caninline}inline;{$endif}
-   var s0,s1:TRNLUInt64;
-   begin
-    s1:=State.s[0];
-    s0:=State.s[1];
-    State.s[0]:=s0;
-    s1:=s1 xor (s1 shl 23);
-    State.s[1]:=((s1 xor s0) xor (s1 shr 18)) xor (s0 shr 5);
-    result:=State.s[1]+s0;
-   end;
-   procedure XorShift128PlusJump(var State:TRNLRandomGeneratorXorShift128Plus);
-   const Jump:array[0..1] of TRNLUInt64=
-          (TRNLUInt64($8a5cd789635d2dff),
-           TRNLUInt64($121fd2155c472f96));
-   var i,b:TRNLSizeInt;
-       s0,s1:TRNLUInt64;
-   begin
-    s0:=0;
-    s1:=0;
-    for i:=0 to 1 do begin
-     for b:=0 to 63 do begin
-      if (Jump[i] and TRNLUInt64(TRNLUInt64(1) shl b))<>0 then begin
-       s0:=s0 xor State.s[0];
-       s1:=s1 xor State.s[1];
-      end;
-      XorShift128PlusNext(State);
-     end;
-    end;
-    State.s[0]:=s0;
-    State.s[1]:=s1;
-   end;
-   function XorShift1024Next(var State:TRNLRandomGeneratorXorShift1024):TRNLUInt64; {$ifdef caninline}inline;{$endif}
-   var s0,s1:TRNLUInt64;
-   begin
-    s0:=State.s[State.p and 15];
-    State.p:=(State.p+1) and 15;
-    s1:=State.s[State.p];
-    s1:=s1 xor (s1 shl 31);
-    State.s[State.p]:=((s1 xor s0) xor (s1 shr 11)) xor (s0 shr 30);
-    result:=State.s[State.p]*TRNLUInt64(1181783497276652981);
-   end;
-   procedure XorShift1024Jump(var State:TRNLRandomGeneratorXorShift1024);
-   const Jump:array[0..15] of TRNLUInt64=
-          (TRNLUInt64($84242f96eca9c41d),
-           TRNLUInt64($a3c65b8776f96855),
-           TRNLUInt64($5b34a39f070b5837),
-           TRNLUInt64($4489affce4f31a1e),
-           TRNLUInt64($2ffeeb0a48316f40),
-           TRNLUInt64($dc2d9891fe68c022),
-           TRNLUInt64($3659132bb12fea70),
-           TRNLUInt64($aac17d8efa43cab8),
-           TRNLUInt64($c4cb815590989b13),
-           TRNLUInt64($5ee975283d71c93b),
-           TRNLUInt64($691548c86c1bd540),
-           TRNLUInt64($7910c41d10a1e6a5),
-           TRNLUInt64($0b5fc64563b3e2a8),
-           TRNLUInt64($047f7684e9fc949d),
-           TRNLUInt64($b99181f2d8f685ca),
-           TRNLUInt64($284600e3f30e38c3));
-   var i,b,j:TRNLSizeInt;
-       t:array[0..15] of TRNLUInt64;
-   begin
-    for i:=0 to 15 do begin
-     t[i]:=0;
-    end;
-    for i:=0 to 15 do begin
-     for b:=0 to 63 do begin
-      if (Jump[i] and TRNLUInt64(TRNLUInt64(1) shl b))<>0 then begin
-       for j:=0 to 15 do begin
-        t[j]:=t[j] xor State.s[(j+State.p) and 15];
-       end;
-      end;
-      XorShift1024Next(State);
-     end;
-    end;
-    for i:=0 to 15 do begin
-     State.s[(i+State.p) and 15]:=t[i];
-    end;
-   end;
-   function CMWC4096Next(var State:TRNLRandomGeneratorCMWC4096):TRNLUInt64; {$ifdef caninline}inline;{$endif}
-   var x,t:TRNLUInt64;
-   begin
-    State.QJ:=(State.QJ+1) and high(State.Q);
-    x:=State.Q[State.QJ];
-    t:=(x shl 58)+State.QC;
-    State.QC:=x shr 6;
-    inc(t,x);
-    if x<t then begin
-     inc(State.QC);
-    end;
-    State.Q[State.QJ]:=t;
-    result:=t;
-   end;
-  const CountStateQWords=(SizeOf(TRNLRandomGeneratorState) div SizeOf(TRNLUInt64));
-  type PStateQWords=^TStateQWords;
-       TStateQWords=array[0..CountStateQWords-1] of TRNLUInt64;
-  var Index,Remain,ToDo:TRNLSizeUInt;
-      UnixTimeInMilliSeconds:TRNLInt64;
-      SplitMix64,Value:TRNLUInt64;
-      State:PRNLRandomGeneratorState;
-  begin
-   GetMem(State,SizeOf(TRNLRandomGeneratorState));
-   try
-    FillChar(State^,SizeOf(TRNLRandomGeneratorState),#0);
-    UnixTimeInMilliSeconds:=round((SysUtils.Now-25569.0)*86400000.0);
-    SplitMix64:=TRNLUInt64(UnixTimeInMilliSeconds) xor TRNLUInt64(TRNLUInt64($7a5cde814c2a9d21){$ifdef Windows}+TRNLUInt64(GetTickCount64){$endif});
-{$if defined(Windows)}
-    QueryPerformanceFrequency(TRNLInt64(PStateQWords(TRNLPointer(State))^[0]));
-    for Index:=1 to CountStateQWords-1 do begin
-     QueryPerformanceCounter(TRNLInt64(PStateQWords(TRNLPointer(State))^[Index]));
-    end;
-{$else}
-    for Index:=0 to CountStateQWords-1 do begin
-     PStateQWords(TRNLPointer(State))^[Index]:=0;
-    end;
-{$ifend}
-{$if defined(CPU386)or defined(CPUX64)}
-    if x86_rdseed_support then begin
-     for Index:=0 to CountStateQWords-1 do begin
-      PStateQWords(TRNLPointer(State))^[Index]:=PStateQWords(TRNLPointer(State))^[Index] xor
-                                                x86_rdseed_ui64;
-     end;
-    end else if x86_rdrand_support then begin
-     for Index:=0 to CountStateQWords-1 do begin
-      PStateQWords(TRNLPointer(State))^[Index]:=PStateQWords(TRNLPointer(State))^[Index] xor
-                                                x86_rdrand_ui64;
-     end;
-    end;
-{$ifend}
-    for Index:=0 to CountStateQWords-1 do begin
-     PStateQWords(TRNLPointer(State))^[Index]:=PStateQWords(TRNLPointer(State))^[Index] xor
-                                               SplitMix64Next(SplitMix64);
-    end;
-    XorShift1024Jump(State^.XorShift1024);
-    FillChar(aBuffer,aSize,#0);
-    Index:=0;
-    Remain:=aSize;
-    while Remain>0 do begin
-     if Remain<SizeOf(TRNLUInt64) then begin
-      ToDo:=Remain;
-     end else begin
-      ToDo:=SizeOf(TRNLUInt64);
-     end;
-     Value:=(LCG64Next(State^.LCG64)+
-             XorShift1024Next(State^.XorShift1024)+
-             CMWC4096Next(State^.CMWC4096)) xor
-            PCG32Next(State^.PCG32);
-{$if defined(CPU386) or defined(CPUX64)}
-     if x86_rdrand_support then begin
-      Value:=Value xor x86_rdrand_ui64;
-     end;
-{$ifend}
-     Move(Value,PRNLUInt8Array(TRNLPointer(@aBuffer))^[Index],ToDo);
-     inc(Index,ToDo);
-     dec(Remain,ToDo);
-    end;
-   finally
-    FillChar(State^,SizeOf(TRNLRandomGeneratorState),#0);
-    FreeMem(State);
-   end;
-   result:=true;
-  end;
-  function GUIDGetEntropyData(out aBuffer;const aSize:TRNLSizeUInt):boolean;
-  var Index,Remain,ToDo:TRNLSizeUInt;
-      Value:TGUID;
-{$if not (defined(Windows) or defined(fpc))}
-      OK:boolean;
-      fs:TFileStream;
-      s:TRNLRawByteString;
-{$ifend}
-  begin
-   FillChar(aBuffer,aSize,#0);
-   Index:=0;
-   Remain:=aSize;
-   while Remain>0 do begin
-    if Remain<SizeOf(TGUID) then begin
-     ToDo:=Remain;
-    end else begin
-     ToDo:=SizeOf(TGUID);
-    end;
-{$if defined(fpc)}
-    // FPC's RTL is doing already the right thing
-    CreateGUID(Value);
-{$elseif defined(Windows)}
-    CoCreateGUID(Value);
-{$else}
-    OK:=false;
-    if (not OK) and FileExists('/proc/sys/kernel/random/uuid') then begin
-     try
-      fs:=TFileStream.Create('/proc/sys/kernel/random/uuid',fmOpenRead or fmShareDenyNone);
-      s:='';
-      try
-       SetLength(s,36);
-       if fs.Read(s[1],36)=36 then begin
-        Value:=StringToGUID('{'+s+'}');
-        OK:=true;
-       end;
-      finally
-       SetLength(s,0);
-      end;
-     except
-     end;
-    end;
-    if not OK then begin
-     CreateGUID(Value);
-    end;
-{$ifend}
-    Move(Value,PRNLUInt8Array(TRNLPointer(@aBuffer))^[Index],ToDo);
-    inc(Index,ToDo);
-    dec(Remain,ToDo);
-   end;
-   result:=true;
-  end;
- var TemporaryEntropyData:TRNLRandomGeneratorEntropyData;
-  procedure MixEntropyData;
-  var Index:TRNLSizeUInt;
-  begin
-   for Index:=0 to SizeOf(TRNLRandomGeneratorEntropyData)-1 do begin
-    EntropyData[Index]:=EntropyData[Index] xor TemporaryEntropyData[Index];
-   end;
-  end;
- begin
-  FillChar(EntropyData,SizeOf(TRNLRandomGeneratorEntropyData),#0);
-  FillChar(TemporaryEntropyData,SizeOf(TRNLRandomGeneratorEntropyData),#0);
-{$if defined(Windows)}
-  if WindowsGetEntropyData(TemporaryEntropyData,SizeOf(TRNLRandomGeneratorEntropyData)) then begin
-   MixEntropyData;
-  end else begin
-   if WindowsEnvironmentStringsGetEntropyData(TemporaryEntropyData,SizeOf(TRNLRandomGeneratorEntropyData)) then begin
-    MixEntropyData;
-   end;
-   if WindowsCommandLineGetEntropyData(TemporaryEntropyData,SizeOf(TRNLRandomGeneratorEntropyData)) then begin
-    MixEntropyData;
-   end;
-   if GUIDGetEntropyData(TemporaryEntropyData,SizeOf(TRNLRandomGeneratorEntropyData)) then begin
-    MixEntropyData;
-   end;
-  end;
-{$elseif defined(Unix) or defined(Posix)}
-  if PosixGetEntropyData(TemporaryEntropyData,SizeOf(TRNLRandomGeneratorEntropyData)) then begin
-   MixEntropyData;
-  end;
-  if GUIDGetEntropyData(TemporaryEntropyData,SizeOf(TRNLRandomGeneratorEntropyData)) then begin
-   MixEntropyData;
-  end;
-{$else}
-  if GUIDGetEntropyData(TemporaryEntropyData,SizeOf(TRNLRandomGeneratorEntropyData)) then begin
-   MixEntropyData;
-  end;
-{$ifend}
-  if GetAdditionalEntropyData(TemporaryEntropyData,SizeOf(TRNLRandomGeneratorEntropyData)) then begin
-   MixEntropyData;
-  end;
-  FillChar(TemporaryEntropyData,SizeOf(TRNLRandomGeneratorEntropyData),#0);
- end;
-begin
- EntropyData[0]:=0;
- GetEntropyData;
- if not fInitialized then begin
-  fInitialized:=true;
-  Initialize(EntropyData,SizeOf(TRNLRandomGeneratorEntropyData));
- end else begin
-  Rekey(EntropyData,SizeOf(TRNLRandomGeneratorEntropyData));
- end;
- FillChar(EntropyData,SizeOf(TRNLRandomGeneratorEntropyData),#0);
- FillChar(fBuffer,SizeOf(TRNLRandomGeneratorBuffer),#0);
- fPosition:=SizeOf(TRNLRandomGeneratorSeed);
- fHave:=0;
- fCount:=1600000;
-end;
-
-procedure TRNLRandomGenerator.ReseedIfNeeded(const aCount:TRNLSizeUInt);
-begin
- if (fCount<=aCount) or not fInitialized then begin
-  Reseed;
- end;
- if fCount<=aCount then begin
-  fCount:=0;
- end else begin
-  dec(fCount,aCount);
- end;
-end;
-
-procedure TRNLRandomGenerator.GetRandomBytes(out aLocation;const aCount:TRNLSizeUInt);
-var Index,Remain,ToDo:TRNLSizeUInt;
-begin
- ReseedIfNeeded(aCount);
- Index:=0;
- Remain:=aCount;
- while Remain>0 do begin
-  if fHave>0 then begin
-   if Remain<fHave then begin
-    ToDo:=Remain;
-   end else begin
-    ToDo:=fHave;
-   end;
-   Move(PRNLUInt8Array(TRNLPointer(@fBuffer))^[fPosition],
-        PRNLUInt8Array(TRNLPointer(@aLocation))^[Index],
-        ToDo);
-   inc(fPosition,ToDo);
-   dec(fHave,ToDo);
-   inc(Index,ToDo);
-   dec(Remain,ToDo);
-  end;
-  if fHave=0 then begin
-   Rekey(TRNLPointer(nil)^,0);
-  end;
- end;
-end;
-
-function TRNLRandomGenerator.GetUInt32:TRNLUInt32;
-begin
- GetRandomBytes(result,SizeOf(TRNLUInt32));
-end;
-
-function TRNLRandomGenerator.GetUInt64:TRNLUInt64;
-begin
- GetRandomBytes(result,SizeOf(TRNLUInt64));
-end;
-
-function TRNLRandomGenerator.GetBoundedUInt32(const aBound:TRNLUInt32):TRNLUInt32;
-begin
- if (aBound and TRNLUInt32($ffff0000))=0 then begin
-  result:=((GetUInt32 shr 16)*aBound) shr 16;
- end else begin
-  result:=(TRNLUInt64(GetUInt32)*aBound) shr 32;
- end;
-end;
-
-function TRNLRandomGenerator.GetUniformBoundedUInt32(const aBound:TRNLUInt32):TRNLUInt32;
-var Minimum:TRNLUInt32;
-begin
- if aBound>1 then begin
-  Minimum:=TRNLUInt64($100000000) mod aBound;
-  repeat
-   result:=GetUInt32;
-  until result>=Minimum;
-  result:=result mod aBound;
- end else begin
-  result:=0;
- end;
-end;
-
-function TRNLRandomGenerator.GetFloat:single; // -1.0 .. 1.0
-var t:TRNLUInt32;
-begin
- t:=GetUInt32;
- t:=(((t shr 9) and $7fffff)+((t shr 8) and 1)) or $40000000;
- result:=single(TRNLPointer(@t)^)-3.0;
-end;
-
-function TRNLRandomGenerator.GetAbsoluteFloat:single; // 0.0 .. 1.0
-var t:TRNLUInt32;
-begin
- t:=GetUInt32;
- t:=(((t shr 10) and $3fffff)+((t shr 9) and 1)) or $40000000;
- result:=single(TRNLPointer(@t)^)-2.0;
-end;
-
-function TRNLRandomGenerator.GetDouble:double; // -1.0 .. 1.0
-var t:TRNLUInt64;
-begin
- t:=GetUInt64;
- t:=(((t shr 12) and $fffffffffffff)+((t shr 11) and 1)) or $4000000000000000;
- result:=double(TRNLPointer(@t)^)-3.0;
-end;
-
-function TRNLRandomGenerator.GetAbsoluteDouble:double; // 0.0 .. 1.0
-var t:int64;
-begin
- t:=GetUInt64;
- t:=(((t shr 13) and $7ffffffffffff)+((t shr 12) and 1)) or $4000000000000000;
- result:=double(TRNLPointer(@t)^)-2.0;
-end;
-
-function TRNLRandomGenerator.GetGuassianFloat:single; // -1.0 .. 1.0
-var x1,x2,w:single;
-    i:TRNLUInt32;
-begin
- if fGuassianFloatUseLast then begin
-  fGuassianFloatUseLast:=false;
-  result:=fGuassianFloatLast;
- end else begin
-  i:=0;
-  repeat
-   x1:=GetFloat;
-   x2:=GetFloat;
-   w:=sqr(x1)+sqr(x2);
-   inc(i);
-  until ((i and $80000000)<>0) or (w<1.0);
-  if (i and $80000000)<>0 then begin
-   result:=x1;
-   fGuassianFloatLast:=x2;
-   fGuassianFloatUseLast:=true;
-  end else if abs(w)<1e-18 then begin
-   result:=0.0;
-  end else begin
-   w:=sqrt(((-2.0)*ln(w))/w);
-   result:=x1*w;
-   fGuassianFloatLast:=x2*w;
-   fGuassianFloatUseLast:=true;
-  end;
- end;
- if result<-1.0 then begin
-  result:=-1.0;
- end else if result>1.0 then begin
-  result:=1.0;
- end;
-end;
-
-function TRNLRandomGenerator.GetAbsoluteGuassianFloat:single; // 0.0 .. 1.0
-begin
- result:=(GetGuassianFloat+1.0)*0.5;
- if result<0.0 then begin
-  result:=0.0;
- end else if result>1.0 then begin
-  result:=1.0;
- end;
-end;
-
-function TRNLRandomGenerator.GetGuassianDouble:double; // -1.0 .. 1.0
-var x1,x2,w:double;
-    i:TRNLUInt32;
-begin
- if fGuassianDoubleUseLast then begin
-  fGuassianDoubleUseLast:=false;
-  result:=fGuassianDoubleLast;
- end else begin
-  i:=0;
-  repeat
-   x1:=GetDouble;
-   x2:=GetDouble;
-   w:=sqr(x1)+sqr(x2);
-   inc(i);
-  until ((i and $80000000)<>0) or (w<1.0);
-  if (i and $80000000)<>0 then begin
-   result:=x1;
-   fGuassianDoubleLast:=x2;
-   fGuassianDoubleUseLast:=true;
-  end else if abs(w)<1e-18 then begin
-   result:=0.0;
-  end else begin
-   w:=sqrt(((-2.0)*ln(w))/w);
-   result:=x1*w;
-   fGuassianDoubleLast:=x2*w;
-   fGuassianDoubleUseLast:=true;
-  end;
- end;
- if result<-1.0 then begin
-  result:=-1.0;
- end else if result>1.0 then begin
-  result:=1.0;
- end;
-end;
-
-function TRNLRandomGenerator.GetAbsoluteGuassianDouble:double; // 0.0 .. 1.0
-begin
- result:=(GetGuassianDouble+1.0)*0.5;
- if result<0.0 then begin
-  result:=0.0;
- end else if result>1.0 then begin
-  result:=1.0;
- end;
-end;
-
-function TRNLRandomGenerator.GetGuassian(const aBound:TRNLUInt32):TRNLUInt32;
-begin
- result:=round(GetAbsoluteGuassianDouble*(aBound-0.98725));
-end;
-
 class operator TRNLTime.Implicit(const a:TRNLUInt64):TRNLTime;
 begin
  result.fValue:=a;
@@ -9991,6 +9253,744 @@ begin
 end;
 
 {$ifend}
+
+{$if defined(Windows)}
+type HCRYPTPROV=PRNLUInt32;
+
+const PROV_RSA_FULL=1;
+      CRYPT_VERIFYCONTEXT=$f0000000;
+      CRYPT_SILENT=$00000040;
+      CRYPT_NEWKEYSET=$00000008;
+
+function CryptAcquireContext(var phProv:HCRYPTPROV;pszContainer:PAnsiChar;pszProvider:PAnsiChar;dwProvType:TRNLUInt32;dwFlags:TRNLUInt32):LONGBOOL; stdcall; external advapi32 name 'CryptAcquireContextA';
+function CryptReleaseContext(hProv:HCRYPTPROV;dwFlags:TRNLUInt32):BOOL; stdcall; external advapi32 name 'CryptReleaseContext';
+function CryptGenRandom(hProv:HCRYPTPROV;dwLen:TRNLUInt32;pbBuffer:Pointer):BOOL; stdcall; external advapi32 name 'CryptGenRandom';
+
+function CoCreateGuid(var aGuid:TGUID):HResult; stdcall; external 'ole32.dll';
+{$ifend}
+
+constructor TRNLRandomGenerator.Create;
+begin
+ inherited Create;
+{$if defined(Windows)}
+ fWindowsCryptProviderInitialized:=false;
+ if CryptAcquireContext(HCRYPTPROV(fWindowsCryptProvider),nil,nil,PROV_RSA_FULL,CRYPT_VERIFYCONTEXT) then begin
+  fWindowsCryptProviderInitialized:=true;
+ end else if GetLastError=TRNLUInt32(NTE_BAD_KEYSET) then begin
+  if CryptAcquireContext(HCRYPTPROV(fWindowsCryptProvider),nil,nil,PROV_RSA_FULL,CRYPT_NEWKEYSET) then begin
+   fWindowsCryptProviderInitialized:=true;
+  end;
+ end;
+{$ifend}
+ fPosition:=0;
+ fHave:=0;
+ fInitialized:=false;
+ fGuassianFloatUseLast:=false;
+ fGuassianDoubleUseLast:=false;
+end;
+
+destructor TRNLRandomGenerator.Destroy;
+begin
+{$if defined(Windows)}
+ if fWindowsCryptProviderInitialized then begin
+  fWindowsCryptProviderInitialized:=false;
+  CryptReleaseContext(HCRYPTPROV(fWindowsCryptProvider),0);
+ end;
+{$ifend}
+ inherited Destroy;
+end;
+
+procedure TRNLRandomGenerator.Initialize(const aData;const aDataLength:TRNLSizeUInt);
+begin
+ if aDataLength>=SizeOf(TRNLRandomGeneratorSeed) then begin
+  fChaCha20Context.XChaCha20Initialize(PRNLRandomGeneratorSeed(TRNLPointer(@aData))^.Key,
+                                       PRNLRandomGeneratorSeed(TRNLPointer(@aData))^.Nonce,
+                                       0);
+ end;
+end;
+
+procedure TRNLRandomGenerator.Rekey(const aData;const aDataLength:TRNLSizeUInt);
+var Index:TRNLSizeUInt;
+begin
+ fChaCha20Context.Process(fBuffer,fBuffer,SizeOf(TRNLRandomGeneratorBuffer));
+ if aDataLength>0 then begin
+  for Index:=1 to Min(aDataLength,SizeOf(TRNLRandomGeneratorSeed)) do begin
+   fBuffer[Index]:=fBuffer[Index] xor PRNLUInt8Array(TRNLPointer(@aData))^[Index];
+  end;
+ end;
+ Initialize(fBuffer[0],SizeOf(TRNLRandomGeneratorSeed));
+ FillChar(fBuffer[0],SizeOf(TRNLRandomGeneratorSeed),#0);
+ fPosition:=SizeOf(TRNLRandomGeneratorSeed);
+ fHave:=SizeOf(TRNLRandomGeneratorBuffer)-SizeOf(TRNLRandomGeneratorSeed);
+end;
+
+procedure TRNLRandomGenerator.Reseed;
+var EntropyData:TRNLRandomGeneratorEntropyData;
+ procedure GetEntropyData;
+{$if defined(Windows)}
+  function WindowsGetEntropyData(out aBuffer;const aSize:TRNLSizeUInt):boolean;
+  begin
+   if fWindowsCryptProviderInitialized then begin
+    FillChar(aBuffer,aSize,#0);
+    result:=CryptGenRandom(HCRYPTPROV(fWindowsCryptProvider),aSize,@aBuffer);
+   end else begin
+    result:=false;
+   end;
+  end;
+  function WindowsEnvironmentStringsGetEntropyData(out aBuffer;const aSize:TRNLSizeUInt):boolean;
+  var Index,SubIndex:TRNLSizeUInt;
+      HashState:TRNLUInt64;
+      pp,p:PWideChar;
+  begin
+   result:=false;
+   HashState:=TRNLUInt64(4695981039346656037);
+   pp:=GetEnvironmentStringsW;
+   if assigned(pp) then begin
+    p:=pp;
+    try
+     FillChar(aBuffer,aSize,#0);
+     Index:=0;
+     while assigned(p) and (p^<>#0) do begin
+      while assigned(p) and (p^<>#0) do begin
+       HashState:=(HashState xor TRNLUInt16(WideChar(p^)))*TRNLUInt64(1099511628211);
+       for SubIndex:=0 to SizeOf(TRNLUInt64)-1 do begin
+        PRNLUInt8Array(TRNLPointer(@aBuffer))^[Index]:=HashState shr (SubIndex shl 3);
+        inc(Index);
+        if Index>=aSize then begin
+         Index:=0;
+        end;
+       end;
+       inc(p);
+      end;
+      inc(p);
+     end;
+     result:=true;
+    finally
+     FreeEnvironmentStringsW(TRNLPointer(p));
+    end;
+   end;
+  end;
+  function WindowsCommandLineGetEntropyData(out aBuffer;const aSize:TRNLSizeUInt):boolean;
+  var Index,SubIndex:TRNLSizeUInt;
+      HashState:TRNLUInt64;
+      pp,p:PWideChar;
+  begin
+   result:=false;
+   HashState:=TRNLUInt64(91734284728269012);
+   pp:=GetCommandLineW;
+   if assigned(pp) then begin
+    p:=pp;
+    try
+     FillChar(aBuffer,aSize,#0);
+     Index:=0;
+     while assigned(p) and (p^<>#0) do begin
+      while assigned(p) and (p^<>#0) do begin
+       HashState:=(HashState xor TRNLUInt16(WideChar(p^)))*TRNLUInt64(1099511628211);
+       for SubIndex:=0 to SizeOf(TRNLUInt64)-1 do begin
+        PRNLUInt8Array(TRNLPointer(@aBuffer))^[Index]:=HashState shr (SubIndex shl 3);
+        inc(Index);
+        if Index>=aSize then begin
+         Index:=0;
+        end;
+       end;
+       inc(p);
+      end;
+      inc(p);
+     end;
+     result:=true;
+    finally
+     FreeEnvironmentStringsW(TRNLPointer(p));
+    end;
+   end;
+  end;
+{$elseif defined(Unix) or defined(Posix)}
+  function PosixGetEntropyData(out aBuffer;const aSize:TRNLInt32):boolean;
+  const Paths:array[0..2] of string=('/dev/srandom','/dev/urandom','/dev/random');
+  var Index:TRNLSizeUInt;
+      Path:string;
+ {$ifdef fpc}
+      fd:TRNLInt32;
+ {$else}
+      FileStream:TFileStream;
+ {$endif}
+  begin
+   result:=false;
+   FillChar(aBuffer,aSize,#0);
+   for Index:=low(Paths) to high(Paths) do begin
+    Path:=Paths[Index];
+    try
+ {$ifdef fpc}
+     fd:=fpopen(Path,O_RDONLY);
+     if fd>=0 then begin
+      try
+       result:=fpread(fd,aBuffer,aSize)=aSize;
+      finally
+       fpclose(fd);
+      end;
+     end;
+ {$else}
+     if FileExists(Path) then begin
+      FileStream:=TFileStream.Create(Path,fmOpenRead or fmShareDenyNone);
+      try
+       result:=FileStream.Read(aBuffer,aSize)=aSize;
+      finally
+       FileStream.Free;
+      end;
+     end;
+ {$endif}
+    except
+    end;
+    if result then begin
+     break;
+    end;
+   end;
+  end;
+{$ifend}
+  function GetAdditionalEntropyData(out aBuffer;const aSize:TRNLInt32):boolean;
+  type PRNLRandomGeneratorPCG32=^TRNLRandomGeneratorPCG32;
+       TRNLRandomGeneratorPCG32=record
+        State:TRNLUInt64;
+        Increment:TRNLUInt64;
+       end;
+       PRNLRandomGeneratorSplitMix64=^TRNLRandomGeneratorSplitMix64;
+       TRNLRandomGeneratorSplitMix64=TRNLUInt64;
+       PRNLRandomGeneratorLCG64=^TRNLRandomGeneratorLCG64;
+       TRNLRandomGeneratorLCG64=TRNLUInt64;
+       PRNLRandomGeneratorMWC=^TRNLRandomGeneratorMWC;
+       TRNLRandomGeneratorMWC=record
+        x:TRNLUInt32;
+        y:TRNLUInt32;
+        c:TRNLUInt32;
+       end;
+       PRNLRandomGeneratorXorShift128=^TRNLRandomGeneratorXorShift128;
+       TRNLRandomGeneratorXorShift128=record
+        x,y,z,w:TRNLUInt32;
+       end;
+       PRNLRandomGeneratorXorShift128Plus=^TRNLRandomGeneratorXorShift128Plus;
+       TRNLRandomGeneratorXorShift128Plus=record
+        s:array[0..1] of TRNLUInt64;
+       end;
+       PRNLRandomGeneratorXorShift1024=^TRNLRandomGeneratorXorShift1024;
+       TRNLRandomGeneratorXorShift1024=record
+        s:array[0..15] of TRNLUInt64;
+        p:TRNLInt32;
+       end;
+       PRNLRandomGeneratorCMWC4096=^TRNLRandomGeneratorCMWC4096;
+       TRNLRandomGeneratorCMWC4096=record
+        Q:array[0..4095] of TRNLUInt64;
+        QC:TRNLUInt64;
+        QJ:TRNLUInt64;
+       end;
+       PRNLRandomGeneratorState=^TRNLRandomGeneratorState;
+       TRNLRandomGeneratorState=record
+        LCG64:TRNLRandomGeneratorLCG64;
+        XorShift1024:TRNLRandomGeneratorXorShift1024;
+        CMWC4096:TRNLRandomGeneratorCMWC4096;
+        PCG32:TRNLRandomGeneratorPCG32;
+       end;
+   function PCG32Next(var State:TRNLRandomGeneratorPCG32):TRNLUInt64; {$ifdef caninline}inline;{$endif}
+   var OldState:TRNLUInt64;
+       XorShifted,Rot:TRNLUInt32;
+   begin
+    OldState:=State.State;
+    State.State:=(OldState*TRNLUInt64(6364136223846793005))+(State.Increment or 1);
+    XorShifted:=TRNLUInt64((OldState shr 18) xor OldState) shr 27;
+    Rot:=OldState shr 59;
+    result:=(XorShifted shr rot) or (TRNLUInt64(XorShifted) shl ((-Rot) and 31));
+   end;
+   function SplitMix64Next(var State:TRNLRandomGeneratorSplitMix64):TRNLUInt64; {$ifdef caninline}inline;{$endif}
+   var z:TRNLUInt64;
+   begin
+    State:=State+{$ifndef fpc}TRNLUInt64{$endif}($9e3779b97f4a7c15);
+    z:=State;
+    z:=(z xor (z shr 30))*{$ifndef fpc}TRNLUInt64{$endif}($bf58476d1ce4e5b9);
+    z:=(z xor (z shr 27))*{$ifndef fpc}TRNLUInt64{$endif}($94d049bb133111eb);
+    result:=z xor (z shr 31);
+   end;
+   function LCG64Next(var State:TRNLRandomGeneratorLCG64):TRNLUInt64; {$ifdef caninline}inline;{$endif}
+   begin
+    State:=(State*TRNLUInt64(2862933555777941757))+TRNLUInt64(3037000493);
+    result:=State;
+   end;
+   function XorShift128Next(var State:TRNLRandomGeneratorXorShift128):TRNLUInt32; {$ifdef caninline}inline;{$endif}
+   var t:TRNLUInt32;
+   begin
+    t:=State.x xor (State.x shl 11);
+    State.x:=State.y;
+    State.y:=State.z;
+    State.z:=State.w;
+    State.w:=(State.w xor (State.w shr 19)) xor (t xor (t shr 8));
+    result:=State.w;
+   end;
+   function XorShift128PlusNext(var State:TRNLRandomGeneratorXorShift128Plus):TRNLUInt64; {$ifdef caninline}inline;{$endif}
+   var s0,s1:TRNLUInt64;
+   begin
+    s1:=State.s[0];
+    s0:=State.s[1];
+    State.s[0]:=s0;
+    s1:=s1 xor (s1 shl 23);
+    State.s[1]:=((s1 xor s0) xor (s1 shr 18)) xor (s0 shr 5);
+    result:=State.s[1]+s0;
+   end;
+   procedure XorShift128PlusJump(var State:TRNLRandomGeneratorXorShift128Plus);
+   const Jump:array[0..1] of TRNLUInt64=
+          (TRNLUInt64($8a5cd789635d2dff),
+           TRNLUInt64($121fd2155c472f96));
+   var i,b:TRNLSizeInt;
+       s0,s1:TRNLUInt64;
+   begin
+    s0:=0;
+    s1:=0;
+    for i:=0 to 1 do begin
+     for b:=0 to 63 do begin
+      if (Jump[i] and TRNLUInt64(TRNLUInt64(1) shl b))<>0 then begin
+       s0:=s0 xor State.s[0];
+       s1:=s1 xor State.s[1];
+      end;
+      XorShift128PlusNext(State);
+     end;
+    end;
+    State.s[0]:=s0;
+    State.s[1]:=s1;
+   end;
+   function XorShift1024Next(var State:TRNLRandomGeneratorXorShift1024):TRNLUInt64; {$ifdef caninline}inline;{$endif}
+   var s0,s1:TRNLUInt64;
+   begin
+    s0:=State.s[State.p and 15];
+    State.p:=(State.p+1) and 15;
+    s1:=State.s[State.p];
+    s1:=s1 xor (s1 shl 31);
+    State.s[State.p]:=((s1 xor s0) xor (s1 shr 11)) xor (s0 shr 30);
+    result:=State.s[State.p]*TRNLUInt64(1181783497276652981);
+   end;
+   procedure XorShift1024Jump(var State:TRNLRandomGeneratorXorShift1024);
+   const Jump:array[0..15] of TRNLUInt64=
+          (TRNLUInt64($84242f96eca9c41d),
+           TRNLUInt64($a3c65b8776f96855),
+           TRNLUInt64($5b34a39f070b5837),
+           TRNLUInt64($4489affce4f31a1e),
+           TRNLUInt64($2ffeeb0a48316f40),
+           TRNLUInt64($dc2d9891fe68c022),
+           TRNLUInt64($3659132bb12fea70),
+           TRNLUInt64($aac17d8efa43cab8),
+           TRNLUInt64($c4cb815590989b13),
+           TRNLUInt64($5ee975283d71c93b),
+           TRNLUInt64($691548c86c1bd540),
+           TRNLUInt64($7910c41d10a1e6a5),
+           TRNLUInt64($0b5fc64563b3e2a8),
+           TRNLUInt64($047f7684e9fc949d),
+           TRNLUInt64($b99181f2d8f685ca),
+           TRNLUInt64($284600e3f30e38c3));
+   var i,b,j:TRNLSizeInt;
+       t:array[0..15] of TRNLUInt64;
+   begin
+    for i:=0 to 15 do begin
+     t[i]:=0;
+    end;
+    for i:=0 to 15 do begin
+     for b:=0 to 63 do begin
+      if (Jump[i] and TRNLUInt64(TRNLUInt64(1) shl b))<>0 then begin
+       for j:=0 to 15 do begin
+        t[j]:=t[j] xor State.s[(j+State.p) and 15];
+       end;
+      end;
+      XorShift1024Next(State);
+     end;
+    end;
+    for i:=0 to 15 do begin
+     State.s[(i+State.p) and 15]:=t[i];
+    end;
+   end;
+   function CMWC4096Next(var State:TRNLRandomGeneratorCMWC4096):TRNLUInt64; {$ifdef caninline}inline;{$endif}
+   var x,t:TRNLUInt64;
+   begin
+    State.QJ:=(State.QJ+1) and high(State.Q);
+    x:=State.Q[State.QJ];
+    t:=(x shl 58)+State.QC;
+    State.QC:=x shr 6;
+    inc(t,x);
+    if x<t then begin
+     inc(State.QC);
+    end;
+    State.Q[State.QJ]:=t;
+    result:=t;
+   end;
+  const CountStateQWords=(SizeOf(TRNLRandomGeneratorState) div SizeOf(TRNLUInt64));
+  type PStateQWords=^TStateQWords;
+       TStateQWords=array[0..CountStateQWords-1] of TRNLUInt64;
+  var Index,Remain,ToDo:TRNLSizeUInt;
+      UnixTimeInMilliSeconds:TRNLInt64;
+      SplitMix64,Value:TRNLUInt64;
+      State:PRNLRandomGeneratorState;
+  begin
+   GetMem(State,SizeOf(TRNLRandomGeneratorState));
+   try
+    FillChar(State^,SizeOf(TRNLRandomGeneratorState),#0);
+    UnixTimeInMilliSeconds:=round((SysUtils.Now-25569.0)*86400000.0);
+    SplitMix64:=TRNLUInt64(UnixTimeInMilliSeconds) xor TRNLUInt64(TRNLUInt64($7a5cde814c2a9d21){$ifdef Windows}+TRNLUInt64(GetTickCount64){$endif});
+{$if defined(Windows)}
+    QueryPerformanceFrequency(TRNLUInt64(PStateQWords(TRNLPointer(State))^[0]));
+    for Index:=1 to CountStateQWords-1 do begin
+     QueryPerformanceCounter(TRNLUInt64(PStateQWords(TRNLPointer(State))^[Index]));
+    end;
+{$else}
+    for Index:=0 to CountStateQWords-1 do begin
+     PStateQWords(TRNLPointer(State))^[Index]:=0;
+    end;
+{$ifend}
+{$if defined(CPU386)or defined(CPUX64)}
+    if x86_rdseed_support then begin
+     for Index:=0 to CountStateQWords-1 do begin
+      PStateQWords(TRNLPointer(State))^[Index]:=PStateQWords(TRNLPointer(State))^[Index] xor
+                                                x86_rdseed_ui64;
+     end;
+    end else if x86_rdrand_support then begin
+     for Index:=0 to CountStateQWords-1 do begin
+      PStateQWords(TRNLPointer(State))^[Index]:=PStateQWords(TRNLPointer(State))^[Index] xor
+                                                x86_rdrand_ui64;
+     end;
+    end;
+{$ifend}
+    for Index:=0 to CountStateQWords-1 do begin
+     PStateQWords(TRNLPointer(State))^[Index]:=PStateQWords(TRNLPointer(State))^[Index] xor
+                                               SplitMix64Next(SplitMix64);
+    end;
+    XorShift1024Jump(State^.XorShift1024);
+    FillChar(aBuffer,aSize,#0);
+    Index:=0;
+    Remain:=aSize;
+    while Remain>0 do begin
+     if Remain<SizeOf(TRNLUInt64) then begin
+      ToDo:=Remain;
+     end else begin
+      ToDo:=SizeOf(TRNLUInt64);
+     end;
+     Value:=(LCG64Next(State^.LCG64)+
+             XorShift1024Next(State^.XorShift1024)+
+             CMWC4096Next(State^.CMWC4096)) xor
+            PCG32Next(State^.PCG32);
+{$if defined(CPU386) or defined(CPUX64)}
+     if x86_rdrand_support then begin
+      Value:=Value xor x86_rdrand_ui64;
+     end;
+{$ifend}
+     Move(Value,PRNLUInt8Array(TRNLPointer(@aBuffer))^[Index],ToDo);
+     inc(Index,ToDo);
+     dec(Remain,ToDo);
+    end;
+   finally
+    FillChar(State^,SizeOf(TRNLRandomGeneratorState),#0);
+    FreeMem(State);
+   end;
+   result:=true;
+  end;
+  function GUIDGetEntropyData(out aBuffer;const aSize:TRNLSizeUInt):boolean;
+  var Index,Remain,ToDo:TRNLSizeUInt;
+      Value:TGUID;
+{$if not (defined(Windows) or defined(fpc))}
+      OK:boolean;
+      fs:TFileStream;
+      s:TRNLRawByteString;
+{$ifend}
+  begin
+   FillChar(aBuffer,aSize,#0);
+   Index:=0;
+   Remain:=aSize;
+   while Remain>0 do begin
+    if Remain<SizeOf(TGUID) then begin
+     ToDo:=Remain;
+    end else begin
+     ToDo:=SizeOf(TGUID);
+    end;
+{$if defined(fpc)}
+    // FPC's RTL is doing already the right thing
+    CreateGUID(Value);
+{$elseif defined(Windows)}
+    CoCreateGUID(Value);
+{$else}
+    OK:=false;
+    if (not OK) and FileExists('/proc/sys/kernel/random/uuid') then begin
+     try
+      fs:=TFileStream.Create('/proc/sys/kernel/random/uuid',fmOpenRead or fmShareDenyNone);
+      s:='';
+      try
+       SetLength(s,36);
+       if fs.Read(s[1],36)=36 then begin
+        Value:=StringToGUID('{'+s+'}');
+        OK:=true;
+       end;
+      finally
+       SetLength(s,0);
+      end;
+     except
+     end;
+    end;
+    if not OK then begin
+     CreateGUID(Value);
+    end;
+{$ifend}
+    Move(Value,PRNLUInt8Array(TRNLPointer(@aBuffer))^[Index],ToDo);
+    inc(Index,ToDo);
+    dec(Remain,ToDo);
+   end;
+   result:=true;
+  end;
+ var TemporaryEntropyData:TRNLRandomGeneratorEntropyData;
+  procedure MixEntropyData;
+  var Index:TRNLSizeUInt;
+  begin
+   for Index:=0 to SizeOf(TRNLRandomGeneratorEntropyData)-1 do begin
+    EntropyData[Index]:=EntropyData[Index] xor TemporaryEntropyData[Index];
+   end;
+  end;
+ begin
+  FillChar(EntropyData,SizeOf(TRNLRandomGeneratorEntropyData),#0);
+  FillChar(TemporaryEntropyData,SizeOf(TRNLRandomGeneratorEntropyData),#0);
+{$if defined(Windows)}
+  if WindowsGetEntropyData(TemporaryEntropyData,SizeOf(TRNLRandomGeneratorEntropyData)) then begin
+   MixEntropyData;
+  end else begin
+   if WindowsEnvironmentStringsGetEntropyData(TemporaryEntropyData,SizeOf(TRNLRandomGeneratorEntropyData)) then begin
+    MixEntropyData;
+   end;
+   if WindowsCommandLineGetEntropyData(TemporaryEntropyData,SizeOf(TRNLRandomGeneratorEntropyData)) then begin
+    MixEntropyData;
+   end;
+   if GUIDGetEntropyData(TemporaryEntropyData,SizeOf(TRNLRandomGeneratorEntropyData)) then begin
+    MixEntropyData;
+   end;
+  end;
+{$elseif defined(Unix) or defined(Posix)}
+  if PosixGetEntropyData(TemporaryEntropyData,SizeOf(TRNLRandomGeneratorEntropyData)) then begin
+   MixEntropyData;
+  end;
+  if GUIDGetEntropyData(TemporaryEntropyData,SizeOf(TRNLRandomGeneratorEntropyData)) then begin
+   MixEntropyData;
+  end;
+{$else}
+  if GUIDGetEntropyData(TemporaryEntropyData,SizeOf(TRNLRandomGeneratorEntropyData)) then begin
+   MixEntropyData;
+  end;
+{$ifend}
+  if GetAdditionalEntropyData(TemporaryEntropyData,SizeOf(TRNLRandomGeneratorEntropyData)) then begin
+   MixEntropyData;
+  end;
+  FillChar(TemporaryEntropyData,SizeOf(TRNLRandomGeneratorEntropyData),#0);
+ end;
+begin
+ EntropyData[0]:=0;
+ GetEntropyData;
+ if not fInitialized then begin
+  fInitialized:=true;
+  Initialize(EntropyData,SizeOf(TRNLRandomGeneratorEntropyData));
+ end else begin
+  Rekey(EntropyData,SizeOf(TRNLRandomGeneratorEntropyData));
+ end;
+ FillChar(EntropyData,SizeOf(TRNLRandomGeneratorEntropyData),#0);
+ FillChar(fBuffer,SizeOf(TRNLRandomGeneratorBuffer),#0);
+ fPosition:=SizeOf(TRNLRandomGeneratorSeed);
+ fHave:=0;
+ fCount:=1600000;
+end;
+
+procedure TRNLRandomGenerator.ReseedIfNeeded(const aCount:TRNLSizeUInt);
+begin
+ if (fCount<=aCount) or not fInitialized then begin
+  Reseed;
+ end;
+ if fCount<=aCount then begin
+  fCount:=0;
+ end else begin
+  dec(fCount,aCount);
+ end;
+end;
+
+procedure TRNLRandomGenerator.GetRandomBytes(out aLocation;const aCount:TRNLSizeUInt);
+var Index,Remain,ToDo:TRNLSizeUInt;
+begin
+ ReseedIfNeeded(aCount);
+ Index:=0;
+ Remain:=aCount;
+ while Remain>0 do begin
+  if fHave>0 then begin
+   if Remain<fHave then begin
+    ToDo:=Remain;
+   end else begin
+    ToDo:=fHave;
+   end;
+   Move(PRNLUInt8Array(TRNLPointer(@fBuffer))^[fPosition],
+        PRNLUInt8Array(TRNLPointer(@aLocation))^[Index],
+        ToDo);
+   inc(fPosition,ToDo);
+   dec(fHave,ToDo);
+   inc(Index,ToDo);
+   dec(Remain,ToDo);
+  end;
+  if fHave=0 then begin
+   Rekey(TRNLPointer(nil)^,0);
+  end;
+ end;
+end;
+
+function TRNLRandomGenerator.GetUInt32:TRNLUInt32;
+begin
+ GetRandomBytes(result,SizeOf(TRNLUInt32));
+end;
+
+function TRNLRandomGenerator.GetUInt64:TRNLUInt64;
+begin
+ GetRandomBytes(result,SizeOf(TRNLUInt64));
+end;
+
+function TRNLRandomGenerator.GetBoundedUInt32(const aBound:TRNLUInt32):TRNLUInt32;
+begin
+ if (aBound and TRNLUInt32($ffff0000))=0 then begin
+  result:=((GetUInt32 shr 16)*aBound) shr 16;
+ end else begin
+  result:=(TRNLUInt64(GetUInt32)*aBound) shr 32;
+ end;
+end;
+
+function TRNLRandomGenerator.GetUniformBoundedUInt32(const aBound:TRNLUInt32):TRNLUInt32;
+var Minimum:TRNLUInt32;
+begin
+ if aBound>1 then begin
+  Minimum:=TRNLUInt64($100000000) mod aBound;
+  repeat
+   result:=GetUInt32;
+  until result>=Minimum;
+  result:=result mod aBound;
+ end else begin
+  result:=0;
+ end;
+end;
+
+function TRNLRandomGenerator.GetFloat:single; // -1.0 .. 1.0
+var t:TRNLUInt32;
+begin
+ t:=GetUInt32;
+ t:=(((t shr 9) and $7fffff)+((t shr 8) and 1)) or $40000000;
+ result:=single(TRNLPointer(@t)^)-3.0;
+end;
+
+function TRNLRandomGenerator.GetAbsoluteFloat:single; // 0.0 .. 1.0
+var t:TRNLUInt32;
+begin
+ t:=GetUInt32;
+ t:=(((t shr 10) and $3fffff)+((t shr 9) and 1)) or $40000000;
+ result:=single(TRNLPointer(@t)^)-2.0;
+end;
+
+function TRNLRandomGenerator.GetDouble:double; // -1.0 .. 1.0
+var t:TRNLUInt64;
+begin
+ t:=GetUInt64;
+ t:=(((t shr 12) and $fffffffffffff)+((t shr 11) and 1)) or $4000000000000000;
+ result:=double(TRNLPointer(@t)^)-3.0;
+end;
+
+function TRNLRandomGenerator.GetAbsoluteDouble:double; // 0.0 .. 1.0
+var t:int64;
+begin
+ t:=GetUInt64;
+ t:=(((t shr 13) and $7ffffffffffff)+((t shr 12) and 1)) or $4000000000000000;
+ result:=double(TRNLPointer(@t)^)-2.0;
+end;
+
+function TRNLRandomGenerator.GetGuassianFloat:single; // -1.0 .. 1.0
+var x1,x2,w:single;
+    i:TRNLUInt32;
+begin
+ if fGuassianFloatUseLast then begin
+  fGuassianFloatUseLast:=false;
+  result:=fGuassianFloatLast;
+ end else begin
+  i:=0;
+  repeat
+   x1:=GetFloat;
+   x2:=GetFloat;
+   w:=sqr(x1)+sqr(x2);
+   inc(i);
+  until ((i and $80000000)<>0) or (w<1.0);
+  if (i and $80000000)<>0 then begin
+   result:=x1;
+   fGuassianFloatLast:=x2;
+   fGuassianFloatUseLast:=true;
+  end else if abs(w)<1e-18 then begin
+   result:=0.0;
+  end else begin
+   w:=sqrt(((-2.0)*ln(w))/w);
+   result:=x1*w;
+   fGuassianFloatLast:=x2*w;
+   fGuassianFloatUseLast:=true;
+  end;
+ end;
+ if result<-1.0 then begin
+  result:=-1.0;
+ end else if result>1.0 then begin
+  result:=1.0;
+ end;
+end;
+
+function TRNLRandomGenerator.GetAbsoluteGuassianFloat:single; // 0.0 .. 1.0
+begin
+ result:=(GetGuassianFloat+1.0)*0.5;
+ if result<0.0 then begin
+  result:=0.0;
+ end else if result>1.0 then begin
+  result:=1.0;
+ end;
+end;
+
+function TRNLRandomGenerator.GetGuassianDouble:double; // -1.0 .. 1.0
+var x1,x2,w:double;
+    i:TRNLUInt32;
+begin
+ if fGuassianDoubleUseLast then begin
+  fGuassianDoubleUseLast:=false;
+  result:=fGuassianDoubleLast;
+ end else begin
+  i:=0;
+  repeat
+   x1:=GetDouble;
+   x2:=GetDouble;
+   w:=sqr(x1)+sqr(x2);
+   inc(i);
+  until ((i and $80000000)<>0) or (w<1.0);
+  if (i and $80000000)<>0 then begin
+   result:=x1;
+   fGuassianDoubleLast:=x2;
+   fGuassianDoubleUseLast:=true;
+  end else if abs(w)<1e-18 then begin
+   result:=0.0;
+  end else begin
+   w:=sqrt(((-2.0)*ln(w))/w);
+   result:=x1*w;
+   fGuassianDoubleLast:=x2*w;
+   fGuassianDoubleUseLast:=true;
+  end;
+ end;
+ if result<-1.0 then begin
+  result:=-1.0;
+ end else if result>1.0 then begin
+  result:=1.0;
+ end;
+end;
+
+function TRNLRandomGenerator.GetAbsoluteGuassianDouble:double; // 0.0 .. 1.0
+begin
+ result:=(GetGuassianDouble+1.0)*0.5;
+ if result<0.0 then begin
+  result:=0.0;
+ end else if result>1.0 then begin
+  result:=1.0;
+ end;
+end;
+
+function TRNLRandomGenerator.GetGuassian(const aBound:TRNLUInt32):TRNLUInt32;
+begin
+ result:=round(GetAbsoluteGuassianDouble*(aBound-0.98725));
+end;
 
 procedure TRNLConnectionRequestRateLimiter.Reset(const aTime:TRNLTime);
 begin
