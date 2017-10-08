@@ -467,7 +467,7 @@ uses {$if defined(Posix)}
 {    Generics.Defaults,
      Generics.Collections;}
 
-const RNL_VERSION='1.00.2017.10.08.08.26.0000';
+const RNL_VERSION='1.00.2017.10.08.08.37.0000';
 
 type PPRNLInt8=^PRNLInt8;
      PRNLInt8=^TRNLInt8;
@@ -10856,10 +10856,10 @@ begin
    end else begin
     t:=IP_PMTUDISC_DONT;
    end;
-   r:=setsockopt(aSocket,IPPROTO_IP,IP_MTU_DISCOVER,TRNLPointer(@t),SizeOf(TRNLInt32));
+   r:=fpsetsockopt(aSocket,IPPROTO_IP,IP_MTU_DISCOVER,TRNLPointer(@t),SizeOf(TRNLInt32));
 {$else}
    t:=aValue;
-   r:=setsockopt(aSocket,IPPROTO_IP,IP_DONTFRAG,TRNLPointer(@t),SizeOf(TRNLInt32));
+   r:=fpsetsockopt(aSocket,IPPROTO_IP,IP_DONTFRAG,TRNLPointer(@t),SizeOf(TRNLInt32));
 {$ifend}
   end;
   RNL_SOCKET_OPTION_IPV6_V6ONLY:begin
@@ -11959,10 +11959,32 @@ begin
    SocketInstanceListNode:=fSocketInstanceList.Front;
    while SocketInstanceListNode<>fSocketInstanceList do begin
     Socket:=SocketInstanceListNode.Value.fSocket;
-    if aReadSet.Check(Socket) or aWriteSet.Check(Socket) then begin
+    if {$if defined(Posix)}
+        __FD_ISSET(Socket,aReadSet)
+       {$elseif defined(Unix)}
+        (fpFD_ISSET(Socket,aReadSet)=1)
+       {$else}
+        FD_ISSET(Socket,aReadSet)
+       {$ifend}
+       or
+       {$if defined(Posix)}
+        __FD_ISSET(Socket,aWriteSet)
+       {$elseif defined(Unix)}
+        (fpFD_ISSET(Socket,aWriteSet)=1)
+       {$else}
+        FD_ISSET(Socket,aWriteSet)
+       {$ifend} then begin
      if SocketInstanceListNode.Value.fData.IsEmpty then begin
-      aReadSet.Remove(Socket);
-      aWriteSet.Remove(Socket);
+{$if defined(Posix)}
+      __FD_CLR(Socket,aReadSet);
+      __FD_CLR(Socket,aWriteSet);
+{$elseif defined(Unix)}
+      fpFD_CLR(Socket,aReadSet);
+      fpFD_CLR(Socket,aWriteSet);
+{$else}
+      FD_CLR(Socket,aReadSet);
+      FD_CLR(Socket,aWriteSet);
+{$ifend}
      end else begin
       inc(result);
      end;
