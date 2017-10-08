@@ -94,9 +94,13 @@
  *       - Android (with FreePascal and Delphi)
  *       - Darwin (MacOS(X) and iOS) (with FreePascal and Delphi)
  *   - UDP-based protocol
- *   - Optional reliable in-order delivery of packets
  *   - Sequencing
  *   - Channels
+ *      - With following possible free configurable channel types:
+ *         - Reliable ordered
+ *         - Reliable unordered
+ *         - Unreliable ordered
+ *         - Unreliable unordered
  *   - Reliability
  *   - Fragmentation and reassembly
  *   - Aggregation
