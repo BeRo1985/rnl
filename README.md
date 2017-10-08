@@ -79,7 +79,7 @@ are the typical case for egoshooters, racing games, and so forth. Or in other wo
 
 # License (zib)
 
-See [LICENSE]
+See [license](LICENSE)
 
 # Thanks
 
