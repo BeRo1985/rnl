@@ -103,7 +103,8 @@
  *   - Adaptability
  *   - Portability
  *   - Possibility of using a peer-to-peer model or even a mixed peer-to-peer
- *     and client/server hybrid model instead only a pure client/server model
+ *     and client/server hybrid model instead only a pure client/server model, and
+ *     of course also of a classic client/server model
  *   - Cryptographically secure pseudo-random number generator (CSPRNG)
  *       - Based on arc4random but with ChaCha20 instead RC4 as the basic building block
  *       - Multiple sources of entropy (because you should never trust a single source of
