@@ -85,14 +85,13 @@ are the typical case for egoshooters, racing games, and so forth. Or in other wo
 
 [zlib License](LICENSE)
 
-# Thanks
+# IRC channel
+
+IRC channel #rnl on Freenode
+
+ # Thanks
 
    - Thanks to Lee Salzman for ENet as inspiration for the base API design implementation ideas
    - Thanks to Glenn Fiedler for inspiration for security-oriented implementation ideas
    - Thanks to Sergey Ignatchenko ("No Bugs" Hare) for inspiration also for security-oriented implementation ideas
 
-# IRC channel
-
-IRC channel #rnl on Freenode
-
- 
