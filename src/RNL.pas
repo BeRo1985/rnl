@@ -155,11 +155,19 @@
  *         real server, where all the real action happens.
  *   - Connection attempt rate limiter
  *       - Configurable with two constants, burst and period
+ *   - Configurable bandwidth rate limiter
+ *   - Optional virtual network feature (for example for fast network-API-less local
+ *     loopback solution for singleplayer game matches, which should be still server/client
+ *     concept based)
+ *   - Network interference simulator (for example for testcases and so on)
+ *       - Configurable simulated packet loss probability (each for incoming and outgoing packets)
+ *       - Configurable simulated latency (each for incoming and outgoing packets)
+ *       - Configurable simulated jitter (each for incoming and outgoing packets)
+ *       - Configurable simulated duplicate packet probability (each for incoming and outgoing packets)
  *   - Dynamic connection challenge request response difficulty adjustment mechanism
  *       - Configurable with a factor value
  *       - Based on history-smoothing-frames-per-second-style determination mechanism,
  *         but just instead frames per second, connection attempts per second
- *   - Optional incoming and outgoing packet loss simulation
  *   - More compression algorithms as choices
  *       - Deflate (a zlib bit-stream compatible LZ77 and canonical Huffman hybrid,
  *                  only fixed-static-canonical-huffman in this implementation here on
