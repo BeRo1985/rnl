@@ -117,9 +117,6 @@ begin
 { RNLNetwork.AddressSetHost(Server.Address^,'127.0.0.1');
   Server.Address.Port:=64242;}
   Server.Compressor:=RNLCompressorClass.Create;
-{ Server.Encryption:=true;
-  Server.SimulatedIncomingPacketLossFactor:=SimulatedIncomingPacketLossFactor;
-  Server.SimulatedOutgoingPacketLossFactor:=SimulatedOutgoingPacketLossFactor;}
   Server.Start;
   fReadyEvent.SetEvent;
   Event.Type_:=RNL_HOST_EVENT_TYPE_NONE;
@@ -166,9 +163,6 @@ begin
  Client:=TRNLHost.Create(RNLInstance,RNLNetwork);
  try
   Client.Compressor:=RNLCompressorClass.Create;
-{ Client.Encryption:=true;
-  Client.SimulatedIncomingPacketLossFactor:=SimulatedIncomingPacketLossFactor;
-  Client.SimulatedOutgoingPacketLossFactor:=SimulatedOutgoingPacketLossFactor;}
   Client.Start;
   ConsoleOutput('Client: Connecting');
   if ParamCount>1 then begin
@@ -270,32 +264,11 @@ end;
 var Server:TServer;
     Client:TClient;
     s:string;
-//  a,b,c:TRNLStaticSizedBigInteger;
 begin
-{a:=-2;
- b:='123456789123456789123456789123456789123456789123456789123456789';
- a:=a*b;
- writeln(a.ToDecimalString);
- a:=a div 2;
- writeln(a.ToDecimalString);
- a:='-246913578246913578246913578246913578246913578246913578246913578';
- writeln(a.ToDecimalString);
- a:=a mod 5;
- writeln(a.ToDecimalString);
- readln;
- exit;}
-{TRNLValue25519.SelfTest;
- TRNLCurve25519.SelfTest;
- TRNLX25519.SelfTest;
- TRNLPoly1305.SelfTest;
- TRNLSHA512.SelfTest;
- TRNLED25519.SelfTest;
- readln;
- exit;{}
  s:=ParamStr(1);
  RNLInstance:=TRNLInstance.Create;
  try
-  RNLMainNetwork:=TRNLVirtualNetwork.Create(RNLInstance);
+  RNLMainNetwork:={$ifdef VirtualNetwork}TRNLVirtualNetwork{$else}TRNLRealNetwork{$endif}.Create(RNLInstance);
   try
    RNLNetwork:=TRNLNetworkInterferenceSimulator.Create(RNLInstance,RNLMainNetwork);
    try

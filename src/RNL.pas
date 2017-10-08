@@ -171,12 +171,7 @@
  *
  * Planned features (a.k.a Todo) in random order of priorities:
  *
- *   - Automatic RTTI-based to-packet-data delta-coded serialization of TPersistent-derived
- *     classes
- *   - Host certificates including bidirectional mutual certificate check as an additional
- *     and better security mechanism against man-in-the-middle-attacks (MITM)
- *   - Builtin UDP hole punching
- *   - UPnP support
+ * - TODO
  *
  *)
 unit RNL;
@@ -459,7 +454,7 @@ uses {$if defined(Posix)}
 {    Generics.Defaults,
      Generics.Collections;}
 
-const RNL_VERSION='1.00.2017.10.08.01.15.0000';
+const RNL_VERSION='1.00.2017.10.08.02.52.0000';
 
 type PPRNLInt8=^PRNLInt8;
      PRNLInt8=^TRNLInt8;
