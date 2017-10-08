@@ -467,7 +467,7 @@ uses {$if defined(Posix)}
 {    Generics.Defaults,
      Generics.Collections;}
 
-const RNL_VERSION='1.00.2017.10.08.08.37.0000';
+const RNL_VERSION='1.00.2017.10.08.14.49.0000';
 
 type PPRNLInt8=^PRNLInt8;
      PRNLInt8=^TRNLInt8;
@@ -12373,9 +12373,41 @@ begin
 end;
 
 procedure TRNLNetworkInterferenceSimulator.SocketDestroy(const aSocket:TRNLSocket);
+var PacketListNode,NextPacketListNode:TRNLNetworkInterferenceSimulatorPacketListNode;
+    Packet:TRNLNetworkInterferenceSimulatorPacket;
 begin
+
  Update;
+
+ fLock.Acquire;
+ try
+
+  PacketListNode:=fIncomingPacketList.Front;
+  while PacketListNode<>fIncomingPacketList do begin
+   NextPacketListNode:=PacketListNode.Next;
+   Packet:=PacketListNode.fValue;
+   if Packet.fSocket=aSocket then begin
+    Packet.Free;
+   end;
+   PacketListNode:=NextPacketListNode;
+  end;
+
+  PacketListNode:=fOutgoingPacketList.Front;
+  while PacketListNode<>fOutgoingPacketList do begin
+   NextPacketListNode:=PacketListNode.Next;
+   Packet:=PacketListNode.fValue;
+   if Packet.fSocket=aSocket then begin
+    Packet.Free;
+   end;
+   PacketListNode:=NextPacketListNode;
+  end;
+
+ finally
+  fLock.Release;
+ end;
+
  fNetwork.SocketDestroy(aSocket);
+
 end;
 
 function TRNLNetworkInterferenceSimulator.SocketShutdown(const aSocket:TRNLSocket;const aHow:TRNLSocketShutdown=RNL_SOCKET_SHUTDOWN_READ):boolean;
