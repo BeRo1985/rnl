@@ -77,9 +77,13 @@ are the typical case for egoshooters, racing games, and so forth. Or in other wo
 
    - TODO
 
-# License (zib)
+# General guidelines for code contributors 
 
-See [license](LICENSE)
+[General guidelines for code contributors](CONTRIBUTING.md)
+
+# License
+
+[zlib License](LICENSE)
 
 # Thanks
 
