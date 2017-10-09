@@ -467,7 +467,7 @@ uses {$if defined(Posix)}
 {    Generics.Defaults,
      Generics.Collections;}
 
-const RNL_VERSION='1.00.2017.10.08.14.49.0000';
+const RNL_VERSION='1.00.2017.10.09.03.46.0000';
 
 type PPRNLInt8=^PRNLInt8;
      PRNLInt8=^TRNLInt8;
@@ -8629,11 +8629,11 @@ var RNLInitializationReferenceCounter:TRNLInt32=0;
 const SOCKET_ERROR=-1;
 
 {$if defined(Linux) or defined(Android)}
-      SOCK_CLOEXEC=$02000000;
+      SOCK_CLOEXEC=$80000; // 02000000;
 {$ifend}
 
 {$ifdef fpc}
-      AI_ADDRCONFIG=$0400;
+      AI_ADDRCONFIG=$400;
 {$endif}
 
 {$if defined(Linux) or defined(Android)}
@@ -8805,7 +8805,7 @@ const AF_UNSPEC=0;
       AF_INET6=23;
       AF_MAX=24;
 
-      AI_ADDRCONFIG=$0400;
+      AI_ADDRCONFIG=$400;
 
       NI_NUMERICHOST=$2;
 
