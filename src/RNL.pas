@@ -15927,7 +15927,7 @@ begin
    OtherPeer:=fHost.fPeerList[OtherPeerListIndex];
    fHost.fPeerList.Exchange(fPeerListIndex,OtherPeerListIndex);
    OtherPeer.fPeerListIndex:=fPeerListIndex;
-   fPeerListIndex:=OtherfPeerListIndex;
+   fPeerListIndex:=OtherPeerListIndex;
    fHost.fPeerList.Delete(OtherPeerListIndex);
   end else begin
    fHost.fPeerList.Delete(fPeerListIndex);
