@@ -1,8 +1,16 @@
 program combinedexample;
 {$ifdef fpc}
-{$mode delphi}
+ {$mode delphi}
+{$else}
+ {$ifdef conditionalexpressions}
+  {$if CompilerVersion>=24.0}
+   {$legacyifend on}
+  {$ifend}
+ {$endif}
 {$endif}
-{$apptype console}
+{$if defined(Win32) or defined(Win64)}
+ {$apptype console}
+{$ifend}
 
 uses
   {$ifdef unix}
@@ -67,12 +75,21 @@ begin
  ConsoleOutputConditionVariable.Signal;
 end;
 
+procedure FlushConsoleOutput;
+var s:string;
+begin
+ while ConsoleOutputQueue.Dequeue(s) do begin
+  writeln(s);
+ end;
+end;
+
 procedure TConsoleOutputThread.Execute;
 var s:string;
 begin
 {$ifndef fpc}
  NameThreadForDebugging('Console output');
 {$endif}
+ ConsoleOutput('Console output: Thread started');
  ConsoleOutputConditionVariableLock.Acquire;
  try
   while not Terminated do begin
@@ -88,6 +105,7 @@ begin
  finally
   ConsoleOutputConditionVariableLock.Release;
  end;
+ ConsoleOutput('Console output: Thread stopped');
 end;
 
 constructor TServer.Create(const aCreateSuspended:boolean);
@@ -110,6 +128,7 @@ begin
 {$ifndef fpc}
  NameThreadForDebugging('Server');
 {$endif}
+ ConsoleOutput('Server: Thread started');
  Server:=TRNLHost.Create(RNLInstance,RNLNetwork);
  try
   Server.Address.Host:=RNL_HOST_ANY;
@@ -148,6 +167,7 @@ begin
  finally
   Server.Free;
  end;
+ ConsoleOutput('Server: Thread stopped');
 end;
 
 procedure TClient.Execute;
@@ -160,6 +180,7 @@ begin
 {$ifndef fpc}
  NameThreadForDebugging('Client');
 {$endif}
+ ConsoleOutput('Client: Thread started');
  Client:=TRNLHost.Create(RNLInstance,RNLNetwork);
  try
   Client.Compressor:=RNLCompressorClass.Create;
@@ -260,7 +281,41 @@ begin
  finally
   Client.Free;
  end;
+ ConsoleOutput('Client: Thread stopped');
 end;
+
+procedure LogThreadException(const aThreadName:string;const aException:TObject);
+{$if defined(fpc)}
+var i:int32;
+    Frames:PPointer;
+    s:string;
+begin
+ if assigned(aException) then begin
+  s:=aThreadName+' thread failed with exception class '+aException.ClassName+LineEnding;
+  if aException is Exception then begin
+   s:=s+'Exception Message: '+Exception(aException).Message+LineEnding;
+  end;
+  s:=s+LineEnding+'Stack trace:'+LineEnding+LineEnding;
+  s:=s+BackTraceStrFunc(ExceptAddr);
+  Frames:=ExceptFrames;
+  for i:=0 to ExceptFrameCount-1 do begin
+   s:=s+LineEnding+BackTraceStrFunc(Frames);
+   inc(Frames);
+  end;
+  ConsoleOutput(s);
+ end;
+end;
+{$else}
+begin
+ if assigned(aException) then begin
+  if aException is Exception then begin
+   ConsoleOutput(aThreadName+' thread failed with exception '+aException.ClassName+': '+Exception(aException).Message);
+  end else begin
+   ConsoleOutput(aThreadName+' thread failed with exception '+aException.ClassName);
+  end;
+ end;
+end;
+{$ifend}
 
 var Server:TServer;
     Client:TClient;
@@ -296,6 +351,7 @@ begin
          finally
           Server.Terminate;
           Server.WaitFor;
+          LogThreadException('Server',Server.FatalException);
           Server.Free;
          end;
         end else if s='Client' then begin
@@ -305,6 +361,7 @@ begin
          finally
           Client.Terminate;
           Client.WaitFor;
+          LogThreadException('Client',Client.FatalException);
           Client.Free;
          end;
         end else begin
@@ -329,8 +386,10 @@ begin
         ConsoleOutputThread.Terminate;
         ConsoleOutputConditionVariable.Signal;
         ConsoleOutputThread.WaitFor;
+        LogThreadException('Console output',ConsoleOutputThread.FatalException);
         FreeAndNil(ConsoleOutputThread);
        end;
+       FlushConsoleOutput;
       finally
        FreeAndNil(ConsoleOutputQueue);
       end;
