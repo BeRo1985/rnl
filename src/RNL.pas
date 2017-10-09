@@ -468,7 +468,7 @@ uses {$if defined(Posix)}
 {    Generics.Defaults,
      Generics.Collections;}
 
-const RNL_VERSION='1.00.2017.10.09.08.31.0000';
+const RNL_VERSION='1.00.2017.10.09.17.12.0000';
 
 type PPRNLInt8=^PRNLInt8;
      PRNLInt8=^TRNLInt8;
@@ -1281,13 +1281,13 @@ type PRNLVersion=^TRNLVersion;
        procedure Clear; inline;
        function Head:TRNLCircularDoublyLinkedListNode<T>; inline;
        function Tail:TRNLCircularDoublyLinkedListNode<T>; inline;
-       function Empty:boolean; inline;
+       function IsEmpty:boolean; inline;
        function Front:TRNLCircularDoublyLinkedListNode<T>; inline;
        function Back:TRNLCircularDoublyLinkedListNode<T>; inline;
        function Insert(const aData:TRNLCircularDoublyLinkedListNode<T>):TRNLCircularDoublyLinkedListNode<T>; inline;
        function Add(const aData:TRNLCircularDoublyLinkedListNode<T>):TRNLCircularDoublyLinkedListNode<T>; inline;
        function Remove:TRNLCircularDoublyLinkedListNode<T>; // inline;
-       function Move(const aDataFirst,aDataLast:TRNLCircularDoublyLinkedListNode<T>):TRNLCircularDoublyLinkedListNode<T>; inline;
+       function MoveFrom(const aDataFirst,aDataLast:TRNLCircularDoublyLinkedListNode<T>):TRNLCircularDoublyLinkedListNode<T>; inline;
        function PopFromFront(out aData):boolean; inline;
        function PopFromBack(out aData):boolean; inline;
        function ListSize:TRNLInt32;
@@ -2653,8 +2653,6 @@ type PRNLVersion=^TRNLVersion;
 
      TRNLPeerBlockPacketStack=TRNLStack<TRNLPeerBlockPacket>;
 
-     TRNLPeerBlockPacketObjectList=TRNLObjectList<TRNLPeerBlockPacket>;
-
      TRNLPeerChannel=class;
 
      PRNLPeerChannelType=^TRNLPeerChannelType;
@@ -2982,7 +2980,9 @@ type PRNLVersion=^TRNLVersion;
 
      TRNLPeerIncomingPacketQueue=TRNLQueue<TBytes>;
 
-     TRNLPeer=class
+     TRNLPeerListNode=TRNLCircularDoublyLinkedListNode<TRNLPeer>;
+
+     TRNLPeer=class(TRNLPeerListNode)
       private
 
        fHost:TRNLHost;
@@ -2993,7 +2993,9 @@ type PRNLVersion=^TRNLVersion;
 
        fRemotePeerID:TRNLID;
 
+{$if defined(RNL_LINEAR_PEER_LIST)}
        fPeerListIndex:TRNLSizeInt;
+{$ifend}
 
        fChannels:TRNLPeerChannelList;
 
@@ -3217,7 +3219,11 @@ type PRNLVersion=^TRNLVersion;
 
        fPeerIDMap:TRNLHostPeerIDMap;
 
+{$if defined(RNL_LINEAR_PEER_LIST)}
        fPeerList:TRNLHostPeerList;
+{$else}
+       fPeerList:TRNLPeerListNode;
+{$ifend}
 
        fCountPeers:TRNLUInt32;
 
@@ -7861,7 +7867,7 @@ begin
  result:=self;
 end;
 
-function TRNLCircularDoublyLinkedListNode<T>.Empty:boolean;
+function TRNLCircularDoublyLinkedListNode<T>.IsEmpty:boolean;
 begin
  result:=fNext=self;
 end;
@@ -7907,7 +7913,7 @@ begin
  result:=self;
 end;
 
-function TRNLCircularDoublyLinkedListNode<T>.Move(const aDataFirst,aDataLast:TRNLCircularDoublyLinkedListNode<T>):TRNLCircularDoublyLinkedListNode<T>;
+function TRNLCircularDoublyLinkedListNode<T>.MoveFrom(const aDataFirst,aDataLast:TRNLCircularDoublyLinkedListNode<T>):TRNLCircularDoublyLinkedListNode<T>;
 var First,Last:TRNLCircularDoublyLinkedListNode<T>;
 begin
  First:=aDataFirst;
@@ -11394,19 +11400,19 @@ destructor TRNLVirtualNetwork.Destroy;
 var Index:TRNLSizeInt;
 begin
 
- while not fSocketInstanceList.Empty do begin
+ while not fSocketInstanceList.IsEmpty do begin
   fSocketInstanceList.Front.Value.Free;
  end;
  FreeAndNil(fSocketInstanceList);
 
  for Index:=Low(TRNLVirtualNetworkSocketInstanceHashMap) to High(TRNLVirtualNetworkSocketInstanceHashMap) do begin
 
-  while not fSocketInstanceHashMap[Index].Empty do begin
+  while not fSocketInstanceHashMap[Index].IsEmpty do begin
    fSocketInstanceHashMap[Index].Front.Value.Free;
   end;
   FreeAndNil(fSocketInstanceHashMap[Index]);
 
-  while not fAddressSocketInstanceHashMap[Index].Empty do begin
+  while not fAddressSocketInstanceHashMap[Index].IsEmpty do begin
    fAddressSocketInstanceHashMap[Index].Front.Value.Free;
   end;
   FreeAndNil(fAddressSocketInstanceHashMap[Index]);
@@ -12067,13 +12073,13 @@ end;
 destructor TRNLNetworkInterferenceSimulator.Destroy;
 begin
 
- while not fIncomingPacketList.Empty do begin
+ while not fIncomingPacketList.IsEmpty do begin
   fIncomingPacketList.Front.Value.Free;
  end;
 
  FreeAndNil(fIncomingPacketList);
 
- while not fOutgoingPacketList.Empty do begin
+ while not fOutgoingPacketList.IsEmpty do begin
   fOutgoingPacketList.Front.Value.Free;
  end;
 
@@ -12464,7 +12470,7 @@ begin
    fLock.Acquire;
    try
 
-    if not fIncomingPacketList.Empty then begin
+    if not fIncomingPacketList.IsEmpty then begin
 
      Time:=fInstance.Time;
 
@@ -14091,7 +14097,7 @@ begin
  end;
  FreeAndNil(fOutgoingBlockPacketQueue);
 
- while not fSentOutgoingBlockPackets.Empty do begin
+ while not fSentOutgoingBlockPackets.IsEmpty do begin
   fSentOutgoingBlockPackets.Front.Value.DecRef;
  end;
  FreeAndNil(fSentOutgoingBlockPackets);
@@ -14873,7 +14879,7 @@ end;
 destructor TRNLPeerReliableUnorderedChannel.Destroy;
 begin
 
- while not fIncomingLongMessages.Empty do begin
+ while not fIncomingLongMessages.IsEmpty do begin
   fIncomingLongMessages.Front.Value.Free;
  end;
 
@@ -15722,6 +15728,8 @@ constructor TRNLPeer.Create(const aHost:TRNLHost);
 begin
  inherited Create;
 
+ fValue:=self;
+
  fHost:=aHost;
 
  fCurrentThreadIndex:=0;
@@ -15730,7 +15738,11 @@ begin
 
  fRemotePeerID:=0;
 
+{$if defined(RNL_LINEAR_PEER_LIST)}
  fPeerListIndex:=fHost.fPeerList.Add(self);
+{$else}
+ fHost.fPeerList.Add(self);
+{$ifend}
 
  inc(fHost.fCountPeers);
 
@@ -15904,17 +15916,29 @@ begin
 
  fHost.fPeerIDManager.FreeID(fLocalPeerID);
 
- OtherPeerListIndex:=fHost.fPeerList.Count-1;
- if OtherPeerListIndex<>OtherPeerListIndex then begin
-  OtherPeer:=fHost.fPeerList[OtherPeerListIndex];
-  fHost.fPeerList.Exchange(fPeerListIndex,OtherPeerListIndex);
-  OtherPeer.fPeerListIndex:=fPeerListIndex;
-  fHost.fPeerList.Delete(OtherPeerListIndex);
+{$if defined(RNL_LINEAR_PEER_LIST)}
+ if (fPeerListIndex>=0) and
+    (fPeerListIndex<fHost.fPeerList.Count) and
+    (fHost.fPeerList[fPeerListIndex]=self) then begin
+  if (fHost.fPeerList.Count>1) and (fPeerListIndex<>(fHost.fPeerList.Count-1)) then begin
+   OtherPeerListIndex:=fHost.fPeerList.Count-1;
+   OtherPeer:=fHost.fPeerList[OtherPeerListIndex];
+   fHost.fPeerList.Exchange(fPeerListIndex,OtherPeerListIndex);
+   OtherPeer.fPeerListIndex:=fPeerListIndex;
+   fPeerListIndex:=OtherfPeerListIndex;
+   fHost.fPeerList.Delete(OtherPeerListIndex);
+  end else begin
+   fHost.fPeerList.Delete(fPeerListIndex);
+  end;
  end else begin
-  fHost.fPeerList.Delete(fPeerListIndex);
+  fHost.fPeerList.Remove(self);
  end;
 
  fPeerListIndex:=-1;
+
+{$else}
+ Remove;
+{$ifend}
 
  inherited Destroy;
 end;
@@ -16824,7 +16848,7 @@ begin
      PeerBlockPacket.fBlockPacketDataLength:=TRNLEndianness.LittleEndianToHost16(BlockPacket^.MTUProbe.PayloadDataLength);
      if PeerBlockPacket.fBlockPacketDataLength>0 then begin
       SetLength(PeerBlockPacket.fBlockPacketData,PeerBlockPacket.fBlockPacketDataLength);
-      Move(BlockPacketPayload^,PeerBlockPacket.fBlockPacketData[0],PeerBlockPacket.fBlockPacketDataLength);
+      System.Move(BlockPacketPayload^,PeerBlockPacket.fBlockPacketData[0],PeerBlockPacket.fBlockPacketDataLength);
      end;
     finally
      fIncomingBlockPackets.Enqueue(PeerBlockPacket);
@@ -16851,7 +16875,7 @@ begin
      PeerBlockPacket.fBlockPacketDataLength:=BlockPacket^.Channel.PayloadDataLength;
      if PeerBlockPacket.fBlockPacketDataLength>0 then begin
       SetLength(PeerBlockPacket.fBlockPacketData,PeerBlockPacket.fBlockPacketDataLength);
-      Move(BlockPacketPayload^,PeerBlockPacket.fBlockPacketData[0],PeerBlockPacket.fBlockPacketDataLength);
+      System.Move(BlockPacketPayload^,PeerBlockPacket.fBlockPacketData[0],PeerBlockPacket.fBlockPacketDataLength);
      end;
     finally
      fIncomingBlockPackets.Enqueue(PeerBlockPacket);
@@ -17296,7 +17320,11 @@ begin
 
  fPeerIDMap:=TRNLHostPeerIDMap.Create;
 
+{$if defined(RNL_LINEAR_PEER_LIST)}
  fPeerList:=TRNLHostPeerList.Create(false);
+{$else}
+ fPeerList:=TRNLPeerListNode.Create;
+{$ifend}
 
  fCountPeers:=0;
 
@@ -17404,11 +17432,17 @@ begin
 
  fEventQueue.Free;
 
+{$if defined(RNL_LINEAR_PEER_LIST)}
  while fPeerList.Count>0 do begin
   fPeerList[fPeerList.Count-1].Free;
  end;
-
  fPeerList.Free;
+{$else}
+ while not fPeerList.IsEmpty do begin
+  fPeerList.Front.Value.Free;
+ end;
+ fPeerList.Free;
+{$ifend}
 
  fRandomGenerator.Free;
 
