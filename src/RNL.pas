@@ -468,7 +468,7 @@ uses {$if defined(Posix)}
 {    Generics.Defaults,
      Generics.Collections;}
 
-const RNL_VERSION='1.00.2017.10.09.17.12.0000';
+const RNL_VERSION='1.00.2017.10.09.17.41.0000';
 
 type PPRNLInt8=^PRNLInt8;
      PRNLInt8=^TRNLInt8;
@@ -15863,8 +15863,10 @@ end;
 
 destructor TRNLPeer.Destroy;
 var BlockPacket:TRNLPeerBlockPacket;
+{$if defined(RNL_LINEAR_PEER_LIST)}
     OtherPeer:TRNLPeer;
     OtherPeerListIndex:TRNLSizeInt;
+{$ifend}
 begin
 
  if assigned(fConnectionChallengeResponse) then begin
