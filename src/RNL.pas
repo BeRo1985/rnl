@@ -468,7 +468,7 @@ uses {$if defined(Posix)}
 {    Generics.Defaults,
      Generics.Collections;}
 
-const RNL_VERSION='1.00.2017.10.09.20.02.0000';
+const RNL_VERSION='1.00.2017.10.09.23.48.0000';
 
 type PPRNLInt8=^PRNLInt8;
      PRNLInt8=^TRNLInt8;
@@ -10990,7 +10990,7 @@ begin
 end;
 
 function TRNLRealNetwork.SocketWait(const aSockets:array of TRNLSocket;var aConditions:TRNLSocketWaitConditions;const aTimeout:TRNLTime):boolean;
-{$if defined(fpc) and defined(Unix) and declared(fppoll)}
+{$if defined(fpc) and defined(Unix) and declared(fppoll) and not defined(Darwin)}
 type TPollFDs=array[0..1] of pollfd;
 var Index,CountPollFDs,PollCount:TRNLInt32;
     PollFDs:TPollFDs;
@@ -11084,7 +11084,7 @@ begin
 
  MaxSocket:=0;
  for Index:=0 to length(aSockets)-1 do begin
-  if (aSockets[Index]<>RNL_SOCKET_NULL) and (MaxSocket>aSockets[Index]) then begin
+  if (aSockets[Index]<>RNL_SOCKET_NULL) and (MaxSocket<aSockets[Index]) then begin
    MaxSocket:=aSockets[Index];
   end;
  end;

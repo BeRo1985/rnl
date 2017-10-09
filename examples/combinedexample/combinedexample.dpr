@@ -193,7 +193,10 @@ begin
  //   Server.Flush;
      end;
      RNL_HOST_EVENT_TYPE_DISCONNECT:begin
-      ConsoleOutput('Server: A client disconnected '+IntToStr(TRNLPtrUInt(Event.Peer)));
+      ConsoleOutput(Format('Server: A client disconnected, local peer ID %d, remote peer ID %d, channels count %d',
+                           [Event.Peer.LocalPeerID,
+                            Event.Peer.RemotePeerID,
+                            Event.Peer.CountChannels]));
      end;
      RNL_HOST_EVENT_TYPE_MTU:begin
       ConsoleOutput('Server: A client '+IntToStr(TRNLPtrUInt(Event.Peer))+' has new MTU '+IntToStr(TRNLPtrUInt(Event.MTU)));
@@ -271,9 +274,12 @@ begin
             end;
            end;
            RNL_HOST_EVENT_TYPE_DISCONNECT:begin
+            ConsoleOutput(Format('Client: Disconnected, local peer ID %d, remote peer ID %d, channels count %d',
+                                 [Event.Peer.LocalPeerID,
+                                  Event.Peer.RemotePeerID,
+                                  Event.Peer.CountChannels]));
             if Event.Peer=Peer then begin
              Event.Peer:=nil;
-             ConsoleOutput('Client: Disconnected');
              Disconnected:=true;
              break;
             end;
@@ -309,8 +315,11 @@ begin
              Event.Receive.Message:=nil;}
             end;
             RNL_HOST_EVENT_TYPE_DISCONNECT:begin
+             ConsoleOutput(Format('Client: Disconnected, local peer ID %d, remote peer ID %d, channels count %d',
+                                  [Event.Peer.LocalPeerID,
+                                   Event.Peer.RemotePeerID,
+                                   Event.Peer.CountChannels]));
              if Event.Peer=Peer then begin
-              ConsoleOutput('Client: Disconnected');
               Event.Peer:=nil;
               break;
              end;
