@@ -468,7 +468,7 @@ uses {$if defined(Posix)}
 {    Generics.Defaults,
      Generics.Collections;}
 
-const RNL_VERSION='1.00.2017.10.09.17.41.0000';
+const RNL_VERSION='1.00.2017.10.09.20.02.0000';
 
 type PPRNLInt8=^PRNLInt8;
      PRNLInt8=^TRNLInt8;
@@ -2416,7 +2416,7 @@ type PRNLVersion=^TRNLVersion;
        function AddressGetHostIP(const aAddress:TRNLAddress;out aName;const aNameLength:TRNLInt32):boolean; virtual;
        function SocketCreate(const aType:TRNLSocketType;const aFamily:TRNLAddressFamily):TRNLSocket; virtual;
        procedure SocketDestroy(const aSocket:TRNLSocket); virtual;
-       function SocketShutdown(const aSocket:TRNLSocket;const aHow:TRNLSocketShutdown=RNL_SOCKET_SHUTDOWN_READ):boolean; virtual;
+       function SocketShutdown(const aSocket:TRNLSocket;const aHow:TRNLSocketShutdown=RNL_SOCKET_SHUTDOWN_READ_WRITE):boolean; virtual;
        function SocketGetAddress(const aSocket:TRNLSocket;out aAddress:TRNLAddress;const aFamily:TRNLAddressFamily):boolean; virtual;
        function SocketSetOption(const aSocket:TRNLSocket;const aOption:TRNLSocketOption;const aValue:TRNLInt32):boolean; virtual;
        function SocketGetOption(const aSocket:TRNLSocket;const aOption:TRNLSocketOption;out aValue:TRNLInt32):boolean; virtual;
@@ -2444,7 +2444,7 @@ type PRNLVersion=^TRNLVersion;
        function AddressGetHostIP(const aAddress:TRNLAddress;out aName;const aNameLength:TRNLInt32):boolean; override;
        function SocketCreate(const aType:TRNLSocketType;const aFamily:TRNLAddressFamily):TRNLSocket; override;
        procedure SocketDestroy(const aSocket:TRNLSocket); override;
-       function SocketShutdown(const aSocket:TRNLSocket;const aHow:TRNLSocketShutdown=RNL_SOCKET_SHUTDOWN_READ):boolean; override;
+       function SocketShutdown(const aSocket:TRNLSocket;const aHow:TRNLSocketShutdown=RNL_SOCKET_SHUTDOWN_READ_WRITE):boolean; override;
        function SocketGetAddress(const aSocket:TRNLSocket;out aAddress:TRNLAddress;const aFamily:TRNLAddressFamily):boolean; override;
        function SocketSetOption(const aSocket:TRNLSocket;const aOption:TRNLSocketOption;const aValue:TRNLInt32):boolean; override;
        function SocketGetOption(const aSocket:TRNLSocket;const aOption:TRNLSocketOption;out aValue:TRNLInt32):boolean; override;
@@ -2506,7 +2506,7 @@ type PRNLVersion=^TRNLVersion;
        function AddressGetHostIP(const aAddress:TRNLAddress;out aName;const aNameLength:TRNLInt32):boolean; override;
        function SocketCreate(const aType:TRNLSocketType;const aFamily:TRNLAddressFamily):TRNLSocket; override;
        procedure SocketDestroy(const aSocket:TRNLSocket); override;
-       function SocketShutdown(const aSocket:TRNLSocket;const aHow:TRNLSocketShutdown=RNL_SOCKET_SHUTDOWN_READ):boolean; override;
+       function SocketShutdown(const aSocket:TRNLSocket;const aHow:TRNLSocketShutdown=RNL_SOCKET_SHUTDOWN_READ_WRITE):boolean; override;
        function SocketGetAddress(const aSocket:TRNLSocket;out aAddress:TRNLAddress;const aFamily:TRNLAddressFamily):boolean; override;
        function SocketSetOption(const aSocket:TRNLSocket;const aOption:TRNLSocketOption;const aValue:TRNLInt32):boolean; override;
        function SocketGetOption(const aSocket:TRNLSocket;const aOption:TRNLSocketOption;out aValue:TRNLInt32):boolean; override;
@@ -2564,7 +2564,7 @@ type PRNLVersion=^TRNLVersion;
        function AddressGetHostIP(const aAddress:TRNLAddress;out aName;const aNameLength:TRNLInt32):boolean; override;
        function SocketCreate(const aType:TRNLSocketType;const aFamily:TRNLAddressFamily):TRNLSocket; override;
        procedure SocketDestroy(const aSocket:TRNLSocket); override;
-       function SocketShutdown(const aSocket:TRNLSocket;const aHow:TRNLSocketShutdown=RNL_SOCKET_SHUTDOWN_READ):boolean; override;
+       function SocketShutdown(const aSocket:TRNLSocket;const aHow:TRNLSocketShutdown=RNL_SOCKET_SHUTDOWN_READ_WRITE):boolean; override;
        function SocketGetAddress(const aSocket:TRNLSocket;out aAddress:TRNLAddress;const aFamily:TRNLAddressFamily):boolean; override;
        function SocketSetOption(const aSocket:TRNLSocket;const aOption:TRNLSocketOption;const aValue:TRNLInt32):boolean; override;
        function SocketGetOption(const aSocket:TRNLSocket;const aOption:TRNLSocketOption;out aValue:TRNLInt32):boolean; override;
@@ -10385,7 +10385,7 @@ procedure TRNLNetwork.SocketDestroy(const aSocket:TRNLSocket);
 begin
 end;
 
-function TRNLNetwork.SocketShutdown(const aSocket:TRNLSocket;const aHow:TRNLSocketShutdown=RNL_SOCKET_SHUTDOWN_READ):boolean;
+function TRNLNetwork.SocketShutdown(const aSocket:TRNLSocket;const aHow:TRNLSocketShutdown=RNL_SOCKET_SHUTDOWN_READ_WRITE):boolean;
 begin
  result:=false;
 end;
@@ -10643,7 +10643,7 @@ begin
 end;
 {$ifend}
 
-function TRNLRealNetwork.SocketShutdown(const aSocket:TRNLSocket;const aHow:TRNLSocketShutdown=RNL_SOCKET_SHUTDOWN_READ):boolean;
+function TRNLRealNetwork.SocketShutdown(const aSocket:TRNLSocket;const aHow:TRNLSocketShutdown=RNL_SOCKET_SHUTDOWN_READ_WRITE):boolean;
 begin
 {$if defined(Windows)}
  result:=_shutdown(aSocket,TRNLINt32(aHow))<>SOCKET_ERROR;
@@ -11790,7 +11790,7 @@ begin
  end;
 end;
 
-function TRNLVirtualNetwork.SocketShutdown(const aSocket:TRNLSocket;const aHow:TRNLSocketShutdown=RNL_SOCKET_SHUTDOWN_READ):boolean;
+function TRNLVirtualNetwork.SocketShutdown(const aSocket:TRNLSocket;const aHow:TRNLSocketShutdown=RNL_SOCKET_SHUTDOWN_READ_WRITE):boolean;
 begin
  result:=false;
 end;
@@ -12283,7 +12283,7 @@ begin
 
 end;
 
-function TRNLNetworkInterferenceSimulator.SocketShutdown(const aSocket:TRNLSocket;const aHow:TRNLSocketShutdown=RNL_SOCKET_SHUTDOWN_READ):boolean;
+function TRNLNetworkInterferenceSimulator.SocketShutdown(const aSocket:TRNLSocket;const aHow:TRNLSocketShutdown=RNL_SOCKET_SHUTDOWN_READ_WRITE):boolean;
 begin
  Update;
  result:=fNetwork.SocketShutdown(aSocket,aHow);
@@ -17430,23 +17430,48 @@ begin
 end;
 
 destructor TRNLHost.Destroy;
+var Index:TRNLInt32;
+    HostEvent:TRNLHostEvent;
 begin
 
- fEventQueue.Free;
+ for Index:=Low(TRNLHostSockets) to High(TRNLHostSockets) do begin
+  if fSockets[Index]<>RNL_SOCKET_NULL then begin
+   try
+    fNetwork.SocketShutdown(fSockets[Index],RNL_SOCKET_SHUTDOWN_READ_WRITE);
+   finally
+    fNetwork.SocketDestroy(fSockets[Index]);
+   end;
+   fSockets[Index]:=RNL_SOCKET_NULL;
+  end;
+ end;
+
+ try
+  while fEventQueue.Dequeue(HostEvent) do begin
+   FreeEvent(HostEvent);
+  end;
+ finally
+  FreeAndNil(fEventQueue);
+ end;
 
 {$if defined(RNL_LINEAR_PEER_LIST)}
- while fPeerList.Count>0 do begin
-  fPeerList[fPeerList.Count-1].Free;
+ try
+  while fPeerList.Count>0 do begin
+   fPeerList[fPeerList.Count-1].Free;
+  end;
+ finally
+  FreeAndNil(fPeerList);
  end;
- fPeerList.Free;
 {$else}
- while not fPeerList.IsEmpty do begin
-  fPeerList.Front.Value.Free;
+ try
+  while not fPeerList.IsEmpty do begin
+   fPeerList.Front.Value.Free;
+  end;
+ finally
+  FreeAndNil(fPeerList);
  end;
- fPeerList.Free;
 {$ifend}
 
- fRandomGenerator.Free;
+ FreeAndNil(fRandomGenerator);
 
  if assigned(fConnectionCandidateHashTable) then begin
   FreeMem(fConnectionCandidateHashTable);
@@ -17458,9 +17483,9 @@ begin
   fConnectionKnownCandidateHostAddressHashTable:=nil;
  end;
 
- fPeerIDMap.Free;
+ FreeAndNil(fPeerIDMap);
 
- fPeerIDManager.Free;
+ FreeAndNil(fPeerIDManager);
 
  Finalize(fOutgoingPacketBuffer);
 

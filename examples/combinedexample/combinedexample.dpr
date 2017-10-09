@@ -207,6 +207,7 @@ begin
      end;
     end;
    end;
+   Server.FreeEvent(Event);
   finally
    Server.Free;
   end;
@@ -271,6 +272,7 @@ begin
            end;
            RNL_HOST_EVENT_TYPE_DISCONNECT:begin
             if Event.Peer=Peer then begin
+             Event.Peer:=nil;
              ConsoleOutput('Client: Disconnected');
              Disconnected:=true;
              break;
@@ -278,6 +280,7 @@ begin
            end;
            RNL_HOST_EVENT_TYPE_DENIAL:begin
             if Event.Peer=Peer then begin
+             Event.Peer:=nil;
              ConsoleOutput('Client: Denied');
              Disconnected:=true;
              break;
@@ -295,6 +298,7 @@ begin
            end;
           end;
          end;
+         Client.FreeEvent(Event);
          if not Disconnected then begin
           ConsoleOutput('Client: Disconnecting');
           Peer.Disconnect;
@@ -307,17 +311,20 @@ begin
             RNL_HOST_EVENT_TYPE_DISCONNECT:begin
              if Event.Peer=Peer then begin
               ConsoleOutput('Client: Disconnected');
+              Event.Peer:=nil;
               break;
              end;
             end;
            end;
           end;
          end;
+         Client.FreeEvent(Event);
         end else begin
          ConsoleOutput('Connection failed');
         end;
        end;
        RNL_HOST_EVENT_TYPE_DENIAL:begin
+        Event.Peer:=nil;
         ConsoleOutput('Connection denied');
        end;
        else begin
@@ -333,6 +340,7 @@ begin
    end else begin
     ConsoleOutput('Connection failed');
    end;
+   Client.FreeEvent(Event);
   finally
    Client.Free;
   end;
