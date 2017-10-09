@@ -182,7 +182,10 @@ begin
    while (not Terminated) and (Server.Service(@Event,1000)<>RNL_HOST_SERVICE_STATUS_ERROR) do begin
     case Event.Type_ of
      RNL_HOST_EVENT_TYPE_CONNECT:begin
-      ConsoleOutput('Server: A new client connected');
+      ConsoleOutput(Format('Server: A new client connected, local peer ID %d, remote peer ID %d, channels count %d',
+                           [Event.Peer.LocalPeerID,
+                            Event.Peer.RemotePeerID,
+                            Event.Peer.CountChannels]));
       Event.Peer.Channels[0].SendMessageString('Hello world!');
       Event.Peer.Channels[0].SendMessageString('Hello another world!');
       Event.Peer.Channels[0].SendMessageString('Hello world in an another world! Yet another hello world with an yet another hello world!');
@@ -247,7 +250,10 @@ begin
       case Event.Type_ of
        RNL_HOST_EVENT_TYPE_APPROVAL:begin
         if Event.Peer=Peer then begin
-         ConsoleOutput('Client: Connected');
+         ConsoleOutput(Format('Client: Connected, local peer ID %d, remote peer ID %d, channels count %d',
+                              [Event.Peer.LocalPeerID,
+                               Event.Peer.RemotePeerID,
+                               Event.Peer.CountChannels]));
          //Peer.MTUProbe(5,100);
          Disconnected:=false;
          while (not Terminated) and (Client.Service(@Event,1000)<>RNL_HOST_SERVICE_STATUS_ERROR) do begin
@@ -257,7 +263,10 @@ begin
            end;
            RNL_HOST_EVENT_TYPE_CONNECT:begin
             if Event.Peer=Peer then begin
-             ConsoleOutput('Client: Connected');
+             ConsoleOutput(Format('Client: Connected, local peer ID %d, remote peer ID %d, channels count %d',
+                                  [Event.Peer.LocalPeerID,
+                                   Event.Peer.RemotePeerID,
+                                   Event.Peer.CountChannels]));
             end;
            end;
            RNL_HOST_EVENT_TYPE_DISCONNECT:begin
