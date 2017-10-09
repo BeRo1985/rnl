@@ -173,8 +173,8 @@ begin
   try
    Server.Address.Host:=RNL_HOST_ANY;
    Server.Address.Port:=64242;
- { RNLNetwork.AddressSetHost(Server.Address^,'127.0.0.1');
-   Server.Address.Port:=64242;}
+{  RNLNetwork.AddressSetHost(Server.Address^,'127.0.0.1');
+   Server.Address.Port:=64242;{}
    Server.Compressor:=RNLCompressorClass.Create;
    Server.Start;
    fReadyEvent.SetEvent;
@@ -183,23 +183,23 @@ begin
     case Event.Type_ of
      RNL_HOST_EVENT_TYPE_CONNECT:begin
       ConsoleOutput('Server: A new client connected');
-      Event.Connect.Peer.Channels[0].SendMessageString('Hello world!');
-      Event.Connect.Peer.Channels[0].SendMessageString('Hello another world!');
-      Event.Connect.Peer.Channels[0].SendMessageString('Hello world in an another world! Yet another hello world with an yet another hello world!');
-      Event.Connect.Peer.Channels[0].SendMessageString('Hello another world in an world! Yet another hello world with an yet another hello world!');
+      Event.Peer.Channels[0].SendMessageString('Hello world!');
+      Event.Peer.Channels[0].SendMessageString('Hello another world!');
+      Event.Peer.Channels[0].SendMessageString('Hello world in an another world! Yet another hello world with an yet another hello world!');
+      Event.Peer.Channels[0].SendMessageString('Hello another world in an world! Yet another hello world with an yet another hello world!');
  //   Server.Flush;
      end;
      RNL_HOST_EVENT_TYPE_DISCONNECT:begin
-      ConsoleOutput('Server: A client disconnected '+IntToStr(TRNLPtrUInt(Event.Disconnect.Peer)));
+      ConsoleOutput('Server: A client disconnected '+IntToStr(TRNLPtrUInt(Event.Peer)));
      end;
      RNL_HOST_EVENT_TYPE_MTU:begin
-      ConsoleOutput('Server: A client '+IntToStr(TRNLPtrUInt(Event.MTU.Peer))+' has new MTU '+IntToStr(TRNLPtrUInt(Event.MTU.MTU)));
+      ConsoleOutput('Server: A client '+IntToStr(TRNLPtrUInt(Event.Peer))+' has new MTU '+IntToStr(TRNLPtrUInt(Event.MTU)));
      end;
      RNL_HOST_EVENT_TYPE_RECEIVE:begin
       ConsoleOutput('Server: A message received');
- {    Event.Receive.Message.DecRef;
-      Event.Receive.Message:=nil;}
- {    Event.Receive.Peer.Channels[0].SendMessageString(Event.Receive.Message.AsString);
+ {    Event.Message.DecRef;
+      Event.Message:=nil;}
+ {    Event.Peer.Channels[0].SendMessageString(Event.Message.AsString);
       Sleep(10);{}
      end;
     end;
@@ -246,7 +246,7 @@ begin
      if Client.Service(@Event,5000)=RNL_HOST_SERVICE_STATUS_EVENT then begin
       case Event.Type_ of
        RNL_HOST_EVENT_TYPE_APPROVAL:begin
-        if Event.Connect.Peer=Peer then begin
+        if Event.Peer=Peer then begin
          ConsoleOutput('Client: Connected');
          //Peer.MTUProbe(5,100);
          Disconnected:=false;
@@ -256,32 +256,32 @@ begin
             //ConsoleOutput('Client: Nothing');
            end;
            RNL_HOST_EVENT_TYPE_CONNECT:begin
-            if Event.Disconnect.Peer=Peer then begin
+            if Event.Peer=Peer then begin
              ConsoleOutput('Client: Connected');
             end;
            end;
            RNL_HOST_EVENT_TYPE_DISCONNECT:begin
-            if Event.Disconnect.Peer=Peer then begin
+            if Event.Peer=Peer then begin
              ConsoleOutput('Client: Disconnected');
              Disconnected:=true;
              break;
             end;
            end;
            RNL_HOST_EVENT_TYPE_DENIAL:begin
-            if Event.Disconnect.Peer=Peer then begin
+            if Event.Peer=Peer then begin
              ConsoleOutput('Client: Denied');
              Disconnected:=true;
              break;
             end;
            end;
            RNL_HOST_EVENT_TYPE_MTU:begin
-            ConsoleOutput('Client: New MTU '+IntToStr(TRNLPtrUInt(Event.MTU.MTU)));
+            ConsoleOutput('Client: New MTU '+IntToStr(TRNLPtrUInt(Event.MTU)));
            end;
            RNL_HOST_EVENT_TYPE_RECEIVE:begin
-            ConsoleOutput('Client: A message received on channel '+IntToStr(Event.Receive.Channel)+': "'+String(Event.Receive.Message.AsString)+'"');
- {          Event.Receive.Message.DecRef;
-            Event.Receive.Message:=nil;}
- {          Event.Receive.Peer.Channels[0].SendMessageString(Event.Receive.Message.AsString);
+            ConsoleOutput('Client: A message received on channel '+IntToStr(Event.Channel)+': "'+String(Event.Message.AsString)+'"');
+ {          Event.Message.DecRef;
+            Event.Message:=nil;}
+ {          Event.Peer.Channels[0].SendMessageString(Event.Message.AsString);
             Sleep(10);{}
            end;
           end;
@@ -296,7 +296,7 @@ begin
              Event.Receive.Message:=nil;}
             end;
             RNL_HOST_EVENT_TYPE_DISCONNECT:begin
-             if Event.Disconnect.Peer=Peer then begin
+             if Event.Peer=Peer then begin
               ConsoleOutput('Client: Disconnected');
               break;
              end;

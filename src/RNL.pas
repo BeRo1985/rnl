@@ -447,6 +447,7 @@ uses {$if defined(Posix)}
       {$endif}
      {$elseif defined(Unix)}
       // FreePascal: Unix, Linux, Android, Darwin (MacOS, iOS)
+      ctypes,
       BaseUnix,
       Unix,
       UnixType,
@@ -467,7 +468,7 @@ uses {$if defined(Posix)}
 {    Generics.Defaults,
      Generics.Collections;}
 
-const RNL_VERSION='1.00.2017.10.09.03.46.0000';
+const RNL_VERSION='1.00.2017.10.09.08.15.0000';
 
 type PPRNLInt8=^PRNLInt8;
      PRNLInt8=^TRNLInt8;
@@ -1448,22 +1449,6 @@ type PRNLVersion=^TRNLVersion;
      PRNLCipherMAC=^TRNLCipherMAC;
      TRNLCipherMAC=array[0..15] of TRNLUInt8;
 
-     PRNLBuffer=^TRNLBuffer;
-     TRNLBuffer=record
-{$ifdef Unix}
-      Data:PRNLUInt8Array;
-      DataLength:TRNLUInt32;
-{$else}
-      DataLength:TRNLUInt32;
-      Data:PRNLUInt8Array;
-{$endif}
-     end;
-
-     TRNLBuffers=array of TRNLBuffer;
-
-     PRNLBufferArray=^TRNLBufferArray;
-     TRNLBufferArray=array[0..65535] of TRNLBuffer;
-
      PRNLSocketType=^TRNLSocketType;
      TRNLSocketType=
       (
@@ -1593,13 +1578,14 @@ type PRNLVersion=^TRNLVersion;
      PRNLOutgoingPacketBuffer=^TRNLOutgoingPacketBuffer;
      TRNLOutgoingPacketBuffer=record
       private
-       fAssociatedDataSize:TRNLSizeUInt;
        fSize:TRNLSizeUInt;
+       fAssociatedDataSize:TRNLSizeUInt;
        fBufferLength:TRNLSizeUInt;
        fData:TRNLPacketBuffer;
-      public
+     public
        procedure Reset(const aAssociatedDataSize:TRNLSizeUInt=0;const aBufferLength:TRNLSizeUInt=SizeOf(TRNLPacketBuffer));
        function HasSpaceFor(const aDataLength:TRNLSizeUInt):boolean;
+       function PayloadSize:TRNLSizeUInt;
        function Write(const aData;const aDataLength:TRNLSizeUInt):TRNLSizeUInt;
        property Size:TRNLSizeUInt read fSize;
      end;
@@ -1642,28 +1628,23 @@ type PRNLVersion=^TRNLVersion;
 
      PRNLConnectionCandidate=^TRNLConnectionCandidate;
      TRNLConnectionCandidate=record
-      case boolean of
-       false:(
-        State:TRNLConnectionCandidateState;
-        RemoteSalt:TRNLUInt64;
-        LocalSalt:TRNLUInt64;
-        CreateTime:TRNLTime;
-        Address:TRNLAddress;
-        LocalShortTermPrivateKey:TRNLKey;
-        LocalShortTermPublicKey:TRNLKey;
-        RemoteShortTermPublicKey:TRNLKey;
-        SharedSecretKey:TRNLKey;
-        OutgoingPeerID:TRNLUInt16;
-        IncomingBandwidthLimit:TRNLUInt32;
-        OutgoingBandwidthLimit:TRNLUInt32;
-        Nonce:TRNLUInt64;
-        CountChallengeRepetitions:TRNLUInt16;
-        Challenge:TRNLConnectionChallenge;
-        SolvedChallenge:TRNLConnectionChallenge;
-        Peer:TRNLPeer;
-       );
-       true:(
-       );
+      State:TRNLConnectionCandidateState;
+      RemoteSalt:TRNLUInt64;
+      LocalSalt:TRNLUInt64;
+      CreateTime:TRNLTime;
+      Address:TRNLAddress;
+      LocalShortTermPrivateKey:TRNLKey;
+      LocalShortTermPublicKey:TRNLKey;
+      RemoteShortTermPublicKey:TRNLKey;
+      SharedSecretKey:TRNLKey;
+      OutgoingPeerID:TRNLUInt16;
+      IncomingBandwidthLimit:TRNLUInt32;
+      OutgoingBandwidthLimit:TRNLUInt32;
+      Nonce:TRNLUInt64;
+      CountChallengeRepetitions:TRNLUInt16;
+      Challenge:TRNLConnectionChallenge;
+      SolvedChallenge:TRNLConnectionChallenge;
+      Peer:TRNLPeer;
      end;
 
      PRNLConnectionCandidateHashTable=^TRNLConnectionCandidateHashTable;
@@ -2353,71 +2334,26 @@ type PRNLVersion=^TRNLVersion;
        RNL_HOST_EVENT_TYPE_RECEIVE
       );
 
-     PRNLHostEventConnect=^TRNLHostEventConnect;
-     TRNLHostEventConnect=record
-      Peer:TRNLPeer;
-      Data:TRNLUInt64;
-     end;
-
-     PRNLHostEventDisconnect=^TRNLHostEventDisconnect;
-     TRNLHostEventDisconnect=record
-      Peer:TRNLPeer;
-      Data:TRNLUInt64;
-     end;
-
-     PRNLHostEventApproval=^TRNLHostEventApproval;
-     TRNLHostEventApproval=record
-      Peer:TRNLPeer;
-      Data:TRNLUInt64;
-     end;
-
-     PRNLHostEventDenial=^TRNLHostEventDenial;
-     TRNLHostEventDenial=record
-      Peer:TRNLPeer;
-      Reason:TRNLConnectionDenialReason;
-     end;
-
-     PRNLHostEventBandwidthLimits=^TRNLHostEventBandwidthLimits;
-     TRNLHostEventBandwidthLimits=record
-      Peer:TRNLPeer;
-     end;
-
-     PRNLHostEventMTU=^TRNLHostEventMTU;
-     TRNLHostEventMTU=record
-      Peer:TRNLPeer;
-      MTU:TRNLUInt16;
-     end;
-
-     PRNLHostEventReceive=^TRNLHostEventReceive;
-     TRNLHostEventReceive=record
-      Peer:TRNLPeer;
-      Channel:TRNLUInt8;
-      Message:TRNLMessage;
-     end;
-
      PRNLHostEvent=^TRNLHostEvent;
      TRNLHostEvent=record
-      case Type_:TRNLHostEventType of
-       RNL_HOST_EVENT_TYPE_CONNECT:(
-        Connect:TRNLHostEventConnect;
-       );
+      Type_:TRNLHostEventType;
+      Peer:TRNLPeer;
+      Message:TRNLMessage;
+      case TRNLHostEventType of
+       RNL_HOST_EVENT_TYPE_CONNECT,
        RNL_HOST_EVENT_TYPE_DISCONNECT:(
-        Disconnect:TRNLHostEventDisconnect;
+        Data:TRNLUInt64;
        );
        RNL_HOST_EVENT_TYPE_APPROVAL:(
-        Approval:TRNLHostEventApproval;
        );
        RNL_HOST_EVENT_TYPE_DENIAL:(
-        Denial:TRNLHostEventDenial;
-       );
-       RNL_HOST_EVENT_TYPE_BANDWIDTH_LIMITS:(
-        BandwidthLimits:TRNLHostEventBandwidthLimits;
+        DenialReason:TRNLConnectionDenialReason;
        );
        RNL_HOST_EVENT_TYPE_MTU:(
-        MTU:TRNLHostEventMTU;
+        MTU:TRNLUInt16;
        );
        RNL_HOST_EVENT_TYPE_RECEIVE:(
-        Receive:TRNLHostEventReceive;
+        Channel:TRNLUInt8;
        );
      end;
 
@@ -2490,10 +2426,8 @@ type PRNLVersion=^TRNLVersion;
        function SocketAccept(const aSocket:TRNLSocket;const aAddress:PRNLAddress;const aFamily:TRNLAddressFamily):TRNLSocket; virtual;
        function SocketSelect(const aMaxSocket:TRNLSocket;var aReadSet,aWriteSet:TRNLSocketSet;const aTimeout:TRNLTime):TRNLInt32; virtual;
        function SocketWait(const aSockets:array of TRNLSocket;var aConditions:TRNLSocketWaitConditions;const aTimeout:TRNLTime):boolean; virtual;
-       function SendBuffers(const aSocket:TRNLSocket;const aAddress:PRNLAddress;const aBuffers;const aCountBuffers:TRNLUInt32;const aFamily:TRNLAddressFamily):TRNLSizeInt; virtual;
-       function ReceiveBuffers(const aSocket:TRNLSocket;const aAddress:PRNLAddress;var aBuffers;const aCountBuffers:TRNLUInt32;const aFamily:TRNLAddressFamily):TRNLSizeInt; virtual;
        function Send(const aSocket:TRNLSocket;const aAddress:PRNLAddress;const aData;const aDataLength:TRNLSizeInt;const aFamily:TRNLAddressFamily):TRNLSizeInt; virtual;
-       function Receive(const aSocket:TRNLSocket;const aAddress:PRNLAddress;var aData;const aDataLength:TRNLSizeInt;const aFamily:TRNLAddressFamily):TRNLSizeInt; virtual;
+       function Receive(const aSocket:TRNLSocket;const aAddress:PRNLAddress;out aData;const aDataLength:TRNLSizeInt;const aFamily:TRNLAddressFamily):TRNLSizeInt; virtual;
       published
        property Instance:TRNLInstance read fInstance;
      end;
@@ -2520,10 +2454,8 @@ type PRNLVersion=^TRNLVersion;
        function SocketAccept(const aSocket:TRNLSocket;const aAddress:PRNLAddress;const aFamily:TRNLAddressFamily):TRNLSocket; override;
        function SocketSelect(const aMaxSocket:TRNLSocket;var aReadSet,aWriteSet:TRNLSocketSet;const aTimeout:TRNLTime):TRNLInt32; override;
        function SocketWait(const aSockets:array of TRNLSocket;var aConditions:TRNLSocketWaitConditions;const aTimeout:TRNLTime):boolean; override;
-       function SendBuffers(const aSocket:TRNLSocket;const aAddress:PRNLAddress;const aBuffers;const aCountBuffers:TRNLUInt32;const aFamily:TRNLAddressFamily):TRNLSizeInt; override;
-       function ReceiveBuffers(const aSocket:TRNLSocket;const aAddress:PRNLAddress;var aBuffers;const aCountBuffers:TRNLUInt32;const aFamily:TRNLAddressFamily):TRNLSizeInt; override;
        function Send(const aSocket:TRNLSocket;const aAddress:PRNLAddress;const aData;const aDataLength:TRNLSizeInt;const aFamily:TRNLAddressFamily):TRNLSizeInt; override;
-       function Receive(const aSocket:TRNLSocket;const aAddress:PRNLAddress;var aData;const aDataLength:TRNLSizeInt;const aFamily:TRNLAddressFamily):TRNLSizeInt; override;
+       function Receive(const aSocket:TRNLSocket;const aAddress:PRNLAddress;out aData;const aDataLength:TRNLSizeInt;const aFamily:TRNLAddressFamily):TRNLSizeInt; override;
      end;
 
      TRNLVirtualNetwork=class(TRNLNetwork)
@@ -2584,10 +2516,8 @@ type PRNLVersion=^TRNLVersion;
        function SocketAccept(const aSocket:TRNLSocket;const aAddress:PRNLAddress;const aFamily:TRNLAddressFamily):TRNLSocket; override;
        function SocketSelect(const aMaxSocket:TRNLSocket;var aReadSet,aWriteSet:TRNLSocketSet;const aTimeout:TRNLTime):TRNLInt32; override;
        function SocketWait(const aSockets:array of TRNLSocket;var aConditions:TRNLSocketWaitConditions;const aTimeout:TRNLTime):boolean; override;
-       function SendBuffers(const aSocket:TRNLSocket;const aAddress:PRNLAddress;const aBuffers;const aCountBuffers:TRNLUInt32;const aFamily:TRNLAddressFamily):TRNLSizeInt; override;
-       function ReceiveBuffers(const aSocket:TRNLSocket;const aAddress:PRNLAddress;var aBuffers;const aCountBuffers:TRNLUInt32;const aFamily:TRNLAddressFamily):TRNLSizeInt; override;
        function Send(const aSocket:TRNLSocket;const aAddress:PRNLAddress;const aData;const aDataLength:TRNLSizeInt;const aFamily:TRNLAddressFamily):TRNLSizeInt; override;
-       function Receive(const aSocket:TRNLSocket;const aAddress:PRNLAddress;var aData;const aDataLength:TRNLSizeInt;const aFamily:TRNLAddressFamily):TRNLSizeInt; override;
+       function Receive(const aSocket:TRNLSocket;const aAddress:PRNLAddress;out aData;const aDataLength:TRNLSizeInt;const aFamily:TRNLAddressFamily):TRNLSizeInt; override;
      end;
 
      TRNLNetworkInterferenceSimulator=class(TRNLNetwork)
@@ -2644,10 +2574,8 @@ type PRNLVersion=^TRNLVersion;
        function SocketAccept(const aSocket:TRNLSocket;const aAddress:PRNLAddress;const aFamily:TRNLAddressFamily):TRNLSocket; override;
        function SocketSelect(const aMaxSocket:TRNLSocket;var aReadSet,aWriteSet:TRNLSocketSet;const aTimeout:TRNLTime):TRNLInt32; override;
        function SocketWait(const aSockets:array of TRNLSocket;var aConditions:TRNLSocketWaitConditions;const aTimeout:TRNLTime):boolean; override;
-       function SendBuffers(const aSocket:TRNLSocket;const aAddress:PRNLAddress;const aBuffers;const aCountBuffers:TRNLUInt32;const aFamily:TRNLAddressFamily):TRNLSizeInt; override;
-       function ReceiveBuffers(const aSocket:TRNLSocket;const aAddress:PRNLAddress;var aBuffers;const aCountBuffers:TRNLUInt32;const aFamily:TRNLAddressFamily):TRNLSizeInt; override;
        function Send(const aSocket:TRNLSocket;const aAddress:PRNLAddress;const aData;const aDataLength:TRNLSizeInt;const aFamily:TRNLAddressFamily):TRNLSizeInt; override;
-       function Receive(const aSocket:TRNLSocket;const aAddress:PRNLAddress;var aData;const aDataLength:TRNLSizeInt;const aFamily:TRNLAddressFamily):TRNLSizeInt; override;
+       function Receive(const aSocket:TRNLSocket;const aAddress:PRNLAddress;out aData;const aDataLength:TRNLSizeInt;const aFamily:TRNLAddressFamily):TRNLSizeInt; override;
       published
        property SimulatedIncomingPacketLossProbabilityFactor:TRNLUInt32 read fSimulatedIncomingPacketLossProbabilityFactor write fSimulatedIncomingPacketLossProbabilityFactor;
        property SimulatedOutgoingPacketLossProbabilityFactor:TRNLUInt32 read fSimulatedOutgoingPacketLossProbabilityFactor write fSimulatedOutgoingPacketLossProbabilityFactor;
@@ -3151,6 +3079,7 @@ type PRNLVersion=^TRNLVersion;
        fNextReliableBlockPacketTimeout:TRNLTime;
 
        fNextPendingConnectionSendTimeout:TRNLTime;
+
        fNextPendingDisconnectionSendTimeout:TRNLTime;
 
        fDisconnectionTimeout:TRNLTime;
@@ -3212,8 +3141,6 @@ type PRNLVersion=^TRNLVersion;
        procedure UpdateRoundTripTime(const aRoundTripTime:TRNLInt64);
 
        function SendPacket(const aData;const aDataLength:TRNLSizeUInt):TRNLNetworkSendResult;
-
-       function SendBuffers(const aBuffers:array of TRNLBuffer):TRNLNetworkSendResult;
 
        procedure UpdatePatchLossStatistics;
 
@@ -3433,8 +3360,6 @@ type PRNLVersion=^TRNLVersion;
        procedure SetEncryptedPacketSequenceWindowSize(const aEncryptedPacketSequenceWindowSize:TRNLUInt32);
 
        function SendPacket(const aAddress:TRNLAddress;const aData;const aDataLength:TRNLSizeUInt):TRNLNetworkSendResult;
-
-       function SendBuffers(const aAddress:TRNLAddress;const aBuffers:array of TRNLBuffer):TRNLNetworkSendResult;
 
        procedure ResetConnectionAttemptHistory;
 
@@ -4026,8 +3951,7 @@ const Debruijn32Multiplicator=TRNLUInt32($077cb531);
       Debruijn32Mask=31;
       Debruijn32Table:array[0..31] of TRNLInt32=(0,1,28,2,29,14,24,3,30,22,20,15,25,17,4,8,31,27,13,23,21,19,16,7,26,12,18,6,11,5,10,9);
 begin
-  result:=Debruijn32Table[(((Value and not (Value-1))*Debruijn32Multiplicator) shr Debruijn32Shift) and Debruijn32Mask];
- end;
+ result:=Debruijn32Table[(((Value and not (Value-1))*Debruijn32Multiplicator) shr Debruijn32Shift) and Debruijn32Mask];
 end;
 {$endif}
 {$endif}
@@ -9038,7 +8962,7 @@ type TInAddr=record
 
      PWSABUF=^TWSABUF;
      LPWSABUF=PWSABUF;
-     TWSABUF=packed record
+     TWSABUF=record
       len:TRNLUInt32;
       buf:PRNLUInt8Array;
      end;
@@ -10102,19 +10026,28 @@ end;
 
 procedure TRNLOutgoingPacketBuffer.Reset(const aAssociatedDataSize:TRNLSizeUInt=0;const aBufferLength:TRNLSizeUInt=SizeOf(TRNLPacketBuffer));
 begin
- fSize:=0;
  fAssociatedDataSize:=aAssociatedDataSize;
+ fSize:=aAssociatedDataSize;
  fBufferLength:=aBufferLength;
 end;
 
 function TRNLOutgoingPacketBuffer.HasSpaceFor(const aDataLength:TRNLSizeUInt):boolean;
 begin
- result:=Max(0,fBufferLength-(fSize+fAssociatedDataSize))>=aDataLength;
+ result:=(fSize<=fBufferLength) and ((fBufferLength-fSize)>=aDataLength);
+end;
+
+function TRNLOutgoingPacketBuffer.PayloadSize:TRNLSizeUInt;
+begin
+ if fAssociatedDataSize<=fSize then begin
+  result:=fSize-fAssociatedDataSize;
+ end else begin
+  result:=0;
+ end;
 end;
 
 function TRNLOutgoingPacketBuffer.Write(const aData;const aDataLength:TRNLSizeUInt):TRNLSizeUInt;
 begin
- result:=TRNLSizeUInt(SizeOf(TRNLPacketBuffer))-(fSize+fAssociatedDataSize);
+ result:=TRNLSizeUInt(SizeOf(TRNLPacketBuffer))-fSize;
  if aDataLength<result then begin
   result:=aDataLength;
  end;
@@ -10316,84 +10249,72 @@ begin
  end;
 end;
 
-function ChecksumCRC32C(const aBuffers;const aCountBuffers:TRNLUInt32):TRNLUInt32;
-var Buffer:PRNLBuffer;
-    BufferIndex,Remaining:TRNLInt32;
+function ChecksumCRC32C(const aLocation;const aSize:TRNLUInt32):TRNLUInt32;
+var Remaining:TRNLInt32;
     Data:PRNLUInt8;
 {$ifdef CPU64}
     Value:TRNLUInt64;
 {$endif}
 begin
  result:=$ffffffff;
- for BufferIndex:=0 to aCountBuffers-1 do begin
-  Buffer:=@PRNLBufferArray(TRNLPointer(@aBuffers))^[BufferIndex];
-  Remaining:=Buffer^.DataLength;
-  if Remaining>0 then begin
-   Data:=@Buffer^.Data[0];
-   while (Remaining>0) and (({%H-}TRNLPtrUInt(TRNLPointer(Data)) and ({$ifdef CPU64}SizeOf(TRNLUInt64){$else}SizeOf(TRNLUInt32){$endif}-1))<>0) do begin
-    result:=(result shr 8) xor CRC32CTable[0,(result and $ff) xor Data^];
-    inc(Data);
-    dec(Remaining);
-   end;
+ Remaining:=aSize;
+ if Remaining>0 then begin
+  Data:=@aLocation;
+  while (Remaining>0) and (({%H-}TRNLPtrUInt(TRNLPointer(Data)) and ({$ifdef CPU64}SizeOf(TRNLUInt64){$else}SizeOf(TRNLUInt32){$endif}-1))<>0) do begin
+   result:=(result shr 8) xor CRC32CTable[0,(result and $ff) xor Data^];
+   inc(Data);
+   dec(Remaining);
+  end;
 {$ifdef CPU64}
-   while Remaining>=SizeOf(TRNLUInt64) do begin
-    Value:=result xor PRNLUInt64(TRNLPointer(Data))^;
+  while Remaining>=SizeOf(TRNLUInt64) do begin
+   Value:=result xor PRNLUInt64(TRNLPointer(Data))^;
 {$ifdef BIG_ENDIAN}
-    result:=CRC32CTable[0,(Value shr 0) and $ff] xor
-            CRC32CTable[1,(Value shr 8) and $ff] xor
-            CRC32CTable[2,(Value shr 16) and $ff] xor
-            CRC32CTable[3,(Value shr 24) and $ff] xor
-            CRC32CTable[4,(Value shr 32) and $ff] xor
-            CRC32CTable[5,(Value shr 40) and $ff] xor
-            CRC32CTable[6,(Value shr 48) and $ff] xor
-            CRC32CTable[7,(Value shr 56) and $ff];
+   result:=CRC32CTable[0,(Value shr 0) and $ff] xor
+           CRC32CTable[1,(Value shr 8) and $ff] xor
+           CRC32CTable[2,(Value shr 16) and $ff] xor
+           CRC32CTable[3,(Value shr 24) and $ff] xor
+           CRC32CTable[4,(Value shr 32) and $ff] xor
+           CRC32CTable[5,(Value shr 40) and $ff] xor
+           CRC32CTable[6,(Value shr 48) and $ff] xor
+           CRC32CTable[7,(Value shr 56) and $ff];
 {$else}
-    result:=CRC32CTable[7,(Value shr 0) and $ff] xor
-            CRC32CTable[6,(Value shr 8) and $ff] xor
-            CRC32CTable[5,(Value shr 16) and $ff] xor
-            CRC32CTable[4,(Value shr 24) and $ff] xor
-            CRC32CTable[3,(Value shr 32) and $ff] xor
-            CRC32CTable[2,(Value shr 40) and $ff] xor
-            CRC32CTable[1,(Value shr 48) and $ff] xor
-            CRC32CTable[0,(Value shr 56) and $ff];
+   result:=CRC32CTable[7,(Value shr 0) and $ff] xor
+           CRC32CTable[6,(Value shr 8) and $ff] xor
+           CRC32CTable[5,(Value shr 16) and $ff] xor
+           CRC32CTable[4,(Value shr 24) and $ff] xor
+           CRC32CTable[3,(Value shr 32) and $ff] xor
+           CRC32CTable[2,(Value shr 40) and $ff] xor
+           CRC32CTable[1,(Value shr 48) and $ff] xor
+           CRC32CTable[0,(Value shr 56) and $ff];
 {$endif}
-    inc(Data,SizeOf(TRNLUInt64));
-    dec(Remaining,SizeOf(TRNLUInt64));
-   end;
+   inc(Data,SizeOf(TRNLUInt64));
+   dec(Remaining,SizeOf(TRNLUInt64));
+  end;
 {$else}
-   while Remaining>=SizeOf(TRNLUInt32) do begin
-    result:=result xor PRNLUInt32(TRNLPointer(Data))^;
+  while Remaining>=SizeOf(TRNLUInt32) do begin
+   result:=result xor PRNLUInt32(TRNLPointer(Data))^;
 {$ifdef BIG_ENDIAN}
-    result:=CRC32CTable[0,(result shr 0) and $ff] xor
-            CRC32CTable[1,(result shr 8) and $ff] xor
-            CRC32CTable[2,(result shr 16) and $ff] xor
-            CRC32CTable[3,(result shr 24) and $ff];
+   result:=CRC32CTable[0,(result shr 0) and $ff] xor
+           CRC32CTable[1,(result shr 8) and $ff] xor
+           CRC32CTable[2,(result shr 16) and $ff] xor
+           CRC32CTable[3,(result shr 24) and $ff];
 {$else}
-    result:=CRC32CTable[3,(result shr 0) and $ff] xor
-            CRC32CTable[2,(result shr 8) and $ff] xor
-            CRC32CTable[1,(result shr 16) and $ff] xor
-            CRC32CTable[0,(result shr 24) and $ff];
+   result:=CRC32CTable[3,(result shr 0) and $ff] xor
+           CRC32CTable[2,(result shr 8) and $ff] xor
+           CRC32CTable[1,(result shr 16) and $ff] xor
+           CRC32CTable[0,(result shr 24) and $ff];
 {$endif}
-    inc(Data,SizeOf(TRNLUInt32));
-    dec(Remaining,SizeOf(TRNLUInt32));
-   end;
+   inc(Data,SizeOf(TRNLUInt32));
+   dec(Remaining,SizeOf(TRNLUInt32));
+  end;
 {$endif}
-   while Remaining>0 do begin
-    result:=(result shr 8) xor CRC32CTable[0,(result and $ff) xor Data^];
-    inc(Data);
-    dec(Remaining);
-   end;
+  while Remaining>0 do begin
+   result:=(result shr 8) xor CRC32CTable[0,(result and $ff) xor Data^];
+   inc(Data);
+   dec(Remaining);
   end;
  end;
  result:=not result;
-end;
-
-function DirectChecksumCRC32C(const aLocation;const aSize:TRNLUInt32):TRNLUInt32;
-var Buffer:TRNLBuffer;
-begin
- Buffer.Data:=@aLocation;
- Buffer.DataLength:=aSize;
- result:=ChecksumCRC32C(Buffer,1);
 end;
 
 constructor TRNLInstance.Create;
@@ -10509,22 +10430,12 @@ begin
  result:=false;
 end;
 
-function TRNLNetwork.SendBuffers(const aSocket:TRNLSocket;const aAddress:PRNLAddress;const aBuffers;const aCountBuffers:TRNLUInt32;const aFamily:TRNLAddressFamily):TRNLSizeInt;
-begin
- result:=-1;
-end;
-
-function TRNLNetwork.ReceiveBuffers(const aSocket:TRNLSocket;const aAddress:PRNLAddress;var aBuffers;const aCountBuffers:TRNLUInt32;const aFamily:TRNLAddressFamily):TRNLSizeInt;
-begin
- result:=-1;
-end;
-
 function TRNLNetwork.Send(const aSocket:TRNLSocket;const aAddress:PRNLAddress;const aData;const aDataLength:TRNLSizeInt;const aFamily:TRNLAddressFamily):TRNLSizeInt;
 begin
  result:=-1;
 end;
 
-function TRNLNetwork.Receive(const aSocket:TRNLSocket;const aAddress:PRNLAddress;var aData;const aDataLength:TRNLSizeInt;const aFamily:TRNLAddressFamily):TRNLSizeInt;
+function TRNLNetwork.Receive(const aSocket:TRNLSocket;const aAddress:PRNLAddress;out aData;const aDataLength:TRNLSizeInt;const aFamily:TRNLAddressFamily):TRNLSizeInt;
 begin
  result:=-1;
 end;
@@ -11182,38 +11093,56 @@ begin
  result:=true;
 end;
 
-function TRNLRealNetwork.SendBuffers(const aSocket:TRNLSocket;const aAddress:PRNLAddress;const aBuffers;const aCountBuffers:TRNLUInt32;const aFamily:TRNLAddressFamily):TRNLSizeInt;
+function TRNLRealNetwork.Send(const aSocket:TRNLSocket;const aAddress:PRNLAddress;const aData;const aDataLength:TRNLSizeInt;const aFamily:TRNLAddressFamily):TRNLSizeInt;
 {$if defined(Windows)}
 var SIN:TSockaddrStorage;
     SentLength:TRNLUInt32;
+    OK:boolean;
+    Buffer:TWSABUF;
+begin
+ Buffer.buf:=@aData;
+ Buffer.len:=aDataLength;
+ if assigned(aAddress) then begin
+  aAddress^.SetSIN(@SIN,aFamily);
+  OK:=WSASendTo(aSocket,LPWSABUF(@Buffer),1,SentLength,0,TRNLPointer(@SIN),aFamily.GetSockAddrSize,nil,nil)<>SOCKET_ERROR;
+ end else begin
+  OK:=WSASendTo(aSocket,LPWSABUF(@Buffer),1,SentLength,0,nil,0,nil,nil)<>SOCKET_ERROR;
+ end;
+ if OK then begin
+  result:=SentLength;
+ end else begin
+  case WSAGetLastError of
+   WSAEWOULDBLOCK,WSAEMSGSIZE:begin
+    result:=0;
+   end;
+   else begin
+    result:=-1;
+   end;
+  end;
+ end;
+end;
+{$elseif defined(fpc)}
+var SIN:TSockaddrStorage;
+    SentLength:TRNLInt32;
 begin
  if assigned(aAddress) then begin
   aAddress^.SetSIN(@SIN,aFamily);
-  if WSASendTo(aSocket,LPWSABUF(@aBuffers),aCountBuffers,SentLength,0,TRNLPointer(@SIN),aFamily.GetSockAddrSize,nil,nil)=SOCKET_ERROR then begin
-   case WSAGetLastError of
-    WSAEWOULDBLOCK,WSAEMSGSIZE:begin
-     result:=0;
-    end;
-    else begin
-     result:=-1;
-    end;
-   end;
-   exit;
-  end;
+  SentLength:=fpSendTo(aSocket,@aData,aDataLength,MSG_NOSIGNAL,TRNLPointer(@SIN),aFamily.GetSockAddrSize);
  end else begin
-  if WSASendTo(aSocket,LPWSABUF(@aBuffers),aCountBuffers,SentLength,0,nil,0,nil,nil)=SOCKET_ERROR then begin
-   case WSAGetLastError of
-    WSAEWOULDBLOCK,WSAEMSGSIZE:begin
-     result:=0;
-    end;
-    else begin
-     result:=-1;
-    end;
+  SentLength:=fpSendTo(aSocket,@aData,aDataLength,MSG_NOSIGNAL,nil,0);
+ end;
+ if SentLength<>SOCKET_ERROR then begin
+  result:=SentLength;
+ end else begin
+  case SocketError of
+   EsockEWOULDBLOCK{,EsockECONNRESET},EsockEMSGSIZE:begin
+    result:=0;
    end;
-   exit;
+   else begin
+    result:=-1;
+   end;
   end;
  end;
- result:=SentLength;
 end;
 {$else}
 var SIN:TSockaddrStorage;
@@ -11221,181 +11150,118 @@ var SIN:TSockaddrStorage;
 begin
  if assigned(aAddress) then begin
   aAddress^.SetSIN(@SIN,aFamily);
-{$ifdef fpc}
-  SentLength:=fpSendTo(aSocket,TRNLPointer(@aBuffers),aCountBuffers,MSG_NOSIGNAL,TRNLPointer(@SIN),aFamily.GetSockAddrSize);
-  if SentLength=SOCKET_ERROR then begin
-   case socketerror of
-    EsockEWOULDBLOCK,EsockEMSGSIZE:begin
-{$else}
-  SentLength:=Posix.SysSocket.SendTo(aSocket,aBuffers,aCountBuffers,MSG_NOSIGNAL,sockaddr(TRNLPointer(@SIN)^),aFamily.GetSockAddrSize);
-  if SentLength=SOCKET_ERROR then begin
-   case GetLastError of
-    EWOULDBLOCK,EMSGSIZE:begin
-{$endif}
-     result:=0;
-    end;
-    else begin
-     result:=-1;
-    end;
-   end;
-   exit;
-  end;
+  SentLength:=Posix.SysSocket.SendTo(aSocket,aData,aDataLength,MSG_NOSIGNAL,sockaddr(TRNLPointer(@SIN)^),aFamily.GetSockAddrSize);
  end else begin
-{$ifdef fpc}
-  SentLength:=fpSendTo(aSocket,TRNLPointer(@aBuffers),aCountBuffers,MSG_NOSIGNAL,nil,0);
-  if SentLength=SOCKET_ERROR then begin
-   case socketerror of
-    EsockEWOULDBLOCK,EsockEMSGSIZE:begin
-{$else}
-  SentLength:=Posix.SysSocket.SendTo(aSocket,aBuffers,aCountBuffers,MSG_NOSIGNAL,sockaddr(TRNLPointer(nil)^),0);
-  if SentLength=SOCKET_ERROR then begin
-   case GetLastError of
-    EWOULDBLOCK,EMSGSIZE:begin
-{$endif}
-     result:=0;
-    end;
-    else begin
-     result:=-1;
-    end;
+  SentLength:=Posix.SysSocket.SendTo(aSocket,aData,aDataLength,MSG_NOSIGNAL,sockaddr(TRNLPointer(nil)^),0);
+ end;
+ if SentLength<>SOCKET_ERROR then begin
+  result:=SentLength;
+ end else begin
+  case GetLastError of
+   EWOULDBLOCK,EMSGSIZE:begin
+    result:=0;
    end;
-   exit;
+   else begin
+    result:=-1;
+   end;
   end;
  end;
- result:=SentLength;
 end;
 {$ifend}
 
-function TRNLRealNetwork.ReceiveBuffers(const aSocket:TRNLSocket;const aAddress:PRNLAddress;var aBuffers;const aCountBuffers:TRNLUInt32;const aFamily:TRNLAddressFamily):TRNLSizeInt;
+function TRNLRealNetwork.Receive(const aSocket:TRNLSocket;const aAddress:PRNLAddress;out aData;const aDataLength:TRNLSizeInt;const aFamily:TRNLAddressFamily):TRNLSizeInt;
 {$if defined(Windows)}
 var SIN:TSockaddrStorage;
     SINLength:TRNLInt32;
     Flags,RecvLength:TRNLUInt32;
+    OK:boolean;
+    Buffer:TWSABUF;
 begin
+ Buffer.buf:=@aData;
+ Buffer.len:=aDataLength;
  SINLength:=aFamily.GetSockAddrSize;
  Flags:=0;
  if assigned(aAddress) then begin
-  if WSARecvFrom(aSocket,LPWSABUF(@aBuffers),aCountBuffers,RecvLength,Flags,TRNLPointer(@SIN),@SINLength,nil,nil)=SOCKET_ERROR then begin
-   case WSAGetLastError of
-    WSAEWOULDBLOCK,WSAECONNRESET,WSAEMSGSIZE:begin
-     result:=0;
-    end;
-    else begin
-     result:=-1;
-    end;
+  OK:=WSARecvFrom(aSocket,LPWSABUF(@Buffer),1,RecvLength,Flags,TRNLPointer(@SIN),@SINLength,nil,nil)<>SOCKET_ERROR;
+ end else begin
+  OK:=WSARecvFrom(aSocket,LPWSABUF(@Buffer),1,RecvLength,Flags,nil,nil,nil,nil)<>SOCKET_ERROR;
+ end;
+ if OK then begin
+  if (Flags and MSG_PARTIAL)<>0 then begin
+   result:=-1;
+  end else begin
+   if assigned(aAddress) then begin
+    aAddress^.SetAddress(@SIN);
    end;
-   exit;
+   result:=RecvLength;
   end;
  end else begin
-  if WSARecvFrom(aSocket,LPWSABUF(@aBuffers),aCountBuffers,RecvLength,Flags,nil,nil,nil,nil)=SOCKET_ERROR then begin
-   case WSAGetLastError of
-    WSAEWOULDBLOCK,WSAECONNRESET,WSAEMSGSIZE:begin
-     result:=0;
-    end;
-    else begin
-     result:=-1;
-    end;
+  case WSAGetLastError of
+   WSAEWOULDBLOCK,WSAECONNRESET,WSAEMSGSIZE:begin
+    result:=0;
    end;
-   exit;
+   else begin
+    result:=-1;
+   end;
   end;
  end;
- if (Flags and MSG_PARTIAL)<>0 then begin
-  result:=-1;
-  exit;
- end;
+end;
+{$elseif defined(fpc)}
+var SIN:TSockaddrStorage;
+    SINLength:TRNLInt32;
+    RecvLength:TRNLSizeInt;
+begin
+ SINLength:=aFamily.GetSockAddrSize;
  if assigned(aAddress) then begin
-  aAddress^.SetAddress(@SIN);
+  RecvLength:=fpRecvFrom(aSocket,@aData,aDataLength,MSG_NOSIGNAL,TRNLPointer(@SIN),@SINLength);
+ end else begin
+  RecvLength:=fpRecvFrom(aSocket,@aData,aDataLength,MSG_NOSIGNAL,nil,nil);
  end;
- result:=RecvLength;
+ if RecvLength<>SOCKET_ERROR then begin
+  if assigned(aAddress) then begin
+   aAddress^.SetAddress(@SIN);
+  end;
+  result:=RecvLength;
+ end else begin
+  case SocketError of
+   EsockEWOULDBLOCK{,EsockECONNRESET},EsockEMSGSIZE:begin
+    result:=0;
+   end;
+   else begin
+    result:=-1;
+   end;
+  end;
+ end;
 end;
 {$else}
 var SIN:TSockaddrStorage;
-    SINLength,RecvLength:TRNLInt32;
+    SINLength:TRNLInt32;
+    RecvLength:TRNLSizeInt;
 begin
  SINLength:=aFamily.GetSockAddrSize;
  RecvLength:=0;
-{$ifdef fpc}
  if assigned(aAddress) then begin
-  RecvLength:=fpRecvFrom(aSocket,TRNLPointer(@aBuffers),aCountBuffers,MSG_NOSIGNAL,TRNLPointer(@SIN),@SINLength);
-  if RecvLength=SOCKET_ERROR then begin
-   case SocketError of
-    EsockEWOULDBLOCK{,EsockECONNRESET},EsockEMSGSIZE:begin
-     result:=0;
-    end;
-    else begin
-     result:=-1;
-    end;
-   end;
-   exit;
-  end;
+  RecvLength:=Posix.SysSocket.RecvFrom(aSocket,aData,aDataLength,MSG_NOSIGNAL,sockaddr(TRNLPointer(@SIN)^),TRNLUInt32(SINLength));
  end else begin
-  RecvLength:=fpRecvFrom(aSocket,TRNLPointer(@aBuffers),aCountBuffers,MSG_NOSIGNAL,nil,nil);
-  if RecvLength=SOCKET_ERROR then begin
-   case SocketError of
-    EsockEWOULDBLOCK{,EsockECONNRESET},EsockEMSGSIZE:begin
-     result:=0;
-    end;
-    else begin
-     result:=-1;
-    end;
-   end;
-   exit;
-  end;
+  RecvLength:=Posix.SysSocket.RecvFrom(aSocket,aData,aDataLength,MSG_NOSIGNAL,sockaddr(TRNLPointer(nil)^),TRNLUInt32(TRNLPointer(@SIN)^));
  end;
-{$else}
- if assigned(aAddress) then begin
-  RecvLength:=Posix.SysSocket.RecvFrom(aSocket,aBuffers,aCountBuffers,MSG_NOSIGNAL,sockaddr(TRNLPointer(@SIN)^),TRNLUInt32(SINLength));
-  if RecvLength=SOCKET_ERROR then begin
-   case GetLastError of
-    EWOULDBLOCK{,ECONNRESET},EMSGSIZE:begin
-     result:=0;
-    end;
-    else begin
-     result:=-1;
-    end;
-   end;
-   exit;
+ if RecvLength<>SOCKET_ERROR then begin
+  if assigned(aAddress) then begin
+   aAddress^.SetAddress(@SIN);
   end;
+  result:=RecvLength;
  end else begin
-  RecvLength:=Posix.SysSocket.RecvFrom(aSocket,aBuffers,aCountBuffers,MSG_NOSIGNAL,sockaddr(TRNLPointer(nil)^),TRNLUInt32(TRNLPointer(@SIN)^));
-  if RecvLength=SOCKET_ERROR then begin
-   case GetLastError of
-    EWOULDBLOCK{,ECONNRESET},EMSGSIZE:begin
-     result:=0;
-    end;
-    else begin
-     result:=-1;
-    end;
+  case GetLastError of
+   EWOULDBLOCK{,ECONNRESET},EMSGSIZE:begin
+    result:=0;
    end;
-   exit;
+   else begin
+    result:=-1;
+   end;
   end;
  end;
-{$endif}
-{if (Flags and MSG_PARTIAL)<>0 then begin
-  result:=-1;
-  exit;
- end;}
- if assigned(aAddress) then begin
-  aAddress^.SetAddress(@SIN);
- end;
- result:=RecvLength;
 end;
 {$ifend}
-
-function TRNLRealNetwork.Send(const aSocket:TRNLSocket;const aAddress:PRNLAddress;const aData;const aDataLength:TRNLSizeInt;const aFamily:TRNLAddressFamily):TRNLSizeInt;
-var Buffer:TRNLBuffer;
-begin
- Buffer.Data:=@aData;
- Buffer.DataLength:=aDataLength;
- result:=SendBuffers(aSocket,aAddress,Buffer,1,aFamily);
-end;
-
-function TRNLRealNetwork.Receive(const aSocket:TRNLSocket;const aAddress:PRNLAddress;var aData;const aDataLength:TRNLSizeInt;const aFamily:TRNLAddressFamily):TRNLSizeInt;
-var Buffer:TRNLBuffer;
-begin
- Buffer.Data:=@aData;
- Buffer.DataLength:=aDataLength;
- result:=ReceiveBuffers(aSocket,aAddress,Buffer,1,aFamily);
-end;
 
 constructor TRNLVirtualNetwork.TRNLVirtualNetworkSocketInstance.Create(const aNetwork:TRNLVirtualNetwork;const aSocket:TRNLSocket);
 begin
@@ -12038,51 +11904,6 @@ begin
  result:=true;
 end;
 
-function TRNLVirtualNetwork.SendBuffers(const aSocket:TRNLSocket;const aAddress:PRNLAddress;const aBuffers;const aCountBuffers:TRNLUInt32;const aFamily:TRNLAddressFamily):TRNLSizeInt;
-var Index:TRNLSizeInt;
-    DataLength:TRNLSizeUInt;
-    Data:TBytes;
-begin
- result:=-1;
- if aCountBuffers=0 then begin
-  result:=0;
- end else if aCountBuffers=1 then begin
-  result:=Send(aSocket,aAddress,TRNLBuffer(aBuffers).Data^,TRNLBuffer(aBuffers).DataLength,aFamily);
- end else if aCountBuffers>1 then begin
-  Data:=nil;
-  try
-   DataLength:=0;
-   for Index:=0 to aCountBuffers-1 do begin
-    inc(DataLength,PRNLBufferArray(TRNLPointer(@aBuffers))^[Index].DataLength);
-   end;
-   SetLength(Data,DataLength);
-   DataLength:=0;
-   for Index:=0 to aCountBuffers-1 do begin
-    System.Move(PRNLBufferArray(TRNLPointer(@aBuffers))^[Index].Data^,
-                Data[DataLength],
-                PRNLBufferArray(TRNLPointer(@aBuffers))^[Index].DataLength);
-    inc(DataLength,PRNLBufferArray(TRNLPointer(@aBuffers))^[Index].DataLength);
-   end;
-   result:=Send(aSocket,aAddress,Data[0],DataLength,aFamily);
-  finally
-   Data:=nil;
-  end;
- end;
-end;
-
-function TRNLVirtualNetwork.ReceiveBuffers(const aSocket:TRNLSocket;const aAddress:PRNLAddress;var aBuffers;const aCountBuffers:TRNLUInt32;const aFamily:TRNLAddressFamily):TRNLSizeInt;
-begin
- if aCountBuffers>0 then begin
-  result:=Receive(aSocket,aAddress,TRNLBuffer(aBuffers).Data^,TRNLBuffer(aBuffers).DataLength,aFamily);
-  if result>=0 then begin
-   TRNLBuffer(aBuffers).DataLength:=result;
-   result:=0;
-  end;
- end else begin
-  result:=-1;
- end;
-end;
-
 function TRNLVirtualNetwork.Send(const aSocket:TRNLSocket;const aAddress:PRNLAddress;const aData;const aDataLength:TRNLSizeInt;const aFamily:TRNLAddressFamily):TRNLSizeInt;
 var SocketInstance,OtherSocketInstance:TRNLVirtualNetworkSocketInstance;
     Data:TRNLVirtualNetworkSocketData;
@@ -12108,7 +11929,7 @@ begin
  fNewDataEvent.SetEvent;
 end;
 
-function TRNLVirtualNetwork.Receive(const aSocket:TRNLSocket;const aAddress:PRNLAddress;var aData;const aDataLength:TRNLSizeInt;const aFamily:TRNLAddressFamily):TRNLSizeInt;
+function TRNLVirtualNetwork.Receive(const aSocket:TRNLSocket;const aAddress:PRNLAddress;out aData;const aDataLength:TRNLSizeInt;const aFamily:TRNLAddressFamily):TRNLSizeInt;
 var SocketInstance:TRNLVirtualNetworkSocketInstance;
     Data:TRNLVirtualNetworkSocketData;
 begin
@@ -12516,55 +12337,6 @@ begin
  end;
 end;
 
-function TRNLNetworkInterferenceSimulator.SendBuffers(const aSocket:TRNLSocket;const aAddress:PRNLAddress;const aBuffers;const aCountBuffers:TRNLUInt32;const aFamily:TRNLAddressFamily):TRNLSizeInt;
-var Index:TRNLSizeInt;
-    DataLength:TRNLSizeUInt;
-    Data:TBytes;
-begin
- result:=-1;
- if aCountBuffers=0 then begin
-  Update;
-  result:=0;
- end else if aCountBuffers=1 then begin
-  result:=Send(aSocket,aAddress,TRNLBuffer(aBuffers).Data^,TRNLBuffer(aBuffers).DataLength,aFamily);
- end else if aCountBuffers>1 then begin
-  Data:=nil;
-  try
-   DataLength:=0;
-   for Index:=0 to aCountBuffers-1 do begin
-    inc(DataLength,PRNLBufferArray(TRNLPointer(@aBuffers))^[Index].DataLength);
-   end;
-   SetLength(Data,DataLength);
-   DataLength:=0;
-   for Index:=0 to aCountBuffers-1 do begin
-    System.Move(PRNLBufferArray(TRNLPointer(@aBuffers))^[Index].Data^,
-                Data[DataLength],
-                PRNLBufferArray(TRNLPointer(@aBuffers))^[Index].DataLength);
-    inc(DataLength,PRNLBufferArray(TRNLPointer(@aBuffers))^[Index].DataLength);
-   end;
-   result:=Send(aSocket,aAddress,Data[0],DataLength,aFamily);
-  finally
-   Data:=nil;
-  end;
- end else begin
-  Update;
- end;
-end;
-
-function TRNLNetworkInterferenceSimulator.ReceiveBuffers(const aSocket:TRNLSocket;const aAddress:PRNLAddress;var aBuffers;const aCountBuffers:TRNLUInt32;const aFamily:TRNLAddressFamily):TRNLSizeInt;
-begin
- if aCountBuffers>0 then begin
-  result:=Receive(aSocket,aAddress,TRNLBuffer(aBuffers).Data^,TRNLBuffer(aBuffers).DataLength,aFamily);
-  if result>=0 then begin
-   TRNLBuffer(aBuffers).DataLength:=result;
-   result:=0;
-  end;
- end else begin
-  Update;
-  result:=-1;
- end;
-end;
-
 function TRNLNetworkInterferenceSimulator.Send(const aSocket:TRNLSocket;const aAddress:PRNLAddress;const aData;const aDataLength:TRNLSizeInt;const aFamily:TRNLAddressFamily):TRNLSizeInt;
 var Time:TRNLTime;
     Delay:TRNLInt64;
@@ -12623,7 +12395,7 @@ begin
  end;
 end;
 
-function TRNLNetworkInterferenceSimulator.Receive(const aSocket:TRNLSocket;const aAddress:PRNLAddress;var aData;const aDataLength:TRNLSizeInt;const aFamily:TRNLAddressFamily):TRNLSizeInt;
+function TRNLNetworkInterferenceSimulator.Receive(const aSocket:TRNLSocket;const aAddress:PRNLAddress;out aData;const aDataLength:TRNLSizeInt;const aFamily:TRNLAddressFamily):TRNLSizeInt;
 var PacketListNode,NextPacketListNode:TRNLNetworkInterferenceSimulatorPacketListNode;
     Packet:TRNLNetworkInterferenceSimulatorPacket;
     Time:TRNLTime;
@@ -14150,9 +13922,9 @@ begin
  while fIncomingMessageQueue.Dequeue(Message) do begin
   try
    HostEvent.Type_:=RNL_HOST_EVENT_TYPE_RECEIVE;
-   HostEvent.Receive.Peer:=fPeer;
-   HostEvent.Receive.Channel:=fChannelNumber;
-   HostEvent.Receive.Message:=Message;
+   HostEvent.Peer:=fPeer;
+   HostEvent.Channel:=fChannelNumber;
+   HostEvent.Message:=Message;
   finally
    fHost.fEventQueue.Enqueue(HostEvent);
   end;
@@ -16236,15 +16008,15 @@ begin
   2:begin
    fMTU:=TRNLEndianness.LittleEndianToHost16(aIncomingBlockPacket.fBlockPacket.MTUProbe.Size);
    HostEvent.Type_:=RNL_HOST_EVENT_TYPE_MTU;
-   HostEvent.MTU.Peer:=self;
-   HostEvent.MTU.MTU:=fMTU;
+   HostEvent.Peer:=self;
+   HostEvent.MTU:=fMTU;
    fHost.fEventQueue.Enqueue(HostEvent);
   end;
   3..$ff:begin
    fMTU:=TRNLEndianness.LittleEndianToHost16(aIncomingBlockPacket.fBlockPacket.MTUProbe.Size);
    HostEvent.Type_:=RNL_HOST_EVENT_TYPE_MTU;
-   HostEvent.MTU.Peer:=self;
-   HostEvent.MTU.MTU:=fMTU;
+   HostEvent.Peer:=self;
+   HostEvent.MTU:=fMTU;
    fHost.fEventQueue.Enqueue(HostEvent);
    fMTUProbeIndex:=-1;
    fMTUProbeNextTimeout:=0;
@@ -16378,7 +16150,7 @@ begin
       UpdateOutgoingBandwidthRateLimiter;
 
       HostEvent.Type_:=RNL_HOST_EVENT_TYPE_BANDWIDTH_LIMITS;
-      HostEvent.BandwidthLimits.Peer:=self;
+      HostEvent.Peer:=self;
       fHost.fEventQueue.Enqueue(HostEvent);
 
      end;
@@ -16603,8 +16375,8 @@ begin
      end;
      RNL_PEER_STATE_DISCONNECTION_PENDING:begin
       HostEvent.Type_:=RNL_HOST_EVENT_TYPE_DISCONNECT;
-      HostEvent.Disconnect.Peer:=self;
-      HostEvent.Disconnect.Data:=fDisconnectData;
+      HostEvent.Peer:=self;
+      HostEvent.Data:=fDisconnectData;
       fHost.fEventQueue.Enqueue(HostEvent);
       fState:=RNL_PEER_STATE_DISCONNECTED;
       break;
@@ -16792,8 +16564,8 @@ begin
     if fMTUProbeIndex<0 then begin
      fMTUProbeNextTimeout:=0;
      HostEvent.Type_:=RNL_HOST_EVENT_TYPE_MTU;
-     HostEvent.MTU.Peer:=self;
-     HostEvent.MTU.MTU:=fMTU;
+     HostEvent.Peer:=self;
+     HostEvent.MTU:=fMTU;
      fHost.fEventQueue.Enqueue(HostEvent);
      exit;
     end;
@@ -17231,11 +17003,10 @@ begin
 end;
 
 function TRNLPeer.DispatchOutgoingPackets:boolean;
-var OutgoingPacketData:TRNLPointer;
-    OutgoingPacketDataLength,CompressedDataLength:TRNLSizeInt;
-    NormalPacketHeader:TRNLProtocolNormalPacketHeader;
+var OutgoingPacketData,OutgoingPayloadData:TRNLPointer;
+    OutgoingPacketDataLength,OutgoingPayloadDataLength,CompressedDataLength:TRNLSizeInt;
+    NormalPacketHeader:PRNLProtocolNormalPacketHeader;
     CipherNonce:TRNLCipherNonce;
-    Buffers:array[0..1] of TRNLBuffer;
     OutgoingPacketBuffer:PRNLOutgoingPacketBuffer;
     IsMTUProbe:boolean;
 begin
@@ -17263,52 +17034,65 @@ begin
 
   end;
 
-  if OutgoingPacketBuffer^.fSize>0 then begin
+  if OutgoingPacketBuffer^.PayloadSize>0 then begin
 
    OutgoingPacketData:=@OutgoingPacketBuffer^.fData[0];
-   OutgoingPacketDataLength:=OutgoingPacketBuffer^.fSize;
+   OutgoingPacketDataLength:=OutgoingPacketBuffer^.Size;
 
-   NormalPacketHeader.PeerID:=fRemotePeerID;
-   NormalPacketHeader.Flags:=0;
-   NormalPacketHeader.Not255:=0;
+   NormalPacketHeader:=TRNLPointer(@OutgoingPacketBuffer^.fData[0]);
+
+   NormalPacketHeader^.PeerID:=fRemotePeerID;
+   NormalPacketHeader^.Flags:=0;
+   NormalPacketHeader^.Not255:=0;
+
+   OutgoingPayloadData:=@OutgoingPacketBuffer^.fData[SizeOf(TRNLProtocolNormalPacketHeader)];
+   OutgoingPayloadDataLength:=OutgoingPacketBuffer^.fSize-SizeOf(TRNLProtocolNormalPacketHeader);
 
    if assigned(fHost.fCompressor) and
-      (OutgoingPacketDataLength>SizeOf(TRNLUInt16)) and
+      (OutgoingPacketDataLength>(SizeOf(TRNLProtocolNormalPacketHeader)+SizeOf(TRNLUInt16))) and
       (OutgoingPacketDataLength<65536) and
       not IsMTUProbe then begin
 
-    CompressedDataLength:=fHost.fCompressor.Compress(OutgoingPacketData,
-                                                     OutgoingPacketDataLength,
-                                                     @fHost.fCompressionBuffer[SizeOf(TRNLUInt16)],
-                                                     OutgoingPacketDataLength-SizeOf(TRNLUInt16));
+    CompressedDataLength:=fHost.fCompressor.Compress(OutgoingPayloadData,
+                                                     OutgoingPayloadDataLength,
+                                                     @fHost.fCompressionBuffer[SizeOf(TRNLProtocolNormalPacketHeader)+SizeOf(TRNLUInt16)],
+                                                     OutgoingPayloadDataLength-SizeOf(TRNLUInt16));
 
-    if (CompressedDataLength>0) and (CompressedDataLength<(OutgoingPacketDataLength-SizeOf(TRNLUInt16))) then begin
+    if (CompressedDataLength>0) and (CompressedDataLength<(OutgoingPayloadDataLength-SizeOf(TRNLUInt16))) then begin
 {$if defined(RNL_DEBUG) and defined(RNL_DEBUG_COMPRESS)}
      fHost.fInstance.fDebugLock.Acquire;
      try
       writeln('Peer ',fLocalPeerID,': ',
-              'uncompressed ',OutgoingPacketDataLength,' => compressed ',CompressedDataLength,' ',
-              '(',(CompressedDataLength*100.0)/OutgoingPacketDataLength:1:1,'%)');
+              'uncompressed ',OutgoingPayloadDataLength,' => compressed ',CompressedDataLength,' ',
+              '(',(CompressedDataLength*100.0)/OutgoingPayloadDataLength:1:1,'%)');
      finally
       fHost.fInstance.fDebugLock.Release;
      end;
 {$ifend}
 
-     TRNLMemoryAccess.StoreLittleEndianUInt16(fHost.fCompressionBuffer[0],OutgoingPacketDataLength);
+     TRNLMemoryAccess.StoreLittleEndianUInt16(fHost.fCompressionBuffer[SizeOf(TRNLProtocolNormalPacketHeader)],OutgoingPayloadDataLength);
+
+     PRNLProtocolNormalPacketHeader(TRNLPointer(@fHost.fCompressionBuffer[0]))^:=NormalPacketHeader^;
+
+     NormalPacketHeader:=PRNLProtocolNormalPacketHeader(TRNLPointer(@fHost.fCompressionBuffer[0]));
 
      OutgoingPacketData:=@fHost.fCompressionBuffer[0];
-     OutgoingPacketDataLength:=SizeOf(TRNLUInt16)+CompressedDataLength;
-     NormalPacketHeader.Flags:=NormalPacketHeader.Flags or RNL_PROTOCOL_PACKET_HEADER_FLAG_COMPRESSED;
+     OutgoingPacketDataLength:=SizeOf(TRNLProtocolNormalPacketHeader)+SizeOf(TRNLUInt16)+CompressedDataLength;
+
+     OutgoingPayloadData:=@fHost.fCompressionBuffer[SizeOf(TRNLProtocolNormalPacketHeader)];
+     OutgoingPayloadDataLength:=OutgoingPacketDataLength-SizeOf(TRNLProtocolNormalPacketHeader);
+
+     NormalPacketHeader^.Flags:=NormalPacketHeader^.Flags or RNL_PROTOCOL_PACKET_HEADER_FLAG_COMPRESSED;
 
     end;
 
    end;
 
-   NormalPacketHeader.SentTime:=TRNLEndianness.HostToLittleEndian16(TRNLUInt16(fHost.fTime.fValue));
+   NormalPacketHeader^.SentTime:=TRNLEndianness.HostToLittleEndian16(TRNLUInt16(fHost.fTime.fValue));
 
-   NormalPacketHeader.EncryptedPacketSequenceNumber:=TRNLEndianness.HostToLittleEndian64(fOutgoingEncryptedPacketSequenceNumber);
+   NormalPacketHeader^.EncryptedPacketSequenceNumber:=TRNLEndianness.HostToLittleEndian64(fOutgoingEncryptedPacketSequenceNumber);
 
-   FillChar(NormalPacketHeader.PayloadMAC,SizeOf(TRNLCipherMAC),#0);
+   FillChar(NormalPacketHeader^.PayloadMAC,SizeOf(TRNLCipherMAC),#0);
 
    TRNLMemoryAccess.StoreLittleEndianUInt64(CipherNonce.ui64[0],fOutgoingEncryptedPacketSequenceNumber);
    TRNLMemoryAccess.StoreLittleEndianUInt64(CipherNonce.ui64[1],fConnectionNonce);
@@ -17316,25 +17100,19 @@ begin
 
    inc(fOutgoingEncryptedPacketSequenceNumber);
 
-   if not TRNLAuthenticatedEncryption.Encrypt(OutgoingPacketData^,
+   if not TRNLAuthenticatedEncryption.Encrypt(OutgoingPayloadData^,
                                               fSharedSecretKey,
                                               CipherNonce,
-                                              NormalPacketHeader.PayloadMAC,
-                                              NormalPacketHeader,
+                                              NormalPacketHeader^.PayloadMAC,
+                                              NormalPacketHeader^,
                                               SizeOf(TRNLProtocolNormalPacketHeader),
-                                              OutgoingPacketData^,
-                                              OutgoingPacketDataLength
+                                              OutgoingPayloadData^,
+                                              OutgoingPayloadDataLength
                                              ) then begin
     continue;
    end;
 
-   Buffers[0].Data:=@NormalPacketHeader;
-   Buffers[0].DataLength:=SizeOf(TRNLProtocolNormalPacketHeader);
-
-   Buffers[1].Data:=OutgoingPacketData;
-   Buffers[1].DataLength:=OutgoingPacketDataLength;
-
-   result:=SendBuffers(Buffers)<>RNL_NETWORK_SEND_RESULT_ERROR;
+   result:=SendPacket(OutgoingPacketData^,OutgoingPacketDataLength)<>RNL_NETWORK_SEND_RESULT_ERROR;
 
    if result then begin
     fLastSentDataTime:=fHost.fTime;
@@ -17363,8 +17141,8 @@ begin
  if TRNLTime.Difference(fLastReceivedDataTime,Host.fTime)>=fHost.fConnectionTimeout then begin
   fState:=RNL_PEER_STATE_DISCONNECTED;
   HostEvent.Type_:=RNL_HOST_EVENT_TYPE_DISCONNECT;
-  HostEvent.Disconnect.Peer:=self;
-  HostEvent.Disconnect.Data:=0;
+  HostEvent.Peer:=self;
+  HostEvent.Data:=0;
   fHost.fEventQueue.Enqueue(HostEvent);
   exit;
  end;
@@ -17412,28 +17190,6 @@ begin
  if (DataLength=0) or
     fOutgoingBandwidthRateLimiter.CanProceed(DataLength,fHost.fTime) then begin
   result:=fHost.SendPacket(fAddress,aData,aDataLength);
-  if result=RNL_NETWORK_SEND_RESULT_OK then begin
-   fOutgoingBandwidthRateLimiter.AddAmount(DataLength,fHost.fTime);
-   fOutgoingBandwidthRateTracker.AddUnits(DataLength);
-  end;
- end else begin
-  // Drop the whole outgoing UDP packet for to satisfy the outgoing bandwidth limit (=> intended artificial packet loss)
-  result:=RNL_NETWORK_SEND_RESULT_BANDWIDTH_RATE_LIMITER_DROP;
- end;
-end;
-
-function TRNLPeer.SendBuffers(const aBuffers:array of TRNLBuffer):TRNLNetworkSendResult;
-var Index:TRNLSizeInt;
-    DataLength:TRNLSizeUInt;
-begin
- DataLength:=0;
- for Index:=0 to length(aBuffers)-1 do begin
-  inc(DataLength,aBuffers[Index].DataLength);
- end;
- DataLength:=DataLength shl 3;
- if (DataLength=0) or
-    fOutgoingBandwidthRateLimiter.CanProceed(DataLength,fHost.fTime) then begin
-  result:=fHost.SendBuffers(fAddress,aBuffers);
   if result=RNL_NETWORK_SEND_RESULT_OK then begin
    fOutgoingBandwidthRateLimiter.AddAmount(DataLength,fHost.fTime);
    fOutgoingBandwidthRateTracker.AddUnits(DataLength);
@@ -17753,39 +17509,6 @@ begin
  end;
 end;
 
-function TRNLHost.SendBuffers(const aAddress:TRNLAddress;const aBuffers:array of TRNLBuffer):TRNLNetworkSendResult;
-var Family:TRNLInt64;
-    Socket:TRNLSocket;
-    Index,DataLength:TRNLSizeInt;
-begin
- Family:=aAddress.GetAddressFamily;
- if Family=RNL_IPV4 then begin
-  Socket:=fSockets[0];
- end else begin
-  Socket:=fSockets[1];
- end;
- if Socket=RNL_SOCKET_NULL then begin
-  result:=RNL_NETWORK_SEND_RESULT_ERROR;
- end else begin
-  DataLength:=0;
-  for Index:=0 to length(aBuffers)-1 do begin
-   inc(DataLength,aBuffers[Index].DataLength);
-  end;
-  if fOutgoingBandwidthRateLimiter.CanProceed(DataLength shl 3,fTime) then begin
-   if fNetwork.SendBuffers(Socket,@aAddress,aBuffers[0],length(aBuffers),Family)=DataLength then begin
-    fOutgoingBandwidthRateLimiter.AddAmount(DataLength shl 3,fTime);
-    fOutgoingBandwidthRateTracker.AddUnits(DataLength shl 3);
-    result:=RNL_NETWORK_SEND_RESULT_OK;
-   end else begin
-    result:=RNL_NETWORK_SEND_RESULT_ERROR;
-   end;
-  end else begin
-   // Drop the whole outgoing UDP packet for to satisfy the outgoing bandwidth limit (=> intended artificial packet loss)
-   result:=RNL_NETWORK_SEND_RESULT_BANDWIDTH_RATE_LIMITER_DROP;
-  end;
- end;
-end;
-
 procedure TRNLHost.ResetConnectionAttemptHistory;
 begin
  fConnectionAttemptDeltaTime:=0;
@@ -17896,7 +17619,7 @@ begin
   end;
  end;
 
- if (fSockets[0]=RNL_SOCKET_NULL) and (fSockets[0]=RNL_SOCKET_NULL) then begin
+ if (fSockets[0]=RNL_SOCKET_NULL) and (fSockets[1]=RNL_SOCKET_NULL) then begin
   raise ERNLHost.Create('Empty Socket');
  end;
 
@@ -18050,7 +17773,7 @@ var PacketSize:TRNLSizeInt;
 begin
  PacketSize:=RNLProtocolHandshakePacketSizes[TRNLProtocolHandshakePacketType(TRNLInt32(PRNLProtocolHandshakePacket(TRNLPointer(@aHandshakePacket))^.Header.PacketType))];
  PRNLProtocolHandshakePacket(TRNLPointer(@aHandshakePacket))^.Header.Checksum:=TRNLEndianness.HostToLittleEndian32(0);
- PRNLProtocolHandshakePacket(TRNLPointer(@aHandshakePacket))^.Header.Checksum:=DirectChecksumCRC32C(aHandshakePacket,PacketSize);
+ PRNLProtocolHandshakePacket(TRNLPointer(@aHandshakePacket))^.Header.Checksum:=ChecksumCRC32C(aHandshakePacket,PacketSize);
 end;
 
 function TRNLHost.VerifyHandshakePacketChecksum(var aHandshakePacket):boolean;
@@ -18060,7 +17783,7 @@ begin
  PacketSize:=RNLProtocolHandshakePacketSizes[TRNLProtocolHandshakePacketType(TRNLInt32(PRNLProtocolHandshakePacket(TRNLPointer(@aHandshakePacket))^.Header.PacketType))];
  DesiredChecksum:=TRNLEndianness.LittleEndianToHost32(PRNLProtocolHandshakePacket(TRNLPointer(@aHandshakePacket))^.Header.Checksum);
  PRNLProtocolHandshakePacket(TRNLPointer(@aHandshakePacket))^.Header.Checksum:=TRNLEndianness.HostToLittleEndian32(0);
- PRNLProtocolHandshakePacket(TRNLPointer(@aHandshakePacket))^.Header.Checksum:=TRNLEndianness.HostToLittleEndian32(DirectChecksumCRC32C(aHandshakePacket,PacketSize));
+ PRNLProtocolHandshakePacket(TRNLPointer(@aHandshakePacket))^.Header.Checksum:=TRNLEndianness.HostToLittleEndian32(ChecksumCRC32C(aHandshakePacket,PacketSize));
  result:=DesiredChecksum=TRNLEndianness.LittleEndianToHost32(PRNLProtocolHandshakePacket(TRNLPointer(@aHandshakePacket))^.Header.Checksum);
 end;
 
@@ -18781,7 +18504,7 @@ begin
  Peer.fRemotePeerID:=TRNLEndianness.LittleEndianToHost16(aIncomingPacket^.Payload.PeerID);
 
  HostEvent.Type_:=RNL_HOST_EVENT_TYPE_APPROVAL;
- HostEvent.Approval.Peer:=Peer;
+ HostEvent.Peer:=Peer;
  fEventQueue.Enqueue(HostEvent);
 
  OutgoingPacket.Header.Signature:=RNLProtocolHandshakePacketHeaderSignature;
@@ -18854,8 +18577,8 @@ begin
  Peer.fState:=RNL_PEER_STATE_DISCONNECTED;
 
  HostEvent.Type_:=RNL_HOST_EVENT_TYPE_DENIAL;
- HostEvent.Denial.Peer:=Peer;
- HostEvent.Denial.Reason:=TRNLConnectionDenialReason(TRNLInt32(aIncomingPacket^.Payload.Reason));
+ HostEvent.Peer:=Peer;
+ HostEvent.DenialReason:=TRNLConnectionDenialReason(TRNLInt32(aIncomingPacket^.Payload.Reason));
  fEventQueue.Enqueue(HostEvent);
 
 end;
@@ -18910,7 +18633,7 @@ begin
   Peer.UpdateOutgoingBandwidthRateLimiter;
 
   HostEvent.Type_:=RNL_HOST_EVENT_TYPE_CONNECT;
-  HostEvent.Approval.Peer:=Peer;
+  HostEvent.Peer:=Peer;
   fEventQueue.Enqueue(HostEvent);
 
   ConnectionCandidate:=fConnectionCandidateHashTable^.Find(fRandomGenerator,
@@ -19185,15 +18908,15 @@ begin
   RNL_HOST_EVENT_TYPE_CONNECT:begin
   end;
   RNL_HOST_EVENT_TYPE_DISCONNECT:begin
-   FreeAndNil(aEvent.Disconnect.Peer);
+   FreeAndNil(aEvent.Peer);
   end;
   RNL_HOST_EVENT_TYPE_DENIAL:begin
-   FreeAndNil(aEvent.Denial.Peer);
+   FreeAndNil(aEvent.Peer);
   end;
   RNL_HOST_EVENT_TYPE_RECEIVE:begin
-   if assigned(aEvent.Receive.Message) then begin
-    aEvent.Receive.Message.DecRef;
-    aEvent.Receive.Message:=nil;
+   if assigned(aEvent.Message) then begin
+    aEvent.Message.DecRef;
+    aEvent.Message:=nil;
    end;
   end;
  end;

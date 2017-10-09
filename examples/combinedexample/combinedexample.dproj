@@ -3,7 +3,7 @@
         <ProjectGuid>{3EFA918A-4DC8-4D15-8E3D-46778F948D13}</ProjectGuid>
         <MainSource>combinedexample.dpr</MainSource>
         <Base>True</Base>
-        <Config Condition="'$(Config)'==''">Release</Config>
+        <Config Condition="'$(Config)'==''">Debug</Config>
         <TargetedPlatforms>1043</TargetedPlatforms>
         <AppType>Console</AppType>
         <FrameworkType>None</FrameworkType>
