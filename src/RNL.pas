@@ -468,7 +468,7 @@ uses {$if defined(Posix)}
 {    Generics.Defaults,
      Generics.Collections;}
 
-const RNL_VERSION='1.00.2017.10.09.08.15.0000';
+const RNL_VERSION='1.00.2017.10.09.08.31.0000';
 
 type PPRNLInt8=^PRNLInt8;
      PRNLInt8=^TRNLInt8;
@@ -10984,6 +10984,51 @@ begin
 end;
 
 function TRNLRealNetwork.SocketWait(const aSockets:array of TRNLSocket;var aConditions:TRNLSocketWaitConditions;const aTimeout:TRNLTime):boolean;
+{$if defined(fpc) and defined(Unix) and declared(fppoll)}
+type TPollFDs=array[0..1] of pollfd;
+var Index,CountPollFDs,PollCount:TRNLInt32;
+    PollFDs:TPollFDs;
+begin
+
+ CountPollFDs:=0;
+
+ for Index:=0 to length(aSockets)-1 do begin
+  if aSockets[Index]<>RNL_SOCKET_NULL then begin
+   PollFDs[CountPollFDs].fd:=aSockets[Index];
+   PollFDs[CountPollFDs].events:=0;
+   if RNL_SOCKET_WAIT_CONDITION_RECEIVE in aConditions then begin
+    PollFDs[CountPollFDs].events:=PollFDs[CountPollFDs].events or POLLIN;
+   end;
+   if RNL_SOCKET_WAIT_CONDITION_SEND in aConditions then begin
+    PollFDs[CountPollFDs].events:=PollFDs[CountPollFDs].events or POLLOUT;
+   end;
+   PollFDs[CountPollFDs].revents:=0;
+   inc(CountPollFDs);
+  end;
+ end;
+
+ PollCount:=fppoll(@PollFDs[0],CountPollFDs,aTimeout.fValue);
+
+ if PollCount<0 then begin
+  result:=false;
+  exit;
+ end;
+
+ aConditions:=[];
+
+ for Index:=0 to CountPollFDs-1 do begin
+  if (PollFDs[Index].revents and POLLIN)<>0 then begin
+   Include(aConditions,RNL_SOCKET_WAIT_CONDITION_RECEIVE);
+  end;
+  if (PollFDs[Index].revents and POLLOUT)<>0 then begin
+   Include(aConditions,RNL_SOCKET_WAIT_CONDITION_SEND);
+  end;
+ end;
+
+ result:=true;
+
+end;
+{$else}
 var Index,SelectCount:TRNLInt32;
     ReadSet,WriteSet:TRNLSocketSet;
     tv:{$if defined(Windows)}TTimeVal{$elseif defined(fpc)}TTimeVal{$else}TimeVal{$ifend};
@@ -11092,6 +11137,7 @@ begin
 
  result:=true;
 end;
+{$ifend}
 
 function TRNLRealNetwork.Send(const aSocket:TRNLSocket;const aAddress:PRNLAddress;const aData;const aDataLength:TRNLSizeInt;const aFamily:TRNLAddressFamily):TRNLSizeInt;
 {$if defined(Windows)}
