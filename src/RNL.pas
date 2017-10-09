@@ -10991,6 +10991,14 @@ end;
 
 function TRNLRealNetwork.SocketWait(const aSockets:array of TRNLSocket;var aConditions:TRNLSocketWaitConditions;const aTimeout:TRNLTime):boolean;
 {$if defined(fpc) and defined(Unix) and declared(fppoll) and not defined(Darwin)}
+// Use poll on POSIX-based targets except on iOS/macOS, because the first MacOS X version until 10.3
+// had no poll support at all, the later added poll() in MacOS X 10.3 was buggy and broken, maybe also
+// in all MacOS X versions to and including MacOS X 10.8, and at least with the release of MacOS X 10.9
+// in October 2013 the poll() implementation was fixed, but with macOS 10.12 (without the X now) poll()
+// was broken again, but what was fixed at macOS 10.12.2.
+// So all in all, we should avoid the poll() function on the iOS/macOS targets and use the long-proven
+// select() function instead on these iOS/macOS targets, to be sure that everything will work in the
+// long run.
 type TPollFDs=array[0..1] of pollfd;
 var Index,CountPollFDs,PollCount:TRNLInt32;
     PollFDs:TPollFDs;
