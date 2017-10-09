@@ -83,207 +83,6 @@ begin
  end;
 end;
 
-procedure TConsoleOutputThread.Execute;
-var s:string;
-begin
-{$ifndef fpc}
- NameThreadForDebugging('Console output');
-{$endif}
- ConsoleOutput('Console output: Thread started');
- ConsoleOutputConditionVariableLock.Acquire;
- try
-  while not Terminated do begin
-   case ConsoleOutputConditionVariable.Wait(ConsoleOutputConditionVariableLock,1000) of
-    wrSignaled:begin
-     while (not Terminated) and ConsoleOutputQueue.Dequeue(s) do begin
-      Sleep(1);
-      writeln(s);
-     end;
-    end;
-   end;
-  end;
- finally
-  ConsoleOutputConditionVariableLock.Release;
- end;
- ConsoleOutput('Console output: Thread stopped');
-end;
-
-constructor TServer.Create(const aCreateSuspended:boolean);
-begin
- fReadyEvent:=TPasMPEvent.Create(nil,false,false,'');
- inherited Create(aCreateSuspended);
-end;
-
-destructor TServer.Destroy;
-begin
- inherited Destroy;
- FreeAndNil(fReadyEvent);
-end;
-
-procedure TServer.Execute;
-var //Address:TRNLAddress;
-    Server:TRNLHost;
-    Event:TRNLHostEvent;
-begin
-{$ifndef fpc}
- NameThreadForDebugging('Server');
-{$endif}
- ConsoleOutput('Server: Thread started');
- Server:=TRNLHost.Create(RNLInstance,RNLNetwork);
- try
-  Server.Address.Host:=RNL_HOST_ANY;
-  Server.Address.Port:=64242;
-{ RNLNetwork.AddressSetHost(Server.Address^,'127.0.0.1');
-  Server.Address.Port:=64242;}
-  Server.Compressor:=RNLCompressorClass.Create;
-  Server.Start;
-  fReadyEvent.SetEvent;
-  Event.Type_:=RNL_HOST_EVENT_TYPE_NONE;
-  while (not Terminated) and (Server.Service(@Event,1000)<>RNL_HOST_SERVICE_STATUS_ERROR) do begin
-   case Event.Type_ of
-    RNL_HOST_EVENT_TYPE_CONNECT:begin
-     ConsoleOutput('Server: A new client connected');
-     Event.Connect.Peer.Channels[0].SendMessageString('Hello world!');
-     Event.Connect.Peer.Channels[0].SendMessageString('Hello another world!');
-     Event.Connect.Peer.Channels[0].SendMessageString('Hello world in an another world! Yet another hello world with an yet another hello world!');
-     Event.Connect.Peer.Channels[0].SendMessageString('Hello another world in an world! Yet another hello world with an yet another hello world!');
-//   Server.Flush;
-    end;
-    RNL_HOST_EVENT_TYPE_DISCONNECT:begin
-     ConsoleOutput('Server: A client disconnected '+IntToStr(TRNLPtrUInt(Event.Disconnect.Peer)));
-    end;
-    RNL_HOST_EVENT_TYPE_MTU:begin
-     ConsoleOutput('Server: A client '+IntToStr(TRNLPtrUInt(Event.MTU.Peer))+' has new MTU '+IntToStr(TRNLPtrUInt(Event.MTU.MTU)));
-    end;
-    RNL_HOST_EVENT_TYPE_RECEIVE:begin
-     ConsoleOutput('Server: A message received');
-{    Event.Receive.Message.DecRef;
-     Event.Receive.Message:=nil;}
-{    Event.Receive.Peer.Channels[0].SendMessageString(Event.Receive.Message.AsString);
-     Sleep(10);{}
-    end;
-   end;
-  end;
- finally
-  Server.Free;
- end;
- ConsoleOutput('Server: Thread stopped');
-end;
-
-procedure TClient.Execute;
-var Address:TRNLAddress;
-    Client:TRNLHost;
-    Event:TRNLHostEvent;
-    Peer:TRNLPeer;
-    Disconnected:boolean;
-begin
-{$ifndef fpc}
- NameThreadForDebugging('Client');
-{$endif}
- ConsoleOutput('Client: Thread started');
- Client:=TRNLHost.Create(RNLInstance,RNLNetwork);
- try
-  Client.Compressor:=RNLCompressorClass.Create;
-  Client.Start;
-  ConsoleOutput('Client: Connecting');
-  Address.Port:=64242;
-  if ParamCount>1 then begin
-   RNLNetwork.AddressSetHost(Address,TRNLRawByteString(ParamStr(2)));
-  end else begin
-   RNLNetwork.AddressSetHost(Address,'127.0.0.1');
-  end;
-  Address.Port:=64242;
-  Peer:=Client.Connect(Address,4,0);
-  if assigned(Peer) then begin
-   try
-    Event.Type_:=RNL_HOST_EVENT_TYPE_NONE;
-    if Client.Service(@Event,5000)=RNL_HOST_SERVICE_STATUS_EVENT then begin
-     case Event.Type_ of
-      RNL_HOST_EVENT_TYPE_APPROVAL:begin
-       if Event.Connect.Peer=Peer then begin
-        ConsoleOutput('Client: Connected');
-        //Peer.MTUProbe(5,100);
-        Disconnected:=false;
-        while (not Terminated) and (Client.Service(@Event,1000)<>RNL_HOST_SERVICE_STATUS_ERROR) do begin
-         case Event.Type_ of
-          RNL_HOST_EVENT_TYPE_NONE:begin
-           //ConsoleOutput('Client: Nothing');
-          end;
-          RNL_HOST_EVENT_TYPE_CONNECT:begin
-           if Event.Disconnect.Peer=Peer then begin
-            ConsoleOutput('Client: Connected');
-           end;
-          end;
-          RNL_HOST_EVENT_TYPE_DISCONNECT:begin
-           if Event.Disconnect.Peer=Peer then begin
-            ConsoleOutput('Client: Disconnected');
-            Disconnected:=true;
-            break;
-           end;
-          end;
-          RNL_HOST_EVENT_TYPE_DENIAL:begin
-           if Event.Disconnect.Peer=Peer then begin
-            ConsoleOutput('Client: Denied');
-            Disconnected:=true;
-            break;
-           end;
-          end;
-          RNL_HOST_EVENT_TYPE_MTU:begin
-           ConsoleOutput('Client: New MTU '+IntToStr(TRNLPtrUInt(Event.MTU.MTU)));
-          end;
-          RNL_HOST_EVENT_TYPE_RECEIVE:begin
-           ConsoleOutput('Client: A message received on channel '+IntToStr(Event.Receive.Channel)+': "'+String(Event.Receive.Message.AsString)+'"');
-{          Event.Receive.Message.DecRef;
-           Event.Receive.Message:=nil;}
-{          Event.Receive.Peer.Channels[0].SendMessageString(Event.Receive.Message.AsString);
-           Sleep(10);{}
-          end;
-         end;
-        end;
-        if not Disconnected then begin
-         ConsoleOutput('Client: Disconnecting');
-         Peer.Disconnect;
-         while Client.Service(@Event,3000)<>RNL_HOST_SERVICE_STATUS_ERROR do begin
-          case Event.type_ of
-           RNL_HOST_EVENT_TYPE_RECEIVE:begin
-{           Event.Receive.Message.DecRef;
-            Event.Receive.Message:=nil;}
-           end;
-           RNL_HOST_EVENT_TYPE_DISCONNECT:begin
-            if Event.Disconnect.Peer=Peer then begin
-             ConsoleOutput('Client: Disconnected');
-             break;
-            end;
-           end;
-          end;
-         end;
-        end;
-       end else begin
-        ConsoleOutput('Connection failed');
-       end;
-      end;
-      RNL_HOST_EVENT_TYPE_DENIAL:begin
-       ConsoleOutput('Connection denied');
-      end;
-      else begin
-       ConsoleOutput('Connection failed');
-      end;
-     end;
-    end else begin
-     ConsoleOutput('Connection failed');
-    end;
-   finally
-    Peer.Free;
-   end;
-  end else begin
-   ConsoleOutput('Connection failed');
-  end;
- finally
-  Client.Free;
- end;
- ConsoleOutput('Client: Thread stopped');
-end;
-
 procedure LogThreadException(const aThreadName:string;const aException:TObject);
 {$if defined(fpc)}
 var i:int32;
@@ -316,6 +115,225 @@ begin
  end;
 end;
 {$ifend}
+
+procedure TConsoleOutputThread.Execute;
+var s:string;
+begin
+{$ifndef fpc}
+ NameThreadForDebugging('Console output');
+{$endif}
+ ConsoleOutput('Console output: Thread started');
+ try
+  ConsoleOutputConditionVariableLock.Acquire;
+  try
+   while not Terminated do begin
+    case ConsoleOutputConditionVariable.Wait(ConsoleOutputConditionVariableLock,1000) of
+     wrSignaled:begin
+      while (not Terminated) and ConsoleOutputQueue.Dequeue(s) do begin
+       Sleep(1);
+       writeln(s);
+      end;
+     end;
+    end;
+   end;
+  finally
+   ConsoleOutputConditionVariableLock.Release;
+  end;
+ except
+  on e:Exception do begin
+   LogThreadException('Console output',e);
+  end;
+ end;
+ ConsoleOutput('Console output: Thread stopped');
+end;
+
+constructor TServer.Create(const aCreateSuspended:boolean);
+begin
+ fReadyEvent:=TPasMPEvent.Create(nil,false,false,'');
+ inherited Create(aCreateSuspended);
+end;
+
+destructor TServer.Destroy;
+begin
+ inherited Destroy;
+ FreeAndNil(fReadyEvent);
+end;
+
+procedure TServer.Execute;
+var //Address:TRNLAddress;
+    Server:TRNLHost;
+    Event:TRNLHostEvent;
+begin
+{$ifndef fpc}
+ NameThreadForDebugging('Server');
+{$endif}
+ ConsoleOutput('Server: Thread started');
+ try
+  Server:=TRNLHost.Create(RNLInstance,RNLNetwork);
+  try
+   Server.Address.Host:=RNL_HOST_ANY;
+   Server.Address.Port:=64242;
+ { RNLNetwork.AddressSetHost(Server.Address^,'127.0.0.1');
+   Server.Address.Port:=64242;}
+   Server.Compressor:=RNLCompressorClass.Create;
+   Server.Start;
+   fReadyEvent.SetEvent;
+   Event.Type_:=RNL_HOST_EVENT_TYPE_NONE;
+   while (not Terminated) and (Server.Service(@Event,1000)<>RNL_HOST_SERVICE_STATUS_ERROR) do begin
+    case Event.Type_ of
+     RNL_HOST_EVENT_TYPE_CONNECT:begin
+      ConsoleOutput('Server: A new client connected');
+      Event.Connect.Peer.Channels[0].SendMessageString('Hello world!');
+      Event.Connect.Peer.Channels[0].SendMessageString('Hello another world!');
+      Event.Connect.Peer.Channels[0].SendMessageString('Hello world in an another world! Yet another hello world with an yet another hello world!');
+      Event.Connect.Peer.Channels[0].SendMessageString('Hello another world in an world! Yet another hello world with an yet another hello world!');
+ //   Server.Flush;
+     end;
+     RNL_HOST_EVENT_TYPE_DISCONNECT:begin
+      ConsoleOutput('Server: A client disconnected '+IntToStr(TRNLPtrUInt(Event.Disconnect.Peer)));
+     end;
+     RNL_HOST_EVENT_TYPE_MTU:begin
+      ConsoleOutput('Server: A client '+IntToStr(TRNLPtrUInt(Event.MTU.Peer))+' has new MTU '+IntToStr(TRNLPtrUInt(Event.MTU.MTU)));
+     end;
+     RNL_HOST_EVENT_TYPE_RECEIVE:begin
+      ConsoleOutput('Server: A message received');
+ {    Event.Receive.Message.DecRef;
+      Event.Receive.Message:=nil;}
+ {    Event.Receive.Peer.Channels[0].SendMessageString(Event.Receive.Message.AsString);
+      Sleep(10);{}
+     end;
+    end;
+   end;
+  finally
+   Server.Free;
+  end;
+ except
+  on e:Exception do begin
+   LogThreadException('Server',e);
+  end;
+ end;
+ ConsoleOutput('Server: Thread stopped');
+end;
+
+procedure TClient.Execute;
+var Address:TRNLAddress;
+    Client:TRNLHost;
+    Event:TRNLHostEvent;
+    Peer:TRNLPeer;
+    Disconnected:boolean;
+begin
+{$ifndef fpc}
+ NameThreadForDebugging('Client');
+{$endif}
+ ConsoleOutput('Client: Thread started');
+ try
+  Client:=TRNLHost.Create(RNLInstance,RNLNetwork);
+  try
+   Client.Compressor:=RNLCompressorClass.Create;
+   Client.Start;
+   ConsoleOutput('Client: Connecting');
+   Address.Port:=64242;
+   if ParamCount>1 then begin
+    RNLNetwork.AddressSetHost(Address,TRNLRawByteString(ParamStr(2)));
+   end else begin
+    RNLNetwork.AddressSetHost(Address,'127.0.0.1');
+   end;
+   Address.Port:=64242;
+   Peer:=Client.Connect(Address,4,0);
+   if assigned(Peer) then begin
+    try
+     Event.Type_:=RNL_HOST_EVENT_TYPE_NONE;
+     if Client.Service(@Event,5000)=RNL_HOST_SERVICE_STATUS_EVENT then begin
+      case Event.Type_ of
+       RNL_HOST_EVENT_TYPE_APPROVAL:begin
+        if Event.Connect.Peer=Peer then begin
+         ConsoleOutput('Client: Connected');
+         //Peer.MTUProbe(5,100);
+         Disconnected:=false;
+         while (not Terminated) and (Client.Service(@Event,1000)<>RNL_HOST_SERVICE_STATUS_ERROR) do begin
+          case Event.Type_ of
+           RNL_HOST_EVENT_TYPE_NONE:begin
+            //ConsoleOutput('Client: Nothing');
+           end;
+           RNL_HOST_EVENT_TYPE_CONNECT:begin
+            if Event.Disconnect.Peer=Peer then begin
+             ConsoleOutput('Client: Connected');
+            end;
+           end;
+           RNL_HOST_EVENT_TYPE_DISCONNECT:begin
+            if Event.Disconnect.Peer=Peer then begin
+             ConsoleOutput('Client: Disconnected');
+             Disconnected:=true;
+             break;
+            end;
+           end;
+           RNL_HOST_EVENT_TYPE_DENIAL:begin
+            if Event.Disconnect.Peer=Peer then begin
+             ConsoleOutput('Client: Denied');
+             Disconnected:=true;
+             break;
+            end;
+           end;
+           RNL_HOST_EVENT_TYPE_MTU:begin
+            ConsoleOutput('Client: New MTU '+IntToStr(TRNLPtrUInt(Event.MTU.MTU)));
+           end;
+           RNL_HOST_EVENT_TYPE_RECEIVE:begin
+            ConsoleOutput('Client: A message received on channel '+IntToStr(Event.Receive.Channel)+': "'+String(Event.Receive.Message.AsString)+'"');
+ {          Event.Receive.Message.DecRef;
+            Event.Receive.Message:=nil;}
+ {          Event.Receive.Peer.Channels[0].SendMessageString(Event.Receive.Message.AsString);
+            Sleep(10);{}
+           end;
+          end;
+         end;
+         if not Disconnected then begin
+          ConsoleOutput('Client: Disconnecting');
+          Peer.Disconnect;
+          while Client.Service(@Event,3000)<>RNL_HOST_SERVICE_STATUS_ERROR do begin
+           case Event.type_ of
+            RNL_HOST_EVENT_TYPE_RECEIVE:begin
+ {           Event.Receive.Message.DecRef;
+             Event.Receive.Message:=nil;}
+            end;
+            RNL_HOST_EVENT_TYPE_DISCONNECT:begin
+             if Event.Disconnect.Peer=Peer then begin
+              ConsoleOutput('Client: Disconnected');
+              break;
+             end;
+            end;
+           end;
+          end;
+         end;
+        end else begin
+         ConsoleOutput('Connection failed');
+        end;
+       end;
+       RNL_HOST_EVENT_TYPE_DENIAL:begin
+        ConsoleOutput('Connection denied');
+       end;
+       else begin
+        ConsoleOutput('Connection failed');
+       end;
+      end;
+     end else begin
+      ConsoleOutput('Connection failed');
+     end;
+    finally
+     Peer.Free;
+    end;
+   end else begin
+    ConsoleOutput('Connection failed');
+   end;
+  finally
+   Client.Free;
+  end;
+ except
+  on e:Exception do begin
+   LogThreadException('Client',e);
+  end;
+ end;
+ ConsoleOutput('Client: Thread stopped');
+end;
 
 var Server:TServer;
     Client:TClient;
