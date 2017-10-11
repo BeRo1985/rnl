@@ -468,7 +468,7 @@ uses {$if defined(Posix)}
 {    Generics.Defaults,
      Generics.Collections;}
 
-const RNL_VERSION='1.00.2017.10.09.23.48.0000';
+const RNL_VERSION='1.00.2017.10.11.06.28.0000';
 
 type PPRNLInt8=^PRNLInt8;
      PRNLInt8=^TRNLInt8;
@@ -17444,11 +17444,7 @@ begin
 
  for Index:=Low(TRNLHostSockets) to High(TRNLHostSockets) do begin
   if fSockets[Index]<>RNL_SOCKET_NULL then begin
-   try
-    fNetwork.SocketShutdown(fSockets[Index],RNL_SOCKET_SHUTDOWN_READ_WRITE);
-   finally
-    fNetwork.SocketDestroy(fSockets[Index]);
-   end;
+   fNetwork.SocketDestroy(fSockets[Index]);
    fSockets[Index]:=RNL_SOCKET_NULL;
   end;
  end;
