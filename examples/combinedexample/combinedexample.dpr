@@ -12,6 +12,8 @@ program combinedexample;
  {$apptype console}
 {$ifend}
 
+{-$define UseConsoleOutputConditionVariable}
+
 uses
   {$ifdef unix}
   cthreads,
@@ -36,7 +38,11 @@ type TConsoleOutputThread=class(TPasMPThread)
        procedure Execute; override;
      end;
 
+{$ifdef UseConsoleOutputConditionVariable}
+     TConsoleOutputQueue=TRNLQueue<string>;
+{$else}
      TConsoleOutputQueue=TPasMPUnboundedQueue<string>;
+{$endif}
 
      TServer=class(TPasMPThread)
       private
@@ -61,9 +67,15 @@ var RNLInstance:TRNLInstance=nil;
 
     ConsoleOutputThread:TConsoleOutputThread=nil;
 
+{$ifdef UseConsoleOutputConditionVariable}
     ConsoleOutputConditionVariableLock:TPasMPConditionVariableLock=nil;
 
     ConsoleOutputConditionVariable:TPasMPConditionVariable=nil;
+{$else}
+
+    ConsoleOutputEvent:TPasMPEvent=nil;
+
+{$endif}
 
     RNLMainNetwork:TRNLNetwork=nil;
 
@@ -71,16 +83,35 @@ var RNLInstance:TRNLInstance=nil;
 
 procedure ConsoleOutput(const s:string);
 begin
+{$ifdef UseConsoleOutputConditionVariable}
+ ConsoleOutputConditionVariableLock.Acquire;
+ try
+  ConsoleOutputQueue.Enqueue(s);
+  ConsoleOutputConditionVariable.Signal;
+ finally
+  ConsoleOutputConditionVariableLock.Release;
+ end;
+{$else}
  ConsoleOutputQueue.Enqueue(s);
- ConsoleOutputConditionVariable.Signal;
+ ConsoleOutputEvent.SetEvent;
+{$endif}
 end;
 
 procedure FlushConsoleOutput;
 var s:string;
 begin
- while ConsoleOutputQueue.Dequeue(s) do begin
-  writeln(s);
+{$ifdef UseConsoleOutputConditionVariable}
+ ConsoleOutputConditionVariableLock.Acquire;
+ try
+{$endif}
+  while ConsoleOutputQueue.Dequeue(s) do begin
+   writeln(s);
+  end;
+{$ifdef UseConsoleOutputConditionVariable}
+ finally
+  ConsoleOutputConditionVariableLock.Release;
  end;
+{$endif}
 end;
 
 procedure LogThreadException(const aThreadName:string;const aException:TObject);
@@ -124,13 +155,13 @@ begin
 {$endif}
  ConsoleOutput('Console output: Thread started');
  try
+{$ifdef UseConsoleOutputConditionVariable}
   ConsoleOutputConditionVariableLock.Acquire;
   try
    while not Terminated do begin
     case ConsoleOutputConditionVariable.Wait(ConsoleOutputConditionVariableLock,1000) of
      wrSignaled:begin
       while (not Terminated) and ConsoleOutputQueue.Dequeue(s) do begin
-       Sleep(1);
        writeln(s);
       end;
      end;
@@ -139,6 +170,14 @@ begin
   finally
    ConsoleOutputConditionVariableLock.Release;
   end;
+{$else}
+  while not Terminated do begin
+   ConsoleOutputEvent.WaitFor(1000);
+   while (not Terminated) and ConsoleOutputQueue.Dequeue(s) do begin
+    writeln(s);
+   end;
+  end;
+{$endif}
  except
   on e:Exception do begin
    LogThreadException('Console output',e);
@@ -380,11 +419,18 @@ begin
     TRNLNetworkInterferenceSimulator(RNLNetwork).SimulatedOutgoingLatency:=SimulatedOutgoingLatency;
     TRNLNetworkInterferenceSimulator(RNLNetwork).SimulatedIncomingJitter:=SimulatedIncomingJitter;
     TRNLNetworkInterferenceSimulator(RNLNetwork).SimulatedOutgoingJitter:=SimulatedOutgoingJitter;
+{$ifdef UseConsoleOutputConditionVariable}
     ConsoleOutputConditionVariableLock:=TPasMPConditionVariableLock.Create;
     try
      ConsoleOutputConditionVariable:=TPasMPConditionVariable.Create;
      try
+      ConsoleOutputQueue:=TConsoleOutputQueue.Create;
+{$else}
+    try
+     ConsoleOutputEvent:=TPasMPEvent.Create(nil,false,false,'');
+     try
       ConsoleOutputQueue:=TConsoleOutputQueue.Create(false);
+{$endif}
       try
        ConsoleOutputThread:=TConsoleOutputThread.Create(false);
        try
@@ -428,7 +474,11 @@ begin
         end;
        finally
         ConsoleOutputThread.Terminate;
+{$ifdef UseConsoleOutputConditionVariable}
         ConsoleOutputConditionVariable.Signal;
+{$else}
+        ConsoleOutputEvent.SetEvent;
+{$endif}
         ConsoleOutputThread.WaitFor;
         LogThreadException('Console output',ConsoleOutputThread.FatalException);
         FreeAndNil(ConsoleOutputThread);
@@ -437,12 +487,20 @@ begin
       finally
        FreeAndNil(ConsoleOutputQueue);
       end;
+{$ifdef UseConsoleOutputConditionVariable}
      finally
       FreeAndNil(ConsoleOutputConditionVariable);
      end;
     finally
      FreeAndNil(ConsoleOutputConditionVariableLock);
     end;
+{$else}
+     finally
+      FreeAndNil(ConsoleOutputEvent);
+     end;
+    finally
+    end;
+{$endif}
    finally
     FreeAndNil(RNLNetwork);
    end;
