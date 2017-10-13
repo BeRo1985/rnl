@@ -468,7 +468,7 @@ uses {$if defined(Posix)}
 {    Generics.Defaults,
      Generics.Collections;}
 
-const RNL_VERSION='1.00.2017.10.13.17.34.0000';
+const RNL_VERSION='1.00.2017.10.13.17.36.0000';
 
 type PPRNLInt8=^PRNLInt8;
      PRNLInt8=^TRNLInt8;
@@ -16357,7 +16357,7 @@ begin
        end;
       until false;
 
-      if (TRNLUInt16(KeepAliveWindowItem^.Time)=IncomingBlockPacket.fBlockPacket.Pong.SentTime) then begin
+      if (TRNLUInt16(KeepAliveWindowItem^.Time.fValue)=IncomingBlockPacket.fBlockPacket.Pong.SentTime) then begin
        UpdateRoundTripTime(TRNLTime.Difference(fHost.fTime,KeepAliveWindowItem^.Time));
       end;
 
