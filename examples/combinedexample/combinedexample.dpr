@@ -212,7 +212,7 @@ begin
 {$ifndef fpc}
  NameThreadForDebugging('Server');
 {$endif}
- Event.Clear;
+ Event.Initialize;
  ConsoleOutput('Server: Thread started');
  try
   Server:=TRNLHost.Create(RNLInstance,RNLNetwork);
@@ -278,7 +278,7 @@ begin
 {$ifndef fpc}
  NameThreadForDebugging('Client');
 {$endif}
- Event.Clear;
+ Event.Initialize;
  ConsoleOutput('Client: Thread started');
  try
   Client:=TRNLHost.Create(RNLInstance,RNLNetwork);

@@ -468,7 +468,7 @@ uses {$if defined(Posix)}
 {    Generics.Defaults,
      Generics.Collections;}
 
-const RNL_VERSION='1.00.2017.10.13.17.47.0000';
+const RNL_VERSION='1.00.2017.10.13.17.51.0000';
 
 type PPRNLInt8=^PRNLInt8;
      PRNLInt8=^TRNLInt8;
@@ -2339,7 +2339,8 @@ type PRNLVersion=^TRNLVersion;
      PRNLHostEvent=^TRNLHostEvent;
      TRNLHostEvent=record
       public
-       procedure Clear;
+       procedure Initialize;
+       procedure Finalize;
        procedure Free;
       public
        Type_:TRNLHostEventType;
@@ -10381,12 +10382,19 @@ begin
  result:=not result;
 end;
 
-procedure TRNLHostEvent.Clear;
+procedure TRNLHostEvent.Initialize;
 begin
+ System.Initialize(self);
  Type_:=RNL_HOST_EVENT_TYPE_NONE;
  Peer:=nil;
  Message:=nil;
  Data:=0;
+end;
+
+procedure TRNLHostEvent.Finalize;
+begin
+ Free;
+ System.Finalize(self);
 end;
 
 procedure TRNLHostEvent.Free;
@@ -17735,7 +17743,7 @@ begin
 
  try
   while fEventQueue.Dequeue(HostEvent) do begin
-   HostEvent.Free;
+   HostEvent.Finalize;
   end;
  finally
   FreeAndNil(fEventQueue);
