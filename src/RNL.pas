@@ -468,7 +468,7 @@ uses {$if defined(Posix)}
 {    Generics.Defaults,
      Generics.Collections;}
 
-const RNL_VERSION='1.00.2017.10.11.06.28.0000';
+const RNL_VERSION='1.00.2017.10.13.16.55.0000';
 
 type PPRNLInt8=^PRNLInt8;
      PRNLInt8=^TRNLInt8;
@@ -667,15 +667,17 @@ const RNL_PROTOCOL_VERSION_MAJOR=1;
 
       RNL_UDP_HEADER_SIZE=8;
 
-      RNL_CONNECTION_ATTEMPT_SIZE=256; // Must be power of two
+      RNL_CONNECTION_ATTEMPT_BITS=8;
+      RNL_CONNECTION_ATTEMPT_SIZE=1 shl RNL_CONNECTION_ATTEMPT_BITS;
       RNL_CONNECTION_ATTEMPT_MASK=RNL_CONNECTION_ATTEMPT_SIZE-1;
 
       RNL_PROTOCOL_PACKET_HEADER_SESSION_MASK=$ff;
 
       RNL_PROTOCOL_PACKET_HEADER_FLAG_COMPRESSED=1 shl 0;
 
-      RNL_PEER_KEEP_ALIVE_TIME_HISTORY_SIZE=4; // Must be power of two
-      RNL_PEER_KEEP_ALIVE_TIME_HISTORY_MASK=RNL_PEER_KEEP_ALIVE_TIME_HISTORY_SIZE-1;
+      RNL_PEER_KEEP_ALIVE_WINDOW_BITS=2;
+      RNL_PEER_KEEP_ALIVE_WINDOW_SIZE=1 shl RNL_PEER_KEEP_ALIVE_WINDOW_BITS;
+      RNL_PEER_KEEP_ALIVE_WINDOW_MASK=RNL_PEER_KEEP_ALIVE_WINDOW_SIZE-1;
 
       RNL_PEER_PACKET_LOSS_INTERVAL=10000;
 
@@ -2547,6 +2549,12 @@ type PRNLVersion=^TRNLVersion;
        fSimulatedOutgoingPacketLossProbabilityFactor:TRNLUInt32;
        fSimulatedIncomingDuplicatePacketProbabilityFactor:TRNLUInt32;
        fSimulatedOutgoingDuplicatePacketProbabilityFactor:TRNLUInt32;
+       fSimulatedIncomingBitFlippingProbabilityFactor:TRNLUInt32;
+       fSimulatedOutgoingBitFlippingProbabilityFactor:TRNLUInt32;
+       fSimulatedIncomingMinimumFlippingBits:TRNLUInt32;
+       fSimulatedOutgoingMinimumFlippingBits:TRNLUInt32;
+       fSimulatedIncomingMaximumFlippingBits:TRNLUInt32;
+       fSimulatedOutgoingMaximumFlippingBits:TRNLUInt32;
        fSimulatedIncomingLatency:TRNLUInt32;
        fSimulatedOutgoingLatency:TRNLUInt32;
        fSimulatedIncomingJitter:TRNLUInt32;
@@ -2555,6 +2563,12 @@ type PRNLVersion=^TRNLVersion;
        function SimulateOutgoingPacketLoss:boolean;
        function SimulateIncomingDuplicatePacket:boolean;
        function SimulateOutgoingDuplicatePacket:boolean;
+       function SimulateIncomingBitFlipping:boolean;
+       function SimulateOutgoingBitFlipping:boolean;
+       procedure SimulateBitFlipping(var aData;
+                                     const aDataLength:TRNLUInt32;
+                                     const aMinimumFlippingBits:TRNLUInt32;
+                                     const aMaximumFlippingBits:TRNLUInt32);
        procedure Update;
       public
        constructor Create(const aInstance:TRNLInstance;const aNetwork:TRNLNetwork); reintroduce;
@@ -2581,6 +2595,12 @@ type PRNLVersion=^TRNLVersion;
        property SimulatedOutgoingPacketLossProbabilityFactor:TRNLUInt32 read fSimulatedOutgoingPacketLossProbabilityFactor write fSimulatedOutgoingPacketLossProbabilityFactor;
        property SimulatedIncomingDuplicatePacketProbabilityFactor:TRNLUInt32 read fSimulatedIncomingDuplicatePacketProbabilityFactor write fSimulatedIncomingDuplicatePacketProbabilityFactor;
        property SimulatedOutgoingDuplicatePacketProbabilityFactor:TRNLUInt32 read fSimulatedOutgoingDuplicatePacketProbabilityFactor write fSimulatedOutgoingDuplicatePacketProbabilityFactor;
+       property SimulatedIncomingBitFlippingProbabilityFactor:TRNLUInt32 read fSimulatedIncomingBitFlippingProbabilityFactor write fSimulatedIncomingBitFlippingProbabilityFactor;
+       property SimulatedOutgoingBitFlippingProbabilityFactor:TRNLUInt32 read fSimulatedOutgoingBitFlippingProbabilityFactor write fSimulatedOutgoingBitFlippingProbabilityFactor;
+       property SimulatedIncomingMinimumFlippingBits:TRNLUInt32 read fSimulatedIncomingMinimumFlippingBits write fSimulatedIncomingMinimumFlippingBits;
+       property SimulatedOutgoingMinimumFlippingBits:TRNLUInt32 read fSimulatedOutgoingMinimumFlippingBits write fSimulatedOutgoingMinimumFlippingBits;
+       property SimulatedIncomingMaximumFlippingBits:TRNLUInt32 read fSimulatedIncomingMaximumFlippingBits write fSimulatedIncomingMaximumFlippingBits;
+       property SimulatedOutgoingMaximumFlippingBits:TRNLUInt32 read fSimulatedOutgoingMaximumFlippingBits write fSimulatedOutgoingMaximumFlippingBits;
        property SimulatedIncomingLatency:TRNLUInt32 read fSimulatedIncomingLatency write fSimulatedIncomingLatency;
        property SimulatedOutgoingLatency:TRNLUInt32 read fSimulatedOutgoingLatency write fSimulatedOutgoingLatency;
        property SimulatedIncomingJitter:TRNLUInt32 read fSimulatedIncomingJitter write fSimulatedIncomingJitter;
@@ -2975,8 +2995,24 @@ type PRNLVersion=^TRNLVersion;
 
      TRNLPeerChannelList=TRNLObjectList<TRNLPeerChannel>;
 
-     PRNLPeerKeepAliveTimes=^TRNLPeerKeepAliveTimes;
-     TRNLPeerKeepAliveTimes=array[0..RNL_PEER_KEEP_ALIVE_TIME_HISTORY_SIZE-1] of TRNLTime;
+     PRNLPeerKeepAliveWindowItemState=^TRNLPeerKeepAliveWindowItemState;
+     TRNLPeerKeepAliveWindowItemState=
+      (
+       RNL_PEER_KEEP_ALIVE_WINDOW_ITEM_STATE_FREE=0,
+       RNL_PEER_KEEP_ALIVE_WINDOW_ITEM_STATE_SENT=1,
+       RNL_PEER_KEEP_ALIVE_WINDOW_ITEM_STATE_ACKNOWLEDGED=2
+      );
+
+     PRNLPeerKeepAliveWindowItem=^TRNLPeerKeepAliveWindowItem;
+     TRNLPeerKeepAliveWindowItem=record
+      State:TRNLPeerKeepAliveWindowItemState;
+      SequenceNumber:TRNLUInt8;
+      Time:TRNLTime;
+      ResendTimeout:TRNLTime;
+     end;
+
+     PRNLPeerKeepAliveWindowItems=^TRNLPeerKeepAliveWindowItems;
+     TRNLPeerKeepAliveWindowItems=array[0..RNL_PEER_KEEP_ALIVE_WINDOW_SIZE-1] of TRNLPeerKeepAliveWindowItem;
 
      TRNLPeerIncomingPacketQueue=TRNLQueue<TBytes>;
 
@@ -3070,11 +3106,13 @@ type PRNLVersion=^TRNLVersion;
 
        fNextPingSendTime:TRNLTime;
 
+       fNextPingResendTime:TRNLTime;
+
+       fIncomingPongSequenceNumber:TRNLUInt8;
+
        fOutgoingPingSequenceNumber:TRNLUInt8;
 
-       fKeepAlivePingTimes:TRNLPeerKeepAliveTimes;
-
-       fKeepAlivePongTimes:TRNLPeerKeepAliveTimes;
+       fKeepAliveWindowItems:TRNLPeerKeepAliveWindowItems;
 
        fNextCheckTimeoutsTimeout:TRNLTime;
 
@@ -3150,8 +3188,6 @@ type PRNLVersion=^TRNLVersion;
 
        procedure DispatchIncomingBlockPackets;
 
-       procedure DispatchPacketTimeOuts;
-
        procedure DispatchStateActions;
 
        procedure DispatchIncomingChannelMessages;
@@ -3166,7 +3202,9 @@ type PRNLVersion=^TRNLVersion;
 
        procedure DispatchMTUProbe;
 
-       procedure DispatchKeepAlive(var aOutgoingPacketBuffer:TRNLOutgoingPacketBuffer;const aCanDoPingIfNeeded:boolean);
+       procedure DispatchKeepAlive;
+
+       procedure DispatchConnectionTimeout;
 
        procedure DispatchIncomingPacket(const aPayloadData;const aPayloadDataLength:TRNLSizeUInt;const aSentTime:TRNLUInt64);
 
@@ -3275,6 +3313,8 @@ type PRNLVersion=^TRNLVersion;
 
        fPingInterval:TRNLTime;
 
+       fPingResendTimeout:TRNLTime;
+
        fPendingConnectionTimeout:TRNLUInt64;
 
        fPendingConnectionSendTimeout:TRNLUInt64;
@@ -3363,6 +3403,8 @@ type PRNLVersion=^TRNLVersion;
 
        procedure SetPingInterval(const aPingInterval:TRNLTime);
 
+       procedure SetPingResendTimeout(const aPingResendTimeout:TRNLTime);
+
        procedure SetEncryptedPacketSequenceWindowSize(const aEncryptedPacketSequenceWindowSize:TRNLUInt32);
 
        function SendPacket(const aAddress:TRNLAddress;const aData;const aDataLength:TRNLSizeUInt):TRNLNetworkSendResult;
@@ -3427,6 +3469,7 @@ type PRNLVersion=^TRNLVersion;
        property LongTermPublicKey:TRNLKey read fLongTermPublicKey write fLongTermPublicKey;
        property ConnectionTimeout:TRNLTime read fConnectionTimeout write SetConnectionTimeout;
        property PingInterval:TRNLTime read fPingInterval write SetPingInterval;
+       property PingResendTimeout:TRNLTime read fPingResendTimeout write SetPingResendTimeout;
        property PendingConnectionTimeout:TRNLUInt64 read fPendingConnectionTimeout write fPendingConnectionTimeout;
        property PendingConnectionSendTimeout:TRNLUInt64 read fPendingConnectionSendTimeout write fPendingConnectionSendTimeout;
        property PendingDisconnectionTimeout:TRNLUInt64 read fPendingDisconnectionTimeout write fPendingDisconnectionTimeout;
@@ -8804,9 +8847,9 @@ const AF_UNSPEC=0;
       SO_GROUP_ID=$2001;
       SO_GROUP_PRIORITY=$2002;
       SO_MAX_MSG_SIZE=$2003;
-      SO_Protocol_InfoA=$2004;
-      SO_Protocol_InfoW=$2005;
-      SO_Protocol_Info=SO_Protocol_InfoA;
+      SO_PROTOCOL_INFOA=$2004;
+      SO_PROTOCOL_INFOW=$2005;
+      SO_PROTOCOL_INFO=SO_PROTOCOL_INFOA;
       PVD_CONFIG=$3001;
       SO_CONDITIONAL_ACCEPT=$3002;
 
@@ -12068,6 +12111,18 @@ begin
 
  fSimulatedOutgoingDuplicatePacketProbabilityFactor:=0;
 
+ fSimulatedIncomingBitFlippingProbabilityFactor:=0;
+
+ fSimulatedOutgoingBitFlippingProbabilityFactor:=0;
+
+ fSimulatedIncomingMinimumFlippingBits:=0;
+
+ fSimulatedOutgoingMinimumFlippingBits:=0;
+
+ fSimulatedIncomingMaximumFlippingBits:=0;
+
+ fSimulatedOutgoingMaximumFlippingBits:=0;
+
  fSimulatedIncomingLatency:=0;
 
  fSimulatedOutgoingLatency:=0;
@@ -12113,7 +12168,7 @@ begin
   else begin
    fLock.Acquire;
    try
-    result:=(fRandomGenerator.GetUInt32<fSimulatedIncomingPacketLossProbabilityFactor);
+    result:=fRandomGenerator.GetUInt32<fSimulatedIncomingPacketLossProbabilityFactor;
    finally
     fLock.Release;
    end;
@@ -12133,7 +12188,7 @@ begin
   else begin
    fLock.Acquire;
    try
-    result:=(fRandomGenerator.GetUInt32<fSimulatedOutgoingPacketLossProbabilityFactor);
+    result:=fRandomGenerator.GetUInt32<fSimulatedOutgoingPacketLossProbabilityFactor;
    finally
     fLock.Release;
    end;
@@ -12153,7 +12208,7 @@ begin
   else begin
    fLock.Acquire;
    try
-    result:=(fRandomGenerator.GetUInt32<fSimulatedIncomingDuplicatePacketProbabilityFactor);
+    result:=fRandomGenerator.GetUInt32<fSimulatedIncomingDuplicatePacketProbabilityFactor;
    finally
     fLock.Release;
    end;
@@ -12173,10 +12228,73 @@ begin
   else begin
    fLock.Acquire;
    try
-    result:=(fRandomGenerator.GetUInt32<fSimulatedOutgoingDuplicatePacketProbabilityFactor);
+    result:=fRandomGenerator.GetUInt32<fSimulatedOutgoingDuplicatePacketProbabilityFactor;
    finally
     fLock.Release;
    end;
+  end;
+ end;
+end;
+
+function TRNLNetworkInterferenceSimulator.SimulateIncomingBitFlipping:boolean;
+begin
+ case fSimulatedIncomingBitFlippingProbabilityFactor of
+  0:begin
+   result:=false;
+  end;
+  TRNLUInt32($ffffffff):begin
+   result:=true;
+  end;
+  else begin
+   fLock.Acquire;
+   try
+    result:=fRandomGenerator.GetUInt32<fSimulatedIncomingBitFlippingProbabilityFactor;
+   finally
+    fLock.Release;
+   end;
+  end;
+ end;
+end;
+
+function TRNLNetworkInterferenceSimulator.SimulateOutgoingBitFlipping:boolean;
+begin
+ case fSimulatedOutgoingBitFlippingProbabilityFactor of
+  0:begin
+   result:=false;
+  end;
+  TRNLUInt32($ffffffff):begin
+   result:=true;
+  end;
+  else begin
+   fLock.Acquire;
+   try
+    result:=fRandomGenerator.GetUInt32<fSimulatedOutgoingBitFlippingProbabilityFactor;
+   finally
+    fLock.Release;
+   end;
+  end;
+ end;
+end;
+
+procedure TRNLNetworkInterferenceSimulator.SimulateBitFlipping(var aData;
+                                                               const aDataLength:TRNLUInt32;
+                                                               const aMinimumFlippingBits:TRNLUInt32;
+                                                               const aMaximumFlippingBits:TRNLUInt32);
+var CountFlippingBits,BitIndex:TRNLUInt32;
+    p:PRNLUInt8;
+begin
+ if aDataLength>0 then begin
+  fLock.Acquire;
+  try
+   CountFlippingBits:=fRandomGenerator.GetBoundedUInt32(aMaximumFlippingBits-aMinimumFlippingBits)+aMinimumFlippingBits;
+   while CountFlippingBits>0 do begin
+    dec(CountFlippingBits);
+    BitIndex:=fRandomGenerator.GetBoundedUInt32(aDataLength shl 3);
+    p:=@PRNLUInt8Array(@aData)^[BitIndex shr 3];
+    p^:=p^ xor (TRNLUInt8(1) shl (BitIndex and 7));
+   end;
+  finally
+   fLock.Release;
   end;
  end;
 end;
@@ -12401,55 +12519,72 @@ function TRNLNetworkInterferenceSimulator.Send(const aSocket:TRNLSocket;const aA
 var Time:TRNLTime;
     Delay:TRNLInt64;
     Packet:TRNLNetworkInterferenceSimulatorPacket;
+    Data:pointer;
 begin
+ result:=0;
  Update;
  if SimulateOutgoingPacketLoss then begin
   result:=aDataLength;
  end else begin
-  if (aDataLength=0) or
-     (not assigned(aAddress)) or
-     ((fSimulatedOutgoingLatency=0) and
-      (fSimulatedOutgoingJitter=0) and
-      (fSimulatedOutgoingDuplicatePacketProbabilityFactor=0)) then begin
-   result:=fNetwork.Send(aSocket,aAddress,aData,aDataLength,aFamily);
-  end else begin
-   fLock.Acquire;
-   try
-    Time:=fInstance.Time;
-    Delay:=(fSimulatedOutgoingLatency+(fRandomGenerator.GetUniformBoundedUInt32(fSimulatedOutgoingJitter*2)))-fSimulatedOutgoingJitter;
-    if Delay>0 then begin
-     Packet:=TRNLNetworkInterferenceSimulatorPacket.Create(self);
-     try
-      Packet.fTime.fValue:=Time.fValue+TRNLUInt64(Delay);
-      Packet.fSocket:=aSocket;
-      Packet.fAddress:=aAddress^;
-      SetLength(Packet.fData,aDataLength);
-      Move(aData,Packet.fData[0],aDataLength);
-      Packet.fFamily:=aFamily;
-     finally
-      fOutgoingPacketList.Add(Packet);
+  Data:=@aData;
+  try
+   if (aDataLength>0) and SimulateOutgoingBitFlipping then begin
+    GetMem(Data,aDataLength);
+    Move(aData,Data^,aDataLength);
+    SimulateBitFlipping(Data^,
+                        result,
+                        fSimulatedOutgoingMinimumFlippingBits,
+                        fSimulatedOutgoingMaximumFlippingBits);
+   end;
+   if (aDataLength=0) or
+      (not assigned(aAddress)) or
+      ((fSimulatedOutgoingLatency=0) and
+       (fSimulatedOutgoingJitter=0) and
+       (fSimulatedOutgoingDuplicatePacketProbabilityFactor=0)) then begin
+    result:=fNetwork.Send(aSocket,aAddress,Data^,aDataLength,aFamily);
+   end else begin
+    fLock.Acquire;
+    try
+     Time:=fInstance.Time;
+     Delay:=(fSimulatedOutgoingLatency+(fRandomGenerator.GetUniformBoundedUInt32(fSimulatedOutgoingJitter*2)))-fSimulatedOutgoingJitter;
+     if Delay>0 then begin
+      Packet:=TRNLNetworkInterferenceSimulatorPacket.Create(self);
+      try
+       Packet.fTime.fValue:=Time.fValue+TRNLUInt64(Delay);
+       Packet.fSocket:=aSocket;
+       Packet.fAddress:=aAddress^;
+       SetLength(Packet.fData,aDataLength);
+       Move(Data^,Packet.fData[0],aDataLength);
+       Packet.fFamily:=aFamily;
+      finally
+       fOutgoingPacketList.Add(Packet);
+      end;
+      result:=aDataLength;
+     end else begin
+      Delay:=0;
+      result:=fNetwork.Send(aSocket,aAddress,Data^,aDataLength,aFamily);
      end;
-     result:=aDataLength;
-    end else begin
-     Delay:=0;
-     result:=fNetwork.Send(aSocket,aAddress,aData,aDataLength,aFamily);
-    end;
-    if (result=aDataLength) and SimulateOutgoingDuplicatePacket then begin
-     inc(Delay,fRandomGenerator.GetUniformBoundedUInt32(999)+1);
-     Packet:=TRNLNetworkInterferenceSimulatorPacket.Create(self);
-     try
-      Packet.fTime.fValue:=Time.fValue+TRNLUInt64(Delay);
-      Packet.fSocket:=aSocket;
-      Packet.fAddress:=aAddress^;
-      SetLength(Packet.fData,aDataLength);
-      Move(aData,Packet.fData[0],aDataLength);
-      Packet.fFamily:=aFamily;
-     finally
-      fOutgoingPacketList.Add(Packet);
+     if (result=aDataLength) and SimulateOutgoingDuplicatePacket then begin
+      inc(Delay,fRandomGenerator.GetUniformBoundedUInt32(999)+1);
+      Packet:=TRNLNetworkInterferenceSimulatorPacket.Create(self);
+      try
+       Packet.fTime.fValue:=Time.fValue+TRNLUInt64(Delay);
+       Packet.fSocket:=aSocket;
+       Packet.fAddress:=aAddress^;
+       SetLength(Packet.fData,aDataLength);
+       Move(Data^,Packet.fData[0],aDataLength);
+       Packet.fFamily:=aFamily;
+      finally
+       fOutgoingPacketList.Add(Packet);
+      end;
      end;
+    finally
+     fLock.Release;
     end;
-   finally
-    fLock.Release;
+   end;
+  finally
+   if Data<>@aData then begin
+    FreeMem(Data);
    end;
   end;
  end;
@@ -12581,6 +12716,15 @@ begin
   break;
 
  until false;
+
+ if (result>0) and SimulateIncomingBitFlipping then begin
+
+  SimulateBitFlipping(aData,
+                      result,
+                      fSimulatedIncomingMinimumFlippingBits,
+                      fSimulatedIncomingMaximumFlippingBits);
+
+ end;
 end;
 
 constructor TRNLCompressor.Create;
@@ -15821,11 +15965,13 @@ begin
 
  fNextPingSendTime:=0;
 
+ fNextPingResendTime:=0;
+
+ fIncomingPongSequenceNumber:=0;
+
  fOutgoingPingSequenceNumber:=0;
 
- FillChar(fKeepAlivePingTimes,SizeOf(TRNLPeerKeepAliveTimes),#0);
-
- FillChar(fKeepAlivePongTimes,SizeOf(TRNLPeerKeepAliveTimes),#0);
+ FillChar(fKeepAliveWindowItems,SizeOf(TRNLPeerKeepAliveWindowItems),#0);
 
  fIncomingBlockPackets:=TRNLPeerBlockPacketQueue.Create;
 
@@ -16130,6 +16276,7 @@ end;
 procedure TRNLPeer.DispatchIncomingBlockPackets;
 var IncomingBlockPacket,OutgoingBlockPacket:TRNLPeerBlockPacket;
     HostEvent:TRNLHostEvent;
+    KeepAliveWindowItem,OtherKeepAliveWindowItem:PRNLPeerKeepAliveWindowItem;
 begin
 
  while fIncomingBlockPackets.Dequeue(IncomingBlockPacket) do begin
@@ -16155,7 +16302,7 @@ begin
 {$if defined(RNL_DEBUG) and defined(RNL_DEBUG_PING)}
      fHost.fInstance.fDebugLock.Acquire;
      try
-      writeln('Peer ',fLocalPeerID,': Incoming Ping => Outgoing Pong');
+      writeln('Peer ',fLocalPeerID,': Incoming ping ',IncomingBlockPacket.fBlockPacket.Ping.SequenceNumber,' => Outgoing pong ',IncomingBlockPacket.fBlockPacket.Ping.SequenceNumber);
      finally
       fHost.fInstance.fDebugLock.Release;
      end;
@@ -16165,26 +16312,54 @@ begin
 
     RNL_PROTOCOL_BLOCK_PACKET_TYPE_PONG:begin
 
-     fKeepAlivePongTimes[IncomingBlockPacket.fBlockPacket.Pong.SequenceNumber and RNL_PEER_KEEP_ALIVE_TIME_HISTORY_MASK]:=fHost.fTime;
-     if (fKeepAlivePingTimes[IncomingBlockPacket.fBlockPacket.Pong.SequenceNumber and RNL_PEER_KEEP_ALIVE_TIME_HISTORY_MASK]<>0) and
-        (TRNLUInt16(fKeepAlivePingTimes[IncomingBlockPacket.fBlockPacket.Pong.SequenceNumber and RNL_PEER_KEEP_ALIVE_TIME_HISTORY_MASK].fValue)=IncomingBlockPacket.fBlockPacket.Pong.SentTime) then begin
-      UpdateRoundTripTime(TRNLTime.Difference(fKeepAlivePongTimes[IncomingBlockPacket.fBlockPacket.Pong.SequenceNumber and RNL_PEER_KEEP_ALIVE_TIME_HISTORY_MASK],
-                                              fKeepAlivePingTimes[IncomingBlockPacket.fBlockPacket.Pong.SequenceNumber and RNL_PEER_KEEP_ALIVE_TIME_HISTORY_MASK]));
-     end else begin
-      inc(fCountPacketLoss);
+     if IncomingBlockPacket.fBlockPacket.Pong.SequenceNumber=1 then begin
+      if IncomingBlockPacket.fBlockPacket.Pong.SequenceNumber=1 then begin
+      end;
      end;
 
-     fKeepAlivePingTimes[IncomingBlockPacket.fBlockPacket.Pong.SequenceNumber and RNL_PEER_KEEP_ALIVE_TIME_HISTORY_MASK]:=0;
-     fKeepAlivePongTimes[IncomingBlockPacket.fBlockPacket.Pong.SequenceNumber and RNL_PEER_KEEP_ALIVE_TIME_HISTORY_MASK]:=0;
+     KeepAliveWindowItem:=@fKeepAliveWindowItems[IncomingBlockPacket.fBlockPacket.Pong.SequenceNumber and RNL_PEER_KEEP_ALIVE_WINDOW_MASK];
+
+     if (KeepAliveWindowItem^.State=RNL_PEER_KEEP_ALIVE_WINDOW_ITEM_STATE_SENT) and
+        (KeepAliveWindowItem^.SequenceNumber=IncomingBlockPacket.fBlockPacket.Pong.SequenceNumber) then begin
+
+      KeepAliveWindowItem^.State:=RNL_PEER_KEEP_ALIVE_WINDOW_ITEM_STATE_ACKNOWLEDGED;
+
+      repeat
+       OtherKeepAliveWindowItem:=@fKeepAliveWindowItems[fIncomingPongSequenceNumber and RNL_PEER_KEEP_ALIVE_WINDOW_MASK];;
+       if (OTherKeepAliveWindowItem^.State=RNL_PEER_KEEP_ALIVE_WINDOW_ITEM_STATE_ACKNOWLEDGED) and
+          (OtherKeepAliveWindowItem^.SequenceNumber=fIncomingPongSequenceNumber) then begin
+        OtherKeepAliveWindowItem^.State:=RNL_PEER_KEEP_ALIVE_WINDOW_ITEM_STATE_FREE;
+        inc(fIncomingPongSequenceNumber);
+       end else begin
+        break;
+       end;
+      until false;
+
+      if (TRNLUInt16(KeepAliveWindowItem^.Time)=IncomingBlockPacket.fBlockPacket.Pong.SentTime) then begin
+       UpdateRoundTripTime(TRNLTime.Difference(fHost.fTime,KeepAliveWindowItem^.Time));
+      end;
 
 {$if defined(RNL_DEBUG) and defined(RNL_DEBUG_PING)}
-     fHost.fInstance.fDebugLock.Acquire;
-     try
-      writeln('Peer ',fLocalPeerID,': Incoming Pong');
-     finally
-      fHost.fInstance.fDebugLock.Release;
-     end;
+      fHost.fInstance.fDebugLock.Acquire;
+      try
+       writeln('Peer ',fLocalPeerID,': Incoming pong ',IncomingBlockPacket.fBlockPacket.Pong.SequenceNumber);
+      finally
+       fHost.fInstance.fDebugLock.Release;
+      end;
 {$ifend}
+
+     end else begin
+
+{$if defined(RNL_DEBUG) and defined(RNL_DEBUG_PING)}
+      fHost.fInstance.fDebugLock.Acquire;
+      try
+       writeln('Peer ',fLocalPeerID,': Incoming ignored pong ',IncomingBlockPacket.fBlockPacket.Pong.SequenceNumber);
+      finally
+       fHost.fInstance.fDebugLock.Release;
+      end;
+{$ifend}
+
+     end;
 
     end;
 
@@ -16267,40 +16442,6 @@ begin
    IncomingBlockPacket.DecRef;
   end;
 
- end;
-
-end;
-
-procedure TRNLPeer.DispatchPacketTimeOuts;
-var Index:TRNLSizeInt;
-    Interval:TRNLInt64;
-begin
-
- Interval:=Min(Max(TRNLInt64(fRetransmissionTimeOut shr 32),
-                   TRNLInt64(fHost.fPingInterval.fValue)),
-               Min(TRNLInt64(fHost.fPingInterval.fValue*4),
-                   Max(TRNLInt64(fHost.fPingInterval.fValue),
-                       TRNLInt64(fHost.fConnectionTimeout.fValue shr 2))));
-
- if (fNextCheckTimeoutsTimeout.fValue=0) or
-    (fHost.fTime>=fNextCheckTimeoutsTimeout) then begin
-
-  for Index:=0 to RNL_PEER_KEEP_ALIVE_TIME_HISTORY_SIZE-1 do begin
-   if (fKeepAlivePingTimes[Index]<>0) and
-      (TRNLTIme.Difference(fHost.fTime,fKeepAlivePingTimes[Index])>=Interval) then begin
-    inc(fCountPacketLoss);
-    fKeepAlivePingTimes[Index]:=0;
-    fKeepAlivePongTimes[Index]:=0;
-   end;
-  end;
-
-  fNextCheckTimeoutsTimeout:=fHost.fTime+Interval;
-
- end;
-
- if (fNextCheckTimeoutsTimeout.Value<>0) and
-    (fNextCheckTimeoutsTimeout>=fHost.fTime) then begin
-  fHost.fNextPeerEventTime:=TRNLTime.Minimum(fHost.fNextPeerEventTime,fNextCheckTimeoutsTimeout);
  end;
 
 end;
@@ -16585,7 +16726,7 @@ begin
 
  if (fNextReliableBlockPacketTimeout.Value<>0) and
     (fNextReliableBlockPacketTimeout>=fHost.fTime) then begin
-  fHost.fNextPeerEventTime:=TRNLTime.Minimum(fHost.fNextPeerEventTime,fNextPendingDisconnectionSendTimeout);
+  fHost.fNextPeerEventTime:=TRNLTime.Minimum(fHost.fNextPeerEventTime,fNextReliableBlockPacketTimeout);
  end;
 
 end;
@@ -16688,37 +16829,105 @@ begin
 
 end;
 
-procedure TRNLPeer.DispatchKeepAlive(var aOutgoingPacketBuffer:TRNLOutgoingPacketBuffer;const aCanDoPingIfNeeded:boolean);
-var PingInterval:TRNLUInt64;
-    PingBlockPacket:TRNLProtocolBlockPacketPing;
+procedure TRNLPeer.DispatchKeepAlive;
+var OutgoingBlockPacket:TRNLPeerBlockPacket;
+    KeepAliveWindowItem:PRNLPeerKeepAliveWindowItem;
+    SequenceNumber:TRNLUInt8;
+    SequenceIndex:TRNLSizeUInt;
 begin
 
- if aCanDoPingIfNeeded then begin
+ fNextPingResendTime.fValue:=0;
 
-  PingInterval:=fHost.fPingInterval;
+ if (TRNLInt8(TRNLUInt8(fOutgoingPingSequenceNumber-fIncomingPongSequenceNumber))<RNL_PEER_KEEP_ALIVE_WINDOW_SIZE) and
+    (fOutgoingBlockPackets.Count=0) and
+    (fOutgoingMTUProbeBlockPackets.Count=0) and
+    (fUnacknowlegmentedBlockPackets=0) and
+    (fHost.fTime>=(fLastReceivedDataTime+fHost.fPingInterval)) and
+    (fHost.fTime>=(fLastPingSentTime+fHost.fPingInterval)) then begin
 
-  if (fOutgoingBlockPackets.Count=0) and
-     (fUnacknowlegmentedBlockPackets=0) and
-     (fHost.fTime>=(fLastReceivedDataTime+PingInterval)) and
-     (fHost.fTime>=(fLastPingSentTime+PingInterval)) and
-     aOutgoingPacketBuffer.HasSpaceFor(SizeOf(TRNLProtocolBlockPacketPing)) then begin
+  KeepAliveWindowItem:=@fKeepAliveWindowItems[fOutgoingPingSequenceNumber and RNL_PEER_KEEP_ALIVE_WINDOW_MASK];
+
+  if KeepAliveWindowItem^.State=RNL_PEER_KEEP_ALIVE_WINDOW_ITEM_STATE_FREE then begin
+
    fLastPingSentTime:=fHost.fTime;
-   fNextPingSendTime:=fHost.fTime+PingInterval;
-   PingBlockPacket.Header.TypeAndSubtype:=TRNLInt32(TRNLProtocolBlockPacketType(RNL_PROTOCOL_BLOCK_PACKET_TYPE_PING));
-   PingBlockPacket.SequenceNumber:=fOutgoingPingSequenceNumber;
-   aOutgoingPacketBuffer.Write(PingBlockPacket,SizeOf(TRNLProtocolBlockPacketPing));
-   fKeepAlivePingTimes[fOutgoingPingSequenceNumber and RNL_PEER_KEEP_ALIVE_TIME_HISTORY_MASK]:=fHost.fTime;
-   fKeepAlivePongTimes[fOutgoingPingSequenceNumber and RNL_PEER_KEEP_ALIVE_TIME_HISTORY_MASK]:=0;
-   inc(fOutgoingPingSequenceNumber);
-   inc(fCountSentPackets);
+
+   fNextPingSendTime:=fHost.fTime+fHost.fPingInterval;
+
+   fNextPingResendTime:=fHost.fTime+fHost.fPingResendTimeout;
+
+   OutgoingBlockPacket:=TRNLPeerBlockPacket.Create(self);
+   try
+    OutgoingBlockPacket.fBlockPacket.Header.TypeAndSubtype:=TRNLInt32(TRNLProtocolBlockPacketType(RNL_PROTOCOL_BLOCK_PACKET_TYPE_PING));
+    OutgoingBlockPacket.fBlockPacket.Ping.SequenceNumber:=fOutgoingPingSequenceNumber;
+   finally
+    fOutgoingBlockPackets.Enqueue(OutgoingBlockPacket);
+   end;
+
+   KeepAliveWindowItem^.State:=RNL_PEER_KEEP_ALIVE_WINDOW_ITEM_STATE_SENT;
+   KeepAliveWindowItem^.SequenceNumber:=fOutgoingPingSequenceNumber;
+   KeepAliveWindowItem^.Time:=fHost.fTime;
+   KeepAliveWindowItem^.ResendTimeout:=fHost.fPingResendTimeout;
+
 {$if defined(RNL_DEBUG) and defined(RNL_DEBUG_PING)}
    fHost.fInstance.fDebugLock.Acquire;
    try
-    writeln('Peer ',fLocalPeerID,': Outgoing Ping');
+    writeln('Peer ',fLocalPeerID,': Outgoing ping ',fOutgoingPingSequenceNumber);
    finally
     fHost.fInstance.fDebugLock.Release;
    end;
 {$ifend}
+
+   inc(fOutgoingPingSequenceNumber);
+
+  end;
+
+ end;
+
+ for SequenceIndex:=0 to RNL_PEER_KEEP_ALIVE_WINDOW_MASK do begin
+
+  SequenceNumber:=TRNLUInt8(fIncomingPongSequenceNumber+SequenceIndex);
+
+  if TRNLInt8(TRNLUInt8(SequenceNumber-fOutgoingPingSequenceNumber))>=0 then begin
+   break;
+  end;
+
+  KeepAliveWindowItem:=@fKeepAliveWindowItems[SequenceNumber and RNL_PEER_KEEP_ALIVE_WINDOW_MASK];
+
+  if KeepAliveWindowItem^.State=RNL_PEER_KEEP_ALIVE_WINDOW_ITEM_STATE_SENT then begin
+
+   if fHost.fTime>=(KeepAliveWindowItem^.Time+KeepAliveWindowItem^.ResendTimeout) then begin
+
+    inc(fCountPacketLoss);
+
+    OutgoingBlockPacket:=TRNLPeerBlockPacket.Create(self);
+    try
+     OutgoingBlockPacket.fBlockPacket.Header.TypeAndSubtype:=TRNLInt32(TRNLProtocolBlockPacketType(RNL_PROTOCOL_BLOCK_PACKET_TYPE_PING));
+     OutgoingBlockPacket.fBlockPacket.Ping.SequenceNumber:=KeepAliveWindowItem^.SequenceNumber;
+    finally
+     fOutgoingBlockPackets.Enqueue(OutgoingBlockPacket);
+    end;
+
+    KeepAliveWindowItem^.Time:=fHost.fTime;
+
+    KeepAliveWindowItem^.ResendTimeout:=TRNLTime.Minimum(KeepAliveWindowItem^.ResendTimeout+KeepAliveWindowItem^.ResendTimeout,
+                                                         fHost.fPingInterval);
+
+{$if defined(RNL_DEBUG) and defined(RNL_DEBUG_PING)}
+    fHost.fInstance.fDebugLock.Acquire;
+    try
+     writeln('Peer ',fLocalPeerID,': Outgoing lost resend ping ',KeepAliveWindowItem^.SequenceNumber);
+    finally
+     fHost.fInstance.fDebugLock.Release;
+    end;
+{$ifend}
+
+   end;
+
+   if (fNextPingResendTime.fValue=0) or
+      (fNextPingResendTime<(KeepAliveWindowItem^.Time+KeepAliveWindowItem^.ResendTimeout)) then begin
+    fNextPingResendTime:=KeepAliveWindowItem^.Time+KeepAliveWindowItem^.ResendTimeout;
+   end;
+
   end;
 
  end;
@@ -16728,6 +16937,16 @@ begin
   fHost.fNextPeerEventTime:=TRNLTime.Minimum(fHost.fNextPeerEventTime,fNextPingSendTime);
  end;
 
+ if (fNextPingResendTime.Value<>0) and
+    (fNextPingResendTime>=fHost.fTime) then begin
+  fHost.fNextPeerEventTime:=TRNLTime.Minimum(fHost.fNextPeerEventTime,fNextPingResendTime);
+ end;
+
+end;
+
+procedure TRNLPeer.DispatchConnectionTimeout;
+begin
+ fHost.fNextPeerEventTime:=TRNLTime.Minimum(fHost.fNextPeerEventTime,fHost.fTime+fHost.fConnectionTimeout);
 end;
 
 procedure TRNLPeer.DispatchIncomingPacket(const aPayloadData;const aPayloadDataLength:TRNLSizeUInt;const aSentTime:TRNLUInt64);
@@ -16936,6 +17155,45 @@ begin
 
     EncryptedPacketSequenceNumber:=TRNLEndianness.LittleEndianToHost64(NormalPacketHeader^.EncryptedPacketSequenceNumber);
 
+    PayloadData:=TRNLPointer(@PRNLUInt8Array(TRNLPointer(@PacketData[0]))^[SizeOf(TRNLProtocolNormalPacketHeader)]);
+
+    PayloadDataLength:=PacketDataLength-SizeOf(TRNLProtocolNormalPacketHeader);
+
+    if PayloadDataLength=0 then begin
+     continue;
+    end;
+
+    TRNLMemoryAccess.StoreLittleEndianUInt64(CipherNonce.ui64[0],EncryptedPacketSequenceNumber);
+    TRNLMemoryAccess.StoreLittleEndianUInt64(CipherNonce.ui64[1],TRNLEndianness.LittleEndianToHost64(fConnectionNonce));
+    TRNLMemoryAccess.StoreLittleEndianUInt64(CipherNonce.ui64[2],fConnectionSalt);
+
+    PayloadMAC:=NormalPacketHeader^.PayloadMAC;
+
+    FillChar(NormalPacketHeader^.PayloadMAC,SizeOf(TRNLCipherMAC),#$00);
+
+    if not TRNLAuthenticatedEncryption.Decrypt(PayloadData^,
+                                               fSharedSecretKey,
+                                               CipherNonce,
+                                               PayloadMAC,
+                                               NormalPacketHeader^,
+                                               SizeOf(TRNLProtocolNormalPacketHeader),
+                                               PayloadData^,
+                                               PayloadDataLength) then begin
+{$if defined(RNL_DEBUG) and defined(RNL_DEBUG_SECURITY_EXTENDED)}
+     fInstance.fDebugLock.Acquire;
+     try
+      if assigned(Peer) then begin
+       writeln('DP: ',Peer.fSharedSecretKey.ui32[0],' ',Peer.fSharedSecretKey.ui32[1],' ',Peer.fSharedSecretKey.ui32[2],' ',Peer.fSharedSecretKey.ui32[3],' ',TRNLUInt32(fReceivedDataLength)-ReceivedDataOffset);
+      end else begin
+       writeln('DH: ',Peer.fSharedSecretKey.ui32[0],' ',Peer.fSharedSecretKey.ui32[1],' ',Peer.fSharedSecretKey.ui32[2],' ',Peer.fSharedSecretKey.ui32[3],' ',TRNLUInt32(fReceivedDataLength)-ReceivedDataOffset);
+      end;
+     finally
+      fInstance.fDebugLock.Release;
+     end;
+{$ifend}
+     continue;
+    end;
+
 {$if defined(RNL_DEBUG) and false}
     fInstance.fDebugLock.Acquire;
     try
@@ -16984,45 +17242,6 @@ begin
       continue;
      end;
      fIncomingEncryptedPacketSequenceBuffer[Index]:=EncryptedPacketSequenceNumber;
-    end;
-
-    PayloadData:=TRNLPointer(@PRNLUInt8Array(TRNLPointer(@PacketData[0]))^[SizeOf(TRNLProtocolNormalPacketHeader)]);
-
-    PayloadDataLength:=PacketDataLength-SizeOf(TRNLProtocolNormalPacketHeader);
-
-    if PayloadDataLength=0 then begin
-     continue;
-    end;
-
-    TRNLMemoryAccess.StoreLittleEndianUInt64(CipherNonce.ui64[0],EncryptedPacketSequenceNumber);
-    TRNLMemoryAccess.StoreLittleEndianUInt64(CipherNonce.ui64[1],TRNLEndianness.LittleEndianToHost64(fConnectionNonce));
-    TRNLMemoryAccess.StoreLittleEndianUInt64(CipherNonce.ui64[2],fConnectionSalt);
-
-    PayloadMAC:=NormalPacketHeader^.PayloadMAC;
-
-    FillChar(NormalPacketHeader^.PayloadMAC,SizeOf(TRNLCipherMAC),#$00);
-
-    if not TRNLAuthenticatedEncryption.Decrypt(PayloadData^,
-                                               fSharedSecretKey,
-                                               CipherNonce,
-                                               PayloadMAC,
-                                               NormalPacketHeader^,
-                                               SizeOf(TRNLProtocolNormalPacketHeader),
-                                               PayloadData^,
-                                               PayloadDataLength) then begin
-{$if defined(RNL_DEBUG) and defined(RNL_DEBUG_SECURITY_EXTENDED)}
-     fInstance.fDebugLock.Acquire;
-     try
-      if assigned(Peer) then begin
-       writeln('DP: ',Peer.fSharedSecretKey.ui32[0],' ',Peer.fSharedSecretKey.ui32[1],' ',Peer.fSharedSecretKey.ui32[2],' ',Peer.fSharedSecretKey.ui32[3],' ',TRNLUInt32(fReceivedDataLength)-ReceivedDataOffset);
-      end else begin
-       writeln('DH: ',Peer.fSharedSecretKey.ui32[0],' ',Peer.fSharedSecretKey.ui32[1],' ',Peer.fSharedSecretKey.ui32[2],' ',Peer.fSharedSecretKey.ui32[3],' ',TRNLUInt32(fReceivedDataLength)-ReceivedDataOffset);
-      end;
-     finally
-      fInstance.fDebugLock.Release;
-     end;
-{$ifend}
-     continue;
     end;
 
     if (NormalPacketHeader^.Flags and RNL_PROTOCOL_PACKET_HEADER_FLAG_COMPRESSED)<>0 then begin
@@ -17109,8 +17328,7 @@ begin
    OutgoingPacketBuffer^.Reset(SizeOf(TRNLProtocolNormalPacketHeader),
                                fMTU-(RNL_IP_HEADER_SIZE+RNL_UDP_HEADER_SIZE));
 
-   DispatchKeepAlive(OutgoingPacketBuffer^,
-                     DispatchOutgoingBlockPackets(OutgoingPacketBuffer^));
+   DispatchOutgoingBlockPackets(OutgoingPacketBuffer^);
 
   end;
 
@@ -17245,9 +17463,11 @@ begin
 
  UpdatePatchLossStatistics;
 
- DispatchPacketTimeOuts;
-
  DispatchStateActions;
+
+ DispatchKeepAlive;
+
+ DispatchConnectionTimeout;
 
  result:=DispatchOutgoingPackets;
 
@@ -17391,6 +17611,8 @@ begin
  SetConnectionTimeout(0);
 
  SetPingInterval(0);
+
+ SetPingResendTimeout(0);
 
  SetEncryptedPacketSequenceWindowSize(256);
 
@@ -17577,6 +17799,15 @@ begin
   fPingInterval:=1000;
  end else begin
   fPingInterval:=aPingInterval;
+ end;
+end;
+
+procedure TRNLHost.SetPingResendTimeout(const aPingResendTimeout:TRNLTime);
+begin
+ if aPingResendTimeout.fValue=0 then begin
+  fPingResendTimeout:=100;
+ end else begin
+  fPingResendTimeout:=aPingResendTimeout;
  end;
 end;
 
