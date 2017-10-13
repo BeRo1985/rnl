@@ -468,7 +468,7 @@ uses {$if defined(Posix)}
 {    Generics.Defaults,
      Generics.Collections;}
 
-const RNL_VERSION='1.00.2017.10.13.17.36.0000';
+const RNL_VERSION='1.00.2017.10.13.17.47.0000';
 
 type PPRNLInt8=^PRNLInt8;
      PRNLInt8=^TRNLInt8;
@@ -2338,25 +2338,29 @@ type PRNLVersion=^TRNLVersion;
 
      PRNLHostEvent=^TRNLHostEvent;
      TRNLHostEvent=record
-      Type_:TRNLHostEventType;
-      Peer:TRNLPeer;
-      Message:TRNLMessage;
-      case TRNLHostEventType of
-       RNL_HOST_EVENT_TYPE_CONNECT,
-       RNL_HOST_EVENT_TYPE_DISCONNECT:(
-        Data:TRNLUInt64;
-       );
-       RNL_HOST_EVENT_TYPE_APPROVAL:(
-       );
-       RNL_HOST_EVENT_TYPE_DENIAL:(
-        DenialReason:TRNLConnectionDenialReason;
-       );
-       RNL_HOST_EVENT_TYPE_MTU:(
-        MTU:TRNLUInt16;
-       );
-       RNL_HOST_EVENT_TYPE_RECEIVE:(
-        Channel:TRNLUInt8;
-       );
+      public
+       procedure Clear;
+       procedure Free;
+      public
+       Type_:TRNLHostEventType;
+       Peer:TRNLPeer;
+       Message:TRNLMessage;
+       case TRNLHostEventType of
+        RNL_HOST_EVENT_TYPE_CONNECT,
+        RNL_HOST_EVENT_TYPE_DISCONNECT:(
+         Data:TRNLUInt64;
+        );
+        RNL_HOST_EVENT_TYPE_APPROVAL:(
+        );
+        RNL_HOST_EVENT_TYPE_DENIAL:(
+         DenialReason:TRNLConnectionDenialReason;
+        );
+        RNL_HOST_EVENT_TYPE_MTU:(
+         MTU:TRNLUInt16;
+        );
+        RNL_HOST_EVENT_TYPE_RECEIVE:(
+         Channel:TRNLUInt8;
+        );
      end;
 
      TRNLHostEventQueue=TRNLQueue<TRNLHostEvent>;
@@ -3462,7 +3466,6 @@ type PRNLVersion=^TRNLVersion;
        procedure BroadcastMessageData(const aChannel:TRNLUInt8;const aData:TRNLPointer;const aDataLength:TRNLUInt32;const aFlags:TRNLMessageFlags=[]);
        procedure BroadcastMessageString(const aChannel:TRNLUInt8;const aString:TRNLRawByteString;const aFlags:TRNLMessageFlags=[]);
        procedure BroadcastMessageStream(const aChannel:TRNLUInt8;const aStream:TStream;const aFlags:TRNLMessageFlags=[]);
-       procedure FreeEvent(var aEvent:TRNLHostEvent);
        function Service(const aEvent:PRNLHostEvent=nil;
                         const aTimeout:TRNLInt64=1000):TRNLHostServiceStatus;
        function CheckEvents(var aEvent:TRNLHostEvent):boolean;
@@ -3519,6 +3522,14 @@ const RNL_HOST_ANY_INIT:TRNLHostAddress=(Addr:(0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0))
 {$endif}
 
       RNL_SOCKET_NULL={$ifdef Unix}-1{$else}RNL_INVALID_SOCKET{$endif};
+
+      RNL_HOST_EVENT_EMPTY:TRNLHostEvent=
+       (
+        Type_:RNL_HOST_EVENT_TYPE_NONE;
+        Peer:nil;
+        Message:nil;
+        Data:0;
+       );
 
 {$ifndef fpc}
 function BSRDWord(Value:TRNLUInt32):TRNLUInt32; {$if defined(CPU386) or defined(CPUX64)}assembler; register;{$ifend}
@@ -3671,7 +3682,7 @@ const BSRDebruijn32Multiplicator=TRNLUInt32($07c4acdd);
       BSRDebruijn32Table:array[0..31] of TRNLInt32=(0,9,1,10,13,21,2,29,11,14,16,18,22,25,3,30,8,12,20,28,15,17,24,7,19,27,23,6,26,5,4,31);
 begin
  if Value=0 then begin
-  Value:=255;
+  result:=255;
  end else begin
   Value:=Value or (Value shr 1);
   Value:=Value or (Value shr 2);
@@ -10368,6 +10379,27 @@ begin
   end;
  end;
  result:=not result;
+end;
+
+procedure TRNLHostEvent.Clear;
+begin
+ Type_:=RNL_HOST_EVENT_TYPE_NONE;
+ Peer:=nil;
+ Message:=nil;
+ Data:=0;
+end;
+
+procedure TRNLHostEvent.Free;
+begin
+ Type_:=RNL_HOST_EVENT_TYPE_NONE;
+ if assigned(Peer) then begin
+  Peer.DecRef;
+  Peer:=nil;
+ end;
+ if assigned(Message) then begin
+  Message.DecRef;
+  Message:=nil;
+ end;
 end;
 
 constructor TRNLInstance.Create;
@@ -17703,7 +17735,7 @@ begin
 
  try
   while fEventQueue.Dequeue(HostEvent) do begin
-   FreeEvent(HostEvent);
+   HostEvent.Free;
   end;
  finally
   FreeAndNil(fEventQueue);
@@ -19278,20 +19310,6 @@ begin
  end;
 end;
 
-procedure TRNLHost.FreeEvent(var aEvent:TRNLHostEvent);
-begin
- aEvent.Type_:=RNL_HOST_EVENT_TYPE_NONE;
- if assigned(aEvent.Peer) then begin
-  aEvent.Peer.DecRef;
-  aEvent.Peer:=nil;
- end;
- if assigned(aEvent.Message) then begin
-  aEvent.Message.DecRef;
-  aEvent.Message:=nil;
- end;
- Finalize(aEvent);
-end;
-
 function TRNLHost.Service(const aEvent:PRNLHostEvent=nil;
                           const aTimeout:TRNLInt64=1000):TRNLHostServiceStatus;
 var Timeout,NextTimeout:TRNLTime;
@@ -19301,7 +19319,7 @@ begin
  result:=RNL_HOST_SERVICE_STATUS_TIMEOUT;
 
  if assigned(aEvent) then begin
-  FreeEvent(aEvent^);
+  aEvent^.Free;
  end;
 
  Timeout:=fInstance.Time+Max(0,aTimeout);

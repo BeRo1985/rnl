@@ -212,6 +212,7 @@ begin
 {$ifndef fpc}
  NameThreadForDebugging('Server');
 {$endif}
+ Event.Clear;
  ConsoleOutput('Server: Thread started');
  try
   Server:=TRNLHost.Create(RNLInstance,RNLNetwork);
@@ -255,7 +256,7 @@ begin
      end;
     end;
    end;
-   Server.FreeEvent(Event);
+   Event.Free;
   finally
    Server.Free;
   end;
@@ -277,6 +278,7 @@ begin
 {$ifndef fpc}
  NameThreadForDebugging('Client');
 {$endif}
+ Event.Clear;
  ConsoleOutput('Client: Thread started');
  try
   Client:=TRNLHost.Create(RNLInstance,RNLNetwork);
@@ -347,7 +349,7 @@ begin
            end;
           end;
          end;
-         Client.FreeEvent(Event);
+         Event.Free;
          if not Disconnected then begin
           ConsoleOutput('Client: Disconnecting');
           Peer.Disconnect;
@@ -369,7 +371,7 @@ begin
            end;
           end;
          end;
-         Client.FreeEvent(Event);
+         Event.Free;
         end else begin
          ConsoleOutput('Connection failed');
         end;
@@ -393,7 +395,7 @@ begin
    end else begin
     ConsoleOutput('Connection failed');
    end;
-   Client.FreeEvent(Event);
+   Event.Free;
   finally
    Client.Free;
   end;
