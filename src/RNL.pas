@@ -468,7 +468,7 @@ uses {$if defined(Posix)}
 {    Generics.Defaults,
      Generics.Collections;}
 
-const RNL_VERSION='1.00.2017.10.13.17.51.0000';
+const RNL_VERSION='1.00.2017.10.13.19.20.0000';
 
 type PPRNLInt8=^PRNLInt8;
      PRNLInt8=^TRNLInt8;
@@ -16661,7 +16661,6 @@ begin
      RNL_PEER_STATE_DISCONNECTION_PENDING:begin
       HostEvent.Type_:=RNL_HOST_EVENT_TYPE_DISCONNECT;
       HostEvent.Peer:=self;
-      HostEvent.Peer.IncRef;
       HostEvent.Message:=nil;
       HostEvent.Data:=fDisconnectData;
       fHost.fEventQueue.Enqueue(HostEvent);
@@ -17508,7 +17507,6 @@ begin
   fState:=RNL_PEER_STATE_DISCONNECTED;
   HostEvent.Type_:=RNL_HOST_EVENT_TYPE_DISCONNECT;
   HostEvent.Peer:=self;
-  HostEvent.Peer.IncRef;
   HostEvent.Message:=nil;
   HostEvent.Data:=0;
   fHost.fEventQueue.Enqueue(HostEvent);
@@ -18992,7 +18990,6 @@ begin
 
  HostEvent.Type_:=RNL_HOST_EVENT_TYPE_DENIAL;
  HostEvent.Peer:=Peer;
- HostEvent.Peer.IncRef;
  HostEvent.Message:=nil;
  HostEvent.DenialReason:=TRNLConnectionDenialReason(TRNLInt32(aIncomingPacket^.Payload.Reason));
  fEventQueue.Enqueue(HostEvent);
