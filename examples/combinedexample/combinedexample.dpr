@@ -324,14 +324,12 @@ begin
                                   Event.Peer.RemotePeerID,
                                   Event.Peer.CountChannels]));
             if Event.Peer=Peer then begin
-             Event.Peer:=nil;
              Disconnected:=true;
              break;
             end;
            end;
            RNL_HOST_EVENT_TYPE_DENIAL:begin
             if Event.Peer=Peer then begin
-             Event.Peer:=nil;
              ConsoleOutput('Client: Denied');
              Disconnected:=true;
              break;
@@ -365,7 +363,6 @@ begin
                                    Event.Peer.RemotePeerID,
                                    Event.Peer.CountChannels]));
              if Event.Peer=Peer then begin
-              Event.Peer:=nil;
               break;
              end;
             end;
@@ -378,7 +375,9 @@ begin
         end;
        end;
        RNL_HOST_EVENT_TYPE_DENIAL:begin
-        Event.Peer:=nil;
+        if Event.Peer=Peer then begin
+         Event.Peer.IncRef;
+        end;
         ConsoleOutput('Connection denied');
        end;
        else begin
@@ -389,7 +388,7 @@ begin
       ConsoleOutput('Connection failed');
      end;
     finally
-     Peer.Free;
+     Peer.DecRef;
     end;
    end else begin
     ConsoleOutput('Connection failed');

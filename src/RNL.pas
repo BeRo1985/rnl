@@ -468,7 +468,7 @@ uses {$if defined(Posix)}
 {    Generics.Defaults,
      Generics.Collections;}
 
-const RNL_VERSION='1.00.2017.10.13.16.55.0000';
+const RNL_VERSION='1.00.2017.10.13.17.34.0000';
 
 type PPRNLInt8=^PRNLInt8;
      PRNLInt8=^TRNLInt8;
@@ -2071,7 +2071,7 @@ type PRNLVersion=^TRNLVersion;
 
      TRNLMessage=class
       private
-       fReferenceCount:TRNLInt32;
+       fReferenceCounter:TRNLUInt32;
        fFlags:TRNLMessageFlags;
        fData:TRNLPointer;
        fDataLength:TRNLUInt32;
@@ -2089,7 +2089,7 @@ type PRNLVersion=^TRNLVersion;
        property Data:TRNLPointer read fData write fData;
        property UserData:TRNLPointer read fUserData write fUserData;
       published
-       property ReferenceCount:TRNLInt32 read fReferenceCount write fReferenceCount;
+       property ReferenceCounter:TRNLUInt32 read fReferenceCounter write fReferenceCounter;
        property Flags:TRNLMessageFlags read fFlags write fFlags;
        property DataLength:TRNLUInt32 read fDataLength write fDataLength;
        property FreeCallback:TRNLMessageFreeCallback read fFreeCallback write fFreeCallback;
@@ -2667,6 +2667,7 @@ type PRNLVersion=^TRNLVersion;
        function AppendTo(var aOutgoingPacketBuffer:TRNLOutgoingPacketBuffer):boolean;
        property BlockPacket:PRNLProtocolBlockPacket read GetPointerToBlockPacket;
        property Size:TRNLSizeUInt read GetSize;
+       property ReferenceCounter:TRNLUInt32 read fReferenceCounter write fReferenceCounter;
      end;
 
      TRNLPeerBlockPacketQueue=TRNLQueue<TRNLPeerBlockPacket>;
@@ -3025,6 +3026,8 @@ type PRNLVersion=^TRNLVersion;
 
        fCurrentThreadIndex:TRNLInt32;
 
+       fReferenceCounter:TRNLUInt32;
+
        fLocalPeerID:TRNLID;
 
        fRemotePeerID:TRNLID;
@@ -3219,11 +3222,14 @@ type PRNLVersion=^TRNLVersion;
       public
        constructor Create(const aHost:TRNLHost); reintroduce;
        destructor Destroy; override;
+       procedure IncRef;
+       procedure DecRef;
        procedure Disconnect(const aData:TRNLUInt64=0;const aDelayed:boolean=false);
        procedure MTUProbe(const aTryIterationsPerMTUProbeSize:TRNLUInt32=5;const aMTUProbeInterval:TRNLUInt64=100);
       public
        property Address:PRNLAddress read fPointerToAddress;
       published
+       property ReferenceCounter:TRNLUInt32 read fReferenceCounter write fReferenceCounter;
        property LocalPeerID:TRNLID read fLocalPeerID;
        property RemotePeerID:TRNLID read fRemotePeerID;
        property Host:TRNLHost read fHost;
@@ -10192,7 +10198,7 @@ begin
    FillChar(fData^,aDataLength,#0);
   end;
  end;
- fReferenceCount:=1;
+ fReferenceCounter:=1;
  fFlags:=aFlags;
  fDataLength:=aDataLength;
  fFreeCallback:=nil;
@@ -10235,16 +10241,14 @@ end;
 
 procedure TRNLMessage.IncRef;
 begin
- inc(fReferenceCount);
+ {$ifdef fpc}InterlockedIncrement{$else}AtomicIncrement{$endif}(TRNLInt32(fReferenceCounter));
 end;
 
 procedure TRNLMessage.DecRef;
 begin
- if assigned(self) and (fReferenceCount>0) then begin
-  dec(fReferenceCount);
-  if fReferenceCount=0 then begin
-   Free;
-  end;
+ if assigned(self) and
+    ({$ifdef fpc}InterlockedDecrement{$else}AtomicDecrement{$endif}(TRNLInt32(fReferenceCounter))=0) then begin
+  Free;
  end;
 end;
 
@@ -14027,16 +14031,14 @@ end;
 
 procedure TRNLPeerBlockPacket.IncRef;
 begin
- inc(fReferenceCounter);
+ {$ifdef fpc}InterlockedIncrement{$else}AtomicIncrement{$endif}(TRNLInt32(fReferenceCounter));
 end;
 
 procedure TRNLPeerBlockPacket.DecRef;
 begin
- if assigned(self) and (fReferenceCounter>0) then begin
-  dec(fReferenceCounter);
-  if fReferenceCounter=0 then begin
-   Free;
-  end;
+ if assigned(self) and
+    ({$ifdef fpc}InterlockedDecrement{$else}AtomicDecrement{$endif}(TRNLInt32(fReferenceCounter))=0) then begin
+  Free;
  end;
 end;
 
@@ -14127,6 +14129,7 @@ begin
   try
    HostEvent.Type_:=RNL_HOST_EVENT_TYPE_RECEIVE;
    HostEvent.Peer:=fPeer;
+   HostEvent.Peer.IncRef;
    HostEvent.Channel:=fChannelNumber;
    HostEvent.Message:=Message;
   finally
@@ -15884,6 +15887,8 @@ begin
 
  fHost:=aHost;
 
+ fReferenceCounter:=1;
+
  fCurrentThreadIndex:=0;
 
  fLocalPeerID:=fHost.fPeerIDManager.AllocateID;
@@ -16099,6 +16104,19 @@ begin
  inherited Destroy;
 end;
 
+procedure TRNLPeer.IncRef;
+begin
+ {$ifdef fpc}InterlockedIncrement{$else}AtomicIncrement{$endif}(TRNLInt32(fReferenceCounter));
+end;
+
+procedure TRNLPeer.DecRef;
+begin
+ if assigned(self) and
+    ({$ifdef fpc}InterlockedDecrement{$else}AtomicDecrement{$endif}(TRNLInt32(fReferenceCounter))=0) then begin
+  Free;
+ end;
+end;
+
 procedure TRNLPeer.UpdateOutgoingBandwidthRateLimiter;
 begin
  fOutgoingBandwidthRateLimiter.Setup(fRemoteIncomingBandwidthLimit,1000);
@@ -16235,6 +16253,8 @@ begin
    fMTU:=TRNLEndianness.LittleEndianToHost16(aIncomingBlockPacket.fBlockPacket.MTUProbe.Size);
    HostEvent.Type_:=RNL_HOST_EVENT_TYPE_MTU;
    HostEvent.Peer:=self;
+   HostEvent.Peer.IncRef;
+   HostEvent.Message:=nil;
    HostEvent.MTU:=fMTU;
    fHost.fEventQueue.Enqueue(HostEvent);
   end;
@@ -16242,6 +16262,8 @@ begin
    fMTU:=TRNLEndianness.LittleEndianToHost16(aIncomingBlockPacket.fBlockPacket.MTUProbe.Size);
    HostEvent.Type_:=RNL_HOST_EVENT_TYPE_MTU;
    HostEvent.Peer:=self;
+   HostEvent.Peer.IncRef;
+   HostEvent.Message:=nil;
    HostEvent.MTU:=fMTU;
    fHost.fEventQueue.Enqueue(HostEvent);
    fMTUProbeIndex:=-1;
@@ -16406,6 +16428,8 @@ begin
 
       HostEvent.Type_:=RNL_HOST_EVENT_TYPE_BANDWIDTH_LIMITS;
       HostEvent.Peer:=self;
+      HostEvent.Peer.IncRef;
+      HostEvent.Message:=nil;
       fHost.fEventQueue.Enqueue(HostEvent);
 
      end;
@@ -16597,6 +16621,8 @@ begin
      RNL_PEER_STATE_DISCONNECTION_PENDING:begin
       HostEvent.Type_:=RNL_HOST_EVENT_TYPE_DISCONNECT;
       HostEvent.Peer:=self;
+      HostEvent.Peer.IncRef;
+      HostEvent.Message:=nil;
       HostEvent.Data:=fDisconnectData;
       fHost.fEventQueue.Enqueue(HostEvent);
       fState:=RNL_PEER_STATE_DISCONNECTED;
@@ -16786,6 +16812,8 @@ begin
      fMTUProbeNextTimeout:=0;
      HostEvent.Type_:=RNL_HOST_EVENT_TYPE_MTU;
      HostEvent.Peer:=self;
+     HostEvent.Peer.IncRef;
+     HostEvent.Message:=nil;
      HostEvent.MTU:=fMTU;
      fHost.fEventQueue.Enqueue(HostEvent);
      exit;
@@ -17440,6 +17468,8 @@ begin
   fState:=RNL_PEER_STATE_DISCONNECTED;
   HostEvent.Type_:=RNL_HOST_EVENT_TYPE_DISCONNECT;
   HostEvent.Peer:=self;
+  HostEvent.Peer.IncRef;
+  HostEvent.Message:=nil;
   HostEvent.Data:=0;
   fHost.fEventQueue.Enqueue(HostEvent);
   exit;
@@ -17682,7 +17712,7 @@ begin
 {$if defined(RNL_LINEAR_PEER_LIST)}
  try
   while fPeerList.Count>0 do begin
-   fPeerList[fPeerList.Count-1].Free;
+   fPeerList[fPeerList.Count-1].DecRef;
   end;
  finally
   FreeAndNil(fPeerList);
@@ -17690,7 +17720,7 @@ begin
 {$else}
  try
   while not fPeerList.IsEmpty do begin
-   fPeerList.Front.Value.Free;
+   fPeerList.Front.Value.DecRef;
   end;
  finally
   FreeAndNil(fPeerList);
@@ -18847,6 +18877,8 @@ begin
 
  HostEvent.Type_:=RNL_HOST_EVENT_TYPE_APPROVAL;
  HostEvent.Peer:=Peer;
+ HostEvent.Peer.IncRef;
+ HostEvent.Message:=nil;
  fEventQueue.Enqueue(HostEvent);
 
  OutgoingPacket.Header.Signature:=RNLProtocolHandshakePacketHeaderSignature;
@@ -18920,6 +18952,8 @@ begin
 
  HostEvent.Type_:=RNL_HOST_EVENT_TYPE_DENIAL;
  HostEvent.Peer:=Peer;
+ HostEvent.Peer.IncRef;
+ HostEvent.Message:=nil;
  HostEvent.DenialReason:=TRNLConnectionDenialReason(TRNLInt32(aIncomingPacket^.Payload.Reason));
  fEventQueue.Enqueue(HostEvent);
 
@@ -18976,6 +19010,8 @@ begin
 
   HostEvent.Type_:=RNL_HOST_EVENT_TYPE_CONNECT;
   HostEvent.Peer:=Peer;
+  HostEvent.Peer.IncRef;
+  HostEvent.Message:=nil;
   fEventQueue.Enqueue(HostEvent);
 
   ConnectionCandidate:=fConnectionCandidateHashTable^.Find(fRandomGenerator,
@@ -19244,25 +19280,16 @@ end;
 
 procedure TRNLHost.FreeEvent(var aEvent:TRNLHostEvent);
 begin
- case aEvent.Type_ of
-  RNL_HOST_EVENT_TYPE_NONE:begin
-  end;
-  RNL_HOST_EVENT_TYPE_CONNECT:begin
-  end;
-  RNL_HOST_EVENT_TYPE_DISCONNECT:begin
-   FreeAndNil(aEvent.Peer);
-  end;
-  RNL_HOST_EVENT_TYPE_DENIAL:begin
-   FreeAndNil(aEvent.Peer);
-  end;
-  RNL_HOST_EVENT_TYPE_RECEIVE:begin
-   if assigned(aEvent.Message) then begin
-    aEvent.Message.DecRef;
-    aEvent.Message:=nil;
-   end;
-  end;
- end;
  aEvent.Type_:=RNL_HOST_EVENT_TYPE_NONE;
+ if assigned(aEvent.Peer) then begin
+  aEvent.Peer.DecRef;
+  aEvent.Peer:=nil;
+ end;
+ if assigned(aEvent.Message) then begin
+  aEvent.Message.DecRef;
+  aEvent.Message:=nil;
+ end;
+ Finalize(aEvent);
 end;
 
 function TRNLHost.Service(const aEvent:PRNLHostEvent=nil;
