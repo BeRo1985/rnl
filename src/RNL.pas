@@ -468,7 +468,7 @@ uses {$if defined(Posix)}
 {    Generics.Defaults,
      Generics.Collections;}
 
-const RNL_VERSION='1.00.2017.10.14.06.40.0000';
+const RNL_VERSION='1.00.2017.10.14.06.42.0000';
 
 type PPRNLInt8=^PRNLInt8;
      PRNLInt8=^TRNLInt8;
@@ -10261,7 +10261,7 @@ begin
  if assigned(fFreeCallback) then begin
   fFreeCallback(self);
  end;
- if assigned(fStream) then begin
+ if assigned(fStream) and (RNL_MESSAGE_FLAG_NO_ALLOCATE in fFlags) then begin
   if not (RNL_MESSAGE_FLAG_NO_FREE in fFlags) then begin
    fStream.Free;
   end;
