@@ -192,6 +192,11 @@ begin
 {  RNLNetwork.AddressSetHost(Server.Address^,'127.0.0.1');
    Server.Address.Port:=64242;{}
    Server.Compressor:=RNLCompressorClass.Create;
+   Server.ChannelTypes[0]:=RNL_PEER_RELIABLE_ORDERED_CHANNEL;
+   Server.ChannelTypes[1]:=RNL_PEER_RELIABLE_UNORDERED_CHANNEL;
+   Server.ChannelTypes[2]:=RNL_PEER_UNRELIABLE_ORDERED_CHANNEL;
+   Server.ChannelTypes[3]:=RNL_PEER_UNRELIABLE_UNORDERED_CHANNEL;
+   Server.MaximumCountChannels:=4;
    Server.Start;
    fReadyEvent.SetEvent;
    Event.Initialize;
