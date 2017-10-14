@@ -468,7 +468,7 @@ uses {$if defined(Posix)}
 {    Generics.Defaults,
      Generics.Collections;}
 
-const RNL_VERSION='1.00.2017.10.14.06.59.0000';
+const RNL_VERSION='1.00.2017.10.14.07.23.0000';
 
 type PPRNLInt8=^PRNLInt8;
      PRNLInt8=^TRNLInt8;
@@ -3463,6 +3463,9 @@ type PRNLVersion=^TRNLVersion;
 
        function ReceivePackets(const aTimeout:TRNLTime):boolean;
 
+       function Dispatch(const aEvent:PRNLHostEvent=nil;
+                         const aTimeout:TRNLInt64=1000):TRNLHostServiceStatus;
+
       public
        constructor Create(const aInstance:TRNLInstance;const aNetwork:TRNLNetwork); reintroduce;
        destructor Destroy; override;
@@ -3476,8 +3479,7 @@ type PRNLVersion=^TRNLVersion;
        procedure BroadcastMessageData(const aChannel:TRNLUInt8;const aData:TRNLPointer;const aDataLength:TRNLUInt32;const aFlags:TRNLMessageFlags=[]);
        procedure BroadcastMessageString(const aChannel:TRNLUInt8;const aString:TRNLRawByteString;const aFlags:TRNLMessageFlags=[]);
        procedure BroadcastMessageStream(const aChannel:TRNLUInt8;const aStream:TStream;const aFlags:TRNLMessageFlags=[]);
-       function Service(const aEvent:PRNLHostEvent=nil;
-                        const aTimeout:TRNLInt64=1000):TRNLHostServiceStatus;
+       function Service(var aEvent:TRNLHostEvent;const aTimeout:TRNLInt64=1000):TRNLHostServiceStatus;
        function CheckEvents(var aEvent:TRNLHostEvent):boolean;
        function Flush:boolean;
       public
@@ -19392,8 +19394,8 @@ begin
  end;
 end;
 
-function TRNLHost.Service(const aEvent:PRNLHostEvent=nil;
-                          const aTimeout:TRNLInt64=1000):TRNLHostServiceStatus;
+function TRNLHost.Dispatch(const aEvent:PRNLHostEvent=nil;
+                           const aTimeout:TRNLInt64=1000):TRNLHostServiceStatus;
 var Timeout,NextTimeout:TRNLTime;
     WaitConditions:TRNLSocketWaitConditions;
 begin
@@ -19499,14 +19501,19 @@ begin
 
 end;
 
+function TRNLHost.Service(var aEvent:TRNLHostEvent;const aTimeout:TRNLInt64=1000):TRNLHostServiceStatus;
+begin
+ result:=Dispatch(@aEvent,aTimeout);
+end;
+
 function TRNLHost.CheckEvents(var aEvent:TRNLHostEvent):boolean;
 begin
- result:=Service(@aEvent,-1)=RNL_HOST_SERVICE_STATUS_EVENT;
+ result:=Dispatch(@aEvent,-1)=RNL_HOST_SERVICE_STATUS_EVENT;
 end;
 
 function TRNLHost.Flush:boolean;
 begin
- result:=Service(nil,0)<>RNL_HOST_SERVICE_STATUS_ERROR;
+ result:=Dispatch(nil,0)<>RNL_HOST_SERVICE_STATUS_ERROR;
 end;
 
 initialization
