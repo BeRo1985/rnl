@@ -2073,10 +2073,12 @@ type PRNLVersion=^TRNLVersion;
       private
        fReferenceCounter:TRNLUInt32;
        fFlags:TRNLMessageFlags;
+       fStream:TStream;
        fData:TRNLPointer;
        fDataLength:TRNLUInt32;
        fFreeCallback:TRNLMessageFreeCallback;
        fUserData:TRNLPointer;
+       procedure Initialize;
        function GetDataAsString:TRNLRawByteString;
       public
        constructor CreateFromMemory(const aData:TRNLPointer;const aDataLength:TRNLUInt32;const aFlags:TRNLMessageFlags=[]); reintroduce; overload;
@@ -10206,6 +10208,7 @@ end;
 constructor TRNLMessage.CreateFromMemory(const aData:TRNLPointer;const aDataLength:TRNLUInt32;const aFlags:TRNLMessageFlags);
 begin
  inherited Create;
+ Initialize;
  if RNL_MESSAGE_FLAG_NO_ALLOCATE in aFlags then begin
   fData:=aData;
  end else if aDataLength<=0 then begin
@@ -10218,11 +10221,8 @@ begin
    FillChar(fData^,aDataLength,#0);
   end;
  end;
- fReferenceCounter:=1;
- fFlags:=aFlags;
  fDataLength:=aDataLength;
- fFreeCallback:=nil;
- fUserData:=nil;
+ fFlags:=aFlags;
 end;
 
 constructor TRNLMessage.CreateFromString(const aData:TRNLRawByteString;const aFlags:TRNLMessageFlags);
@@ -10234,13 +10234,22 @@ constructor TRNLMessage.CreateFromStream(const aStream:TStream;const aFlags:TRNL
 var StreamData:TRNLPointer;
 begin
  if aStream is TMemoryStream then begin
-  CreateFromMemory(TMemoryStream(aStream).Memory,aStream.Size,aFlags);
+  if RNL_MESSAGE_FLAG_NO_ALLOCATE in aFlags then begin
+   inherited Create;
+   Initialize;
+   fStream:=aStream;
+   fData:=TMemoryStream(aStream).Memory;
+   fDataLength:=TMemoryStream(aStream).Size;
+   fFlags:=aFlags;
+  end else begin
+   CreateFromMemory(TMemoryStream(aStream).Memory,aStream.Size,aFlags);
+  end;
  end else begin
   GetMem(StreamData,aStream.Size+1);
   try
    aStream.Seek(0,soBeginning);
    aStream.ReadBuffer(StreamData^,aStream.Size);
-   CreateFromMemory(StreamData,aStream.Size,aFlags);
+   CreateFromMemory(StreamData,aStream.Size,aFlags-[RNL_MESSAGE_FLAG_NO_ALLOCATE,RNL_MESSAGE_FLAG_NO_FREE]);
   finally
    FreeMem(StreamData);
   end;
@@ -10252,11 +10261,29 @@ begin
  if assigned(fFreeCallback) then begin
   fFreeCallback(self);
  end;
- if assigned(fData) and not (RNL_MESSAGE_FLAG_NO_FREE in fFlags) then begin
-  FreeMem(fData);
+ if assigned(fStream) then begin
+  if not (RNL_MESSAGE_FLAG_NO_FREE in fFlags) then begin
+   fStream.Free;
+  end;
+ end else begin
+  if assigned(fData) and not (RNL_MESSAGE_FLAG_NO_FREE in fFlags) then begin
+   FreeMem(fData);
+  end;
  end;
+ fStream:=nil;
  fData:=nil;
  inherited Destroy;
+end;
+
+procedure TRNLMessage.Initialize;
+begin
+ fStream:=nil;
+ fData:=nil;
+ fDataLength:=0;
+ fReferenceCounter:=1;
+ fFreeCallback:=nil;
+ fUserData:=nil;
+ fFlags:=[];
 end;
 
 procedure TRNLMessage.IncRef;
