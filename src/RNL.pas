@@ -468,7 +468,7 @@ uses {$if defined(Posix)}
 {    Generics.Defaults,
      Generics.Collections;}
 
-const RNL_VERSION='1.00.2017.10.14.07.23.0000';
+const RNL_VERSION='1.00.2017.10.14.07.49.0000';
 
 type PPRNLInt8=^PRNLInt8;
      PRNLInt8=^TRNLInt8;
@@ -3463,8 +3463,7 @@ type PRNLVersion=^TRNLVersion;
 
        function ReceivePackets(const aTimeout:TRNLTime):boolean;
 
-       function Dispatch(const aEvent:PRNLHostEvent=nil;
-                         const aTimeout:TRNLInt64=1000):TRNLHostServiceStatus;
+       function DispatchIteration(const aEvent:PRNLHostEvent=nil;const aTimeout:TRNLInt64=1000):TRNLHostServiceStatus;
 
       public
        constructor Create(const aInstance:TRNLInstance;const aNetwork:TRNLNetwork); reintroduce;
@@ -19394,8 +19393,7 @@ begin
  end;
 end;
 
-function TRNLHost.Dispatch(const aEvent:PRNLHostEvent=nil;
-                           const aTimeout:TRNLInt64=1000):TRNLHostServiceStatus;
+function TRNLHost.DispatchIteration(const aEvent:PRNLHostEvent=nil;const aTimeout:TRNLInt64=1000):TRNLHostServiceStatus;
 var Timeout,NextTimeout:TRNLTime;
     WaitConditions:TRNLSocketWaitConditions;
 begin
@@ -19503,17 +19501,17 @@ end;
 
 function TRNLHost.Service(var aEvent:TRNLHostEvent;const aTimeout:TRNLInt64=1000):TRNLHostServiceStatus;
 begin
- result:=Dispatch(@aEvent,aTimeout);
+ result:=DispatchIteration(@aEvent,aTimeout);
 end;
 
 function TRNLHost.CheckEvents(var aEvent:TRNLHostEvent):boolean;
 begin
- result:=Dispatch(@aEvent,-1)=RNL_HOST_SERVICE_STATUS_EVENT;
+ result:=DispatchIteration(@aEvent,-1)=RNL_HOST_SERVICE_STATUS_EVENT;
 end;
 
 function TRNLHost.Flush:boolean;
 begin
- result:=Dispatch(nil,0)<>RNL_HOST_SERVICE_STATUS_ERROR;
+ result:=DispatchIteration(nil,0)<>RNL_HOST_SERVICE_STATUS_ERROR;
 end;
 
 initialization
