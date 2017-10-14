@@ -212,7 +212,6 @@ begin
 {$ifndef fpc}
  NameThreadForDebugging('Server');
 {$endif}
- Event.Initialize;
  ConsoleOutput('Server: Thread started');
  try
   Server:=TRNLHost.Create(RNLInstance,RNLNetwork);
@@ -224,7 +223,7 @@ begin
    Server.Compressor:=RNLCompressorClass.Create;
    Server.Start;
    fReadyEvent.SetEvent;
-   Event.Type_:=RNL_HOST_EVENT_TYPE_NONE;
+   Event.Initialize;
    while (not Terminated) and (Server.Service(Event,1000)<>RNL_HOST_SERVICE_STATUS_ERROR) do begin
     case Event.Type_ of
      RNL_HOST_EVENT_TYPE_CONNECT:begin
@@ -278,7 +277,6 @@ begin
 {$ifndef fpc}
  NameThreadForDebugging('Client');
 {$endif}
- Event.Initialize;
  ConsoleOutput('Client: Thread started');
  try
   Client:=TRNLHost.Create(RNLInstance,RNLNetwork);
@@ -297,7 +295,7 @@ begin
    if assigned(Peer) then begin
     Peer.IncRef; // Protect it for the Peer.Free call at the end (increase ReferenceCounter from 1 to 2, so that correct-used DecRef calls never will free this peer class instance)
     try
-     Event.Type_:=RNL_HOST_EVENT_TYPE_NONE;
+     Event.Initialize;
      if Client.Service(Event,5000)=RNL_HOST_SERVICE_STATUS_EVENT then begin
       case Event.Type_ of
        RNL_HOST_EVENT_TYPE_APPROVAL:begin
