@@ -468,7 +468,7 @@ uses {$if defined(Posix)}
 {    Generics.Defaults,
      Generics.Collections;}
 
-const RNL_VERSION='1.00.2017.10.14.04.26.0000';
+const RNL_VERSION='1.00.2017.10.14.06.07.0000';
 
 type PPRNLInt8=^PRNLInt8;
      PRNLInt8=^TRNLInt8;
@@ -3262,6 +3262,8 @@ type PRNLVersion=^TRNLVersion;
        fRandomGenerator:TRNLRandomGenerator;
 
        fCompressor:TRNLCompressor;
+
+       fPeerLock:TCriticalSection;
 
        fPeerIDManager:TRNLIDManager;
 
@@ -14194,12 +14196,10 @@ end;
 
 procedure TRNLPeerChannel.SendMessage(const aMessage:TRNLMessage);
 begin
- if aMessage.fDataLength<=fHost.fMaximumMessageSize then begin
-  try
-   aMessage.IncRef;
-  finally
-   fOutgoingMessageQueue.Enqueue(aMessage);
-  end;
+ try
+  aMessage.IncRef;
+ finally
+  fOutgoingMessageQueue.Enqueue(aMessage);
  end;
 end;
 
@@ -14745,7 +14745,7 @@ begin
 
   try
 
-   if Message.fDataLength>0 then begin
+   if (Message.fDataLength>0) and (Message.fDataLength<=fHost.fMaximumMessageSize) then begin
 
     if Message.fDataLength<=MaximumShortMessageBlockPacketSize then begin
 
@@ -15123,7 +15123,7 @@ begin
 
   try
 
-   if Message.fDataLength>0 then begin
+   if (Message.fDataLength>0) and (Message.fDataLength<=fHost.fMaximumMessageSize) then begin
 
     if Message.fDataLength<=MaximumShortMessageBlockPacketSize then begin
 
@@ -15358,7 +15358,7 @@ begin
 
   try
 
-   if Message.fDataLength>0 then begin
+   if (Message.fDataLength>0) and (Message.fDataLength<=fHost.fMaximumMessageSize) then begin
 
     if Message.fDataLength<=MaximumShortMessageBlockPacketSize then begin
 
@@ -15672,7 +15672,7 @@ begin
 
   try
 
-   if Message.fDataLength>0 then begin
+   if (Message.fDataLength>0) and (Message.fDataLength<=fHost.fMaximumMessageSize) then begin
 
     if Message.fDataLength<=MaximumShortMessageBlockPacketSize then begin
 
@@ -15933,23 +15933,30 @@ begin
 
  fHost:=aHost;
 
+ fHost.fPeerLock.Acquire;
+ try
+
+  fLocalPeerID:=fHost.fPeerIDManager.AllocateID;
+
+  fRemotePeerID:=0;
+
+ {$if defined(RNL_LINEAR_PEER_LIST)}
+  fPeerListIndex:=fHost.fPeerList.Add(self);
+ {$else}
+  fHost.fPeerList.Add(self);
+ {$ifend}
+
+  inc(fHost.fCountPeers);
+
+  fHost.fPeerIDMap[fLocalPeerID]:=self;
+
+ finally
+  fHost.fPeerLock.Release;
+ end;
+
  fReferenceCounter:=1;
 
  fCurrentThreadIndex:=0;
-
- fLocalPeerID:=fHost.fPeerIDManager.AllocateID;
-
- fRemotePeerID:=0;
-
-{$if defined(RNL_LINEAR_PEER_LIST)}
- fPeerListIndex:=fHost.fPeerList.Add(self);
-{$else}
- fHost.fPeerList.Add(self);
-{$ifend}
-
- inc(fHost.fCountPeers);
-
- fHost.fPeerIDMap[fLocalPeerID]:=self;
 
  fIncomingPacketQueue:=TRNLPeerIncomingPacketQueue.Create;
 
@@ -16121,35 +16128,42 @@ begin
 
  fKeepAliveWindowItems:=nil;
 
- dec(fHost.fCountPeers);
+ fHost.fPeerLock.Acquire;
+ try
 
- fHost.fPeerIDMap[fLocalPeerID]:=nil;
+  dec(fHost.fCountPeers);
 
- fHost.fPeerIDManager.FreeID(fLocalPeerID);
+  fHost.fPeerIDMap[fLocalPeerID]:=nil;
+
+  fHost.fPeerIDManager.FreeID(fLocalPeerID);
 
 {$if defined(RNL_LINEAR_PEER_LIST)}
- if (fPeerListIndex>=0) and
-    (fPeerListIndex<fHost.fPeerList.Count) and
-    (fHost.fPeerList[fPeerListIndex]=self) then begin
-  if (fHost.fPeerList.Count>1) and (fPeerListIndex<>(fHost.fPeerList.Count-1)) then begin
-   OtherPeerListIndex:=fHost.fPeerList.Count-1;
-   OtherPeer:=fHost.fPeerList[OtherPeerListIndex];
-   fHost.fPeerList.Exchange(fPeerListIndex,OtherPeerListIndex);
-   OtherPeer.fPeerListIndex:=fPeerListIndex;
-   fPeerListIndex:=OtherPeerListIndex;
-   fHost.fPeerList.Delete(OtherPeerListIndex);
+  if (fPeerListIndex>=0) and
+     (fPeerListIndex<fHost.fPeerList.Count) and
+     (fHost.fPeerList[fPeerListIndex]=self) then begin
+   if (fHost.fPeerList.Count>1) and (fPeerListIndex<>(fHost.fPeerList.Count-1)) then begin
+    OtherPeerListIndex:=fHost.fPeerList.Count-1;
+    OtherPeer:=fHost.fPeerList[OtherPeerListIndex];
+    fHost.fPeerList.Exchange(fPeerListIndex,OtherPeerListIndex);
+    OtherPeer.fPeerListIndex:=fPeerListIndex;
+    fPeerListIndex:=OtherPeerListIndex;
+    fHost.fPeerList.Delete(OtherPeerListIndex);
+   end else begin
+    fHost.fPeerList.Delete(fPeerListIndex);
+   end;
   end else begin
-   fHost.fPeerList.Delete(fPeerListIndex);
+   fHost.fPeerList.Remove(self);
   end;
- end else begin
-  fHost.fPeerList.Remove(self);
- end;
 
- fPeerListIndex:=-1;
+  fPeerListIndex:=-1;
 
 {$else}
- Remove;
+  Remove;
 {$ifend}
+
+ finally
+  fHost.fPeerLock.Release;
+ end;
 
  inherited Destroy;
 end;
@@ -17624,6 +17638,8 @@ begin
 
  fRandomGenerator:=TRNLRandomGenerator.Create;
 
+ fPeerLock:=TCriticalSection.Create;
+
  fPeerIDManager:=TRNLIDManager.Create;
 
  fPeerIDMap:=TRNLHostPeerIDMap.Create;
@@ -17792,6 +17808,8 @@ begin
  FreeAndNil(fPeerIDMap);
 
  FreeAndNil(fPeerIDManager);
+
+ FreeAndNil(fPeerLock);
 
  Finalize(fOutgoingPacketBuffer);
 
@@ -19393,23 +19411,30 @@ begin
    fOutgoingBandwidthRateTracker.SetTime(fTime);
    fOutgoingBandwidthRateTracker.Update;
 
-   NextTimeout:=Timeout;
+   fPeerLock.Acquire;
+   try
 
-   if not DispatchPeers(NextTimeout) then begin
-    result:=RNL_HOST_SERVICE_STATUS_ERROR;
-    exit;
-   end;
+    NextTimeout:=Timeout;
 
-   if not ReceivePackets(NextTimeout) then begin
-    result:=RNL_HOST_SERVICE_STATUS_ERROR;
-    exit;
-   end;
+    if not DispatchPeers(NextTimeout) then begin
+     result:=RNL_HOST_SERVICE_STATUS_ERROR;
+     exit;
+    end;
 
-   NextTimeout:=Timeout;
+    if not ReceivePackets(NextTimeout) then begin
+     result:=RNL_HOST_SERVICE_STATUS_ERROR;
+     exit;
+    end;
 
-   if not DispatchPeers(NextTimeout) then begin
-    result:=RNL_HOST_SERVICE_STATUS_ERROR;
-    exit;
+    NextTimeout:=Timeout;
+
+    if not DispatchPeers(NextTimeout) then begin
+     result:=RNL_HOST_SERVICE_STATUS_ERROR;
+     exit;
+    end;
+
+   finally
+    fPeerLock.Release;
    end;
 
   until fEventQueue.IsEmpty or
