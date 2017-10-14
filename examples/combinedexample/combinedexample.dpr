@@ -12,7 +12,7 @@ program combinedexample;
  {$apptype console}
 {$ifend}
 
-{-$define UseConsoleOutputConditionVariable}
+// Hint: FPC has yet no TMonitor support
 
 uses
   {$ifdef unix}
@@ -21,8 +21,7 @@ uses
   SysUtils,
   Classes,
   SyncObjs,
-  RNL in '..\..\src\RNL.pas',
-  PasMP in '..\..\externals\pasmp\src\PasMP.pas';
+  RNL in '..\..\src\RNL.pas';
 
 const SimulatedIncomingPacketLossProbabilityFactor=TRNLUInt32($00000000);
       SimulatedOutgoingPacketLossProbabilityFactor=TRNLUInt32($00000000);
@@ -39,20 +38,16 @@ const SimulatedIncomingPacketLossProbabilityFactor=TRNLUInt32($00000000);
       SimulatedIncomingJitter=0;
       SimulatedOutgoingJitter=0;
 
-type TConsoleOutputThread=class(TPasMPThread)
+type TConsoleOutputThread=class(TThread)
       protected
        procedure Execute; override;
      end;
 
-{$ifdef UseConsoleOutputConditionVariable}
      TConsoleOutputQueue=TRNLQueue<string>;
-{$else}
-     TConsoleOutputQueue=TPasMPUnboundedQueue<string>;
-{$endif}
 
-     TServer=class(TPasMPThread)
+     TServer=class(TThread)
       private
-       fReadyEvent:TPasMPEvent;
+       fReadyEvent:TEvent;
       protected
        procedure Execute; override;
       public
@@ -60,7 +55,7 @@ type TConsoleOutputThread=class(TPasMPThread)
        destructor Destroy; override;
      end;
 
-     TClient=class(TPasMPThread)
+     TClient=class(TThread)
       protected
        procedure Execute; override;
      end;
@@ -73,15 +68,9 @@ var RNLInstance:TRNLInstance=nil;
 
     ConsoleOutputThread:TConsoleOutputThread=nil;
 
-{$ifdef UseConsoleOutputConditionVariable}
-    ConsoleOutputConditionVariableLock:TPasMPConditionVariableLock=nil;
+    ConsoleOutputLock:TCriticalSection=nil;
 
-    ConsoleOutputConditionVariable:TPasMPConditionVariable=nil;
-{$else}
-
-    ConsoleOutputEvent:TPasMPEvent=nil;
-
-{$endif}
+    ConsoleOutputEvent:TEvent=nil;
 
     RNLMainNetwork:TRNLNetwork=nil;
 
@@ -89,35 +78,26 @@ var RNLInstance:TRNLInstance=nil;
 
 procedure ConsoleOutput(const s:string);
 begin
-{$ifdef UseConsoleOutputConditionVariable}
- ConsoleOutputConditionVariableLock.Acquire;
+ ConsoleOutputLock.Acquire;
  try
   ConsoleOutputQueue.Enqueue(s);
-  ConsoleOutputConditionVariable.Signal;
+  ConsoleOutputEvent.SetEvent;
  finally
-  ConsoleOutputConditionVariableLock.Release;
+  ConsoleOutputLock.Release;
  end;
-{$else}
- ConsoleOutputQueue.Enqueue(s);
- ConsoleOutputEvent.SetEvent;
-{$endif}
 end;
 
 procedure FlushConsoleOutput;
 var s:string;
 begin
-{$ifdef UseConsoleOutputConditionVariable}
- ConsoleOutputConditionVariableLock.Acquire;
+ ConsoleOutputLock.Acquire;
  try
-{$endif}
   while ConsoleOutputQueue.Dequeue(s) do begin
    writeln(s);
   end;
-{$ifdef UseConsoleOutputConditionVariable}
  finally
-  ConsoleOutputConditionVariableLock.Release;
+  ConsoleOutputLock.Release;
  end;
-{$endif}
 end;
 
 procedure LogThreadException(const aThreadName:string;const aException:TObject);
@@ -161,29 +141,20 @@ begin
 {$endif}
  ConsoleOutput('Console output: Thread started');
  try
-{$ifdef UseConsoleOutputConditionVariable}
-  ConsoleOutputConditionVariableLock.Acquire;
-  try
-   while not Terminated do begin
-    case ConsoleOutputConditionVariable.Wait(ConsoleOutputConditionVariableLock,1000) of
-     wrSignaled:begin
-      while (not Terminated) and ConsoleOutputQueue.Dequeue(s) do begin
-       writeln(s);
-      end;
-     end;
-    end;
-   end;
-  finally
-   ConsoleOutputConditionVariableLock.Release;
-  end;
-{$else}
   while not Terminated do begin
    ConsoleOutputEvent.WaitFor(1000);
-   while (not Terminated) and ConsoleOutputQueue.Dequeue(s) do begin
+   while not Terminated do begin
+    ConsoleOutputLock.Acquire;
+    try
+     if not ConsoleOutputQueue.Dequeue(s) then begin
+      break;
+     end;
+    finally
+     ConsoleOutputLock.Release;
+    end;
     writeln(s);
    end;
   end;
-{$endif}
  except
   on e:Exception do begin
    LogThreadException('Console output',e);
@@ -194,7 +165,7 @@ end;
 
 constructor TServer.Create(const aCreateSuspended:boolean);
 begin
- fReadyEvent:=TPasMPEvent.Create(nil,false,false,'');
+ fReadyEvent:=TEvent.Create(nil,false,false,'');
  inherited Create(aCreateSuspended);
 end;
 
@@ -432,18 +403,11 @@ begin
     TRNLNetworkInterferenceSimulator(RNLNetwork).SimulatedOutgoingLatency:=SimulatedOutgoingLatency;
     TRNLNetworkInterferenceSimulator(RNLNetwork).SimulatedIncomingJitter:=SimulatedIncomingJitter;
     TRNLNetworkInterferenceSimulator(RNLNetwork).SimulatedOutgoingJitter:=SimulatedOutgoingJitter;
-{$ifdef UseConsoleOutputConditionVariable}
-    ConsoleOutputConditionVariableLock:=TPasMPConditionVariableLock.Create;
+    ConsoleOutputLock:=TCriticalSection.Create;
     try
-     ConsoleOutputConditionVariable:=TPasMPConditionVariable.Create;
+     ConsoleOutputEvent:=TEvent.Create(nil,false,false,'');
      try
       ConsoleOutputQueue:=TConsoleOutputQueue.Create;
-{$else}
-    try
-     ConsoleOutputEvent:=TPasMPEvent.Create(nil,false,false,'');
-     try
-      ConsoleOutputQueue:=TConsoleOutputQueue.Create(false);
-{$endif}
       try
        ConsoleOutputThread:=TConsoleOutputThread.Create(false);
        try
@@ -487,11 +451,7 @@ begin
         end;
        finally
         ConsoleOutputThread.Terminate;
-{$ifdef UseConsoleOutputConditionVariable}
-        ConsoleOutputConditionVariable.Signal;
-{$else}
         ConsoleOutputEvent.SetEvent;
-{$endif}
         ConsoleOutputThread.WaitFor;
         LogThreadException('Console output',ConsoleOutputThread.FatalException);
         FreeAndNil(ConsoleOutputThread);
@@ -500,20 +460,12 @@ begin
       finally
        FreeAndNil(ConsoleOutputQueue);
       end;
-{$ifdef UseConsoleOutputConditionVariable}
-     finally
-      FreeAndNil(ConsoleOutputConditionVariable);
-     end;
-    finally
-     FreeAndNil(ConsoleOutputConditionVariableLock);
-    end;
-{$else}
      finally
       FreeAndNil(ConsoleOutputEvent);
      end;
     finally
+     FreeAndNil(ConsoleOutputLock);
     end;
-{$endif}
    finally
     FreeAndNil(RNLNetwork);
    end;
