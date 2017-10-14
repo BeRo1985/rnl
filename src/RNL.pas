@@ -468,7 +468,7 @@ uses {$if defined(Posix)}
 {    Generics.Defaults,
      Generics.Collections;}
 
-const RNL_VERSION='1.00.2017.10.13.19.20.0000';
+const RNL_VERSION='1.00.2017.10.14.04.26.0000';
 
 type PPRNLInt8=^PRNLInt8;
      PRNLInt8=^TRNLInt8;
@@ -675,9 +675,9 @@ const RNL_PROTOCOL_VERSION_MAJOR=1;
 
       RNL_PROTOCOL_PACKET_HEADER_FLAG_COMPRESSED=1 shl 0;
 
-      RNL_PEER_KEEP_ALIVE_WINDOW_BITS=2;
-      RNL_PEER_KEEP_ALIVE_WINDOW_SIZE=1 shl RNL_PEER_KEEP_ALIVE_WINDOW_BITS;
-      RNL_PEER_KEEP_ALIVE_WINDOW_MASK=RNL_PEER_KEEP_ALIVE_WINDOW_SIZE-1;
+{     RNL_PEER_KEEP_ALIVE_WINDOW_BITS=2;
+      fHost.fKeepAliveWindowSize=1 shl RNL_PEER_KEEP_ALIVE_WINDOW_BITS;
+      fHost.fKeepAliveWindowMask=fHost.fKeepAliveWindowSize-1;}
 
       RNL_PEER_PACKET_LOSS_INTERVAL=10000;
 
@@ -3017,8 +3017,7 @@ type PRNLVersion=^TRNLVersion;
       ResendTimeout:TRNLTime;
      end;
 
-     PRNLPeerKeepAliveWindowItems=^TRNLPeerKeepAliveWindowItems;
-     TRNLPeerKeepAliveWindowItems=array[0..RNL_PEER_KEEP_ALIVE_WINDOW_SIZE-1] of TRNLPeerKeepAliveWindowItem;
+     TRNLPeerKeepAliveWindowItems=array of TRNLPeerKeepAliveWindowItem;
 
      TRNLPeerIncomingPacketQueue=TRNLQueue<TBytes>;
 
@@ -3312,6 +3311,10 @@ type PRNLVersion=^TRNLVersion;
 
        fEncryptedPacketSequenceWindowMask:TRNLUInt32;
 
+       fKeepAliveWindowSize:TRNLUInt32;
+
+       fKeepAliveWindowMask:TRNLUInt32;
+
        fProtocolID:TRNLUInt64;
 
        fSalt:TRNLUInt64;
@@ -3418,6 +3421,8 @@ type PRNLVersion=^TRNLVersion;
 
        procedure SetEncryptedPacketSequenceWindowSize(const aEncryptedPacketSequenceWindowSize:TRNLUInt32);
 
+       procedure SetKeepAliveWindowSize(const aKeepAliveWindowSize:TRNLUInt32);
+
        function SendPacket(const aAddress:TRNLAddress;const aData;const aDataLength:TRNLSizeUInt):TRNLNetworkSendResult;
 
        procedure ResetConnectionAttemptHistory;
@@ -3500,6 +3505,7 @@ type PRNLVersion=^TRNLVersion;
        property OutgoingBandwidthRate:TRNLUInt32 read GetOutgoingBandwidthRate;
        property ReliableChannelBlockPacketWindowSize:TRNLUInt32 read fReliableChannelBlockPacketWindowSize write SetReliableChannelBlockPacketWindowSize;
        property EncryptedPacketSequenceWindowSize:TRNLUInt32 read fEncryptedPacketSequenceWindowSize write SetEncryptedPacketSequenceWindowSize;
+       property KeepAliveWindowSize:TRNLUInt32 read fKeepAliveWindowSize write SetKeepAliveWindowSize;
        property ReceiveBufferSize:TRNLUInt32 read fReceiveBufferSize write fReceiveBufferSize;
        property SendBufferSize:TRNLUInt32 read fSendBufferSize write fSendBufferSize;
        property MTU:TRNLSizeUInt read fMTU write SetMTU;
@@ -16016,7 +16022,9 @@ begin
 
  fOutgoingPingSequenceNumber:=0;
 
- FillChar(fKeepAliveWindowItems,SizeOf(TRNLPeerKeepAliveWindowItems),#0);
+ fKeepAliveWindowItems:=nil;
+ SetLength(fKeepAliveWindowItems,fHost.fKeepAliveWindowSize);
+ FillChar(fKeepAliveWindowItems[0],fHost.fKeepAliveWindowSize*SizeOf(TRNLPeerKeepAliveWindowItem),#0);
 
  fIncomingBlockPackets:=TRNLPeerBlockPacketQueue.Create;
 
@@ -16110,6 +16118,8 @@ begin
  FreeAndNil(fChannels);
 
  FreeAndNil(fIncomingPacketQueue);
+
+ fKeepAliveWindowItems:=nil;
 
  dec(fHost.fCountPeers);
 
@@ -16379,7 +16389,7 @@ begin
       end;
      end;
 
-     KeepAliveWindowItem:=@fKeepAliveWindowItems[IncomingBlockPacket.fBlockPacket.Pong.SequenceNumber and RNL_PEER_KEEP_ALIVE_WINDOW_MASK];
+     KeepAliveWindowItem:=@fKeepAliveWindowItems[IncomingBlockPacket.fBlockPacket.Pong.SequenceNumber and fHost.fKeepAliveWindowMask];
 
      if (KeepAliveWindowItem^.State=RNL_PEER_KEEP_ALIVE_WINDOW_ITEM_STATE_SENT) and
         (KeepAliveWindowItem^.SequenceNumber=IncomingBlockPacket.fBlockPacket.Pong.SequenceNumber) then begin
@@ -16387,7 +16397,7 @@ begin
       KeepAliveWindowItem^.State:=RNL_PEER_KEEP_ALIVE_WINDOW_ITEM_STATE_ACKNOWLEDGED;
 
       repeat
-       OtherKeepAliveWindowItem:=@fKeepAliveWindowItems[fIncomingPongSequenceNumber and RNL_PEER_KEEP_ALIVE_WINDOW_MASK];;
+       OtherKeepAliveWindowItem:=@fKeepAliveWindowItems[fIncomingPongSequenceNumber and fHost.fKeepAliveWindowMask];;
        if (OTherKeepAliveWindowItem^.State=RNL_PEER_KEEP_ALIVE_WINDOW_ITEM_STATE_ACKNOWLEDGED) and
           (OtherKeepAliveWindowItem^.SequenceNumber=fIncomingPongSequenceNumber) then begin
         OtherKeepAliveWindowItem^.State:=RNL_PEER_KEEP_ALIVE_WINDOW_ITEM_STATE_FREE;
@@ -16905,14 +16915,14 @@ begin
 
  fNextPingResendTime.fValue:=0;
 
- if (TRNLInt8(TRNLUInt8(fOutgoingPingSequenceNumber-fIncomingPongSequenceNumber))<RNL_PEER_KEEP_ALIVE_WINDOW_SIZE) and
+ if (TRNLInt8(TRNLUInt8(fOutgoingPingSequenceNumber-fIncomingPongSequenceNumber))<TRNLSizeInt(fHost.fKeepAliveWindowSize)) and
     (fOutgoingBlockPackets.Count=0) and
     (fOutgoingMTUProbeBlockPackets.Count=0) and
     (fUnacknowlegmentedBlockPackets=0) and
     (fHost.fTime>=(fLastReceivedDataTime+fHost.fPingInterval)) and
     (fHost.fTime>=(fLastPingSentTime+fHost.fPingInterval)) then begin
 
-  KeepAliveWindowItem:=@fKeepAliveWindowItems[fOutgoingPingSequenceNumber and RNL_PEER_KEEP_ALIVE_WINDOW_MASK];
+  KeepAliveWindowItem:=@fKeepAliveWindowItems[fOutgoingPingSequenceNumber and fHost.fKeepAliveWindowMask];
 
   if KeepAliveWindowItem^.State=RNL_PEER_KEEP_ALIVE_WINDOW_ITEM_STATE_FREE then begin
 
@@ -16950,7 +16960,7 @@ begin
 
  end;
 
- for SequenceIndex:=0 to RNL_PEER_KEEP_ALIVE_WINDOW_MASK do begin
+ for SequenceIndex:=0 to fHost.fKeepAliveWindowMask do begin
 
   SequenceNumber:=TRNLUInt8(fIncomingPongSequenceNumber+SequenceIndex);
 
@@ -16958,7 +16968,7 @@ begin
    break;
   end;
 
-  KeepAliveWindowItem:=@fKeepAliveWindowItems[SequenceNumber and RNL_PEER_KEEP_ALIVE_WINDOW_MASK];
+  KeepAliveWindowItem:=@fKeepAliveWindowItems[SequenceNumber and fHost.fKeepAliveWindowMask];
 
   if KeepAliveWindowItem^.State=RNL_PEER_KEEP_ALIVE_WINDOW_ITEM_STATE_SENT then begin
 
@@ -17672,7 +17682,7 @@ begin
 
  fSendBufferSize:=262144;
 
- SetMTU(1500);
+ SetMTU(0);
 
  fMTUDoFragment:=true;
 
@@ -17682,7 +17692,9 @@ begin
 
  SetPingResendTimeout(0);
 
- SetEncryptedPacketSequenceWindowSize(256);
+ SetEncryptedPacketSequenceWindowSize(0);
+
+ SetKeepAliveWindowSize(0);
 
  fProtocolID:=0;
 
@@ -17849,7 +17861,11 @@ end;
 
 procedure TRNLHost.SetMTU(const aMTU:TRNLSizeUInt);
 begin
- fMTU:=Min(Max(aMTU,RNL_MINIMUM_MTU),RNL_MAXIMUM_MTU);
+ if aMTU=0 then begin
+  fMTU:=1500;
+ end else begin
+  fMTU:=Min(Max(aMTU,RNL_MINIMUM_MTU),RNL_MAXIMUM_MTU);
+ end;
 end;
 
 procedure TRNLHost.SetConnectionTimeout(const aConnectionTimeout:TRNLTime);
@@ -17881,7 +17897,9 @@ end;
 
 procedure TRNLHost.SetEncryptedPacketSequenceWindowSize(const aEncryptedPacketSequenceWindowSize:TRNLUInt32);
 begin
- if (aEncryptedPacketSequenceWindowSize=0) or (aEncryptedPacketSequenceWindowSize>65536) then begin
+ if aEncryptedPacketSequenceWindowSize=0 then begin
+  fEncryptedPacketSequenceWindowSize:=256;
+ end else if aEncryptedPacketSequenceWindowSize>65536 then begin
   fEncryptedPacketSequenceWindowSize:=65536;
  end else if aEncryptedPacketSequenceWindowSize<16 then begin
   fEncryptedPacketSequenceWindowSize:=16;
@@ -17889,6 +17907,20 @@ begin
   fEncryptedPacketSequenceWindowSize:=TRNLMath.RoundUpToPowerOfTwo32(aEncryptedPacketSequenceWindowSize);
  end;
  fEncryptedPacketSequenceWindowMask:=fEncryptedPacketSequenceWindowSize-1;
+end;
+
+procedure TRNLHost.SetKeepAliveWindowSize(const aKeepAliveWindowSize:TRNLUInt32);
+begin
+ if aKeepAliveWindowSize=0 then begin
+  fKeepAliveWindowSize:=4;
+ end else if (aKeepAliveWindowSize>256) then begin
+  fKeepAliveWindowSize:=256;
+ end else if aKeepAliveWindowSize<1 then begin
+  fKeepAliveWindowSize:=1;
+ end else begin
+  fKeepAliveWindowSize:=TRNLMath.RoundUpToPowerOfTwo32(aKeepAliveWindowSize);
+ end;
+ fKeepAliveWindowMask:=fKeepAliveWindowSize-1;
 end;
 
 function TRNLHost.SendPacket(const aAddress:TRNLAddress;const aData;const aDataLength:TRNLSizeUInt):TRNLNetworkSendResult;
