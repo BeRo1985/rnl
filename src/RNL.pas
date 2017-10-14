@@ -468,7 +468,7 @@ uses {$if defined(Posix)}
 {    Generics.Defaults,
      Generics.Collections;}
 
-const RNL_VERSION='1.00.2017.10.14.06.42.0000';
+const RNL_VERSION='1.00.2017.10.14.06.59.0000';
 
 type PPRNLInt8=^PRNLInt8;
      PRNLInt8=^TRNLInt8;
@@ -16110,53 +16110,53 @@ var BlockPacket:TRNLPeerBlockPacket;
 {$ifend}
 begin
 
- if assigned(fConnectionChallengeResponse) then begin
-  FreeMem(fConnectionChallengeResponse);
-  fConnectionChallengeResponse:=nil;
- end;
-
- if assigned(fConnectionToken) then begin
-  FreeMem(fConnectionToken);
-  fConnectionToken:=nil;
- end;
-
- if assigned(fAuthenticationToken) then begin
-  FreeMem(fAuthenticationToken);
-  fAuthenticationToken:=nil;
- end;
-
- fIncomingEncryptedPacketSequenceBuffer:=nil;
-
- while fDeferredOutgoingBlockPackets.Dequeue(BlockPacket) do begin
-  BlockPacket.DecRef;
- end;
- FreeAndNil(fDeferredOutgoingBlockPackets);
-
- while fOutgoingMTUProbeBlockPackets.Dequeue(BlockPacket) do begin
-  BlockPacket.DecRef;
- end;
- FreeAndNil(fOutgoingMTUProbeBlockPackets);
-
- while fOutgoingBlockPackets.Dequeue(BlockPacket) do begin
-  BlockPacket.DecRef;
- end;
- FreeAndNil(fOutgoingBlockPackets);
-
- while fIncomingBlockPackets.Dequeue(BlockPacket) do begin
-  BlockPacket.DecRef;
- end;
- FreeAndNil(fIncomingBlockPackets);
-
- FreeAndNil(fPendingConnectionHandshakeSendData);
-
- FreeAndNil(fChannels);
-
- FreeAndNil(fIncomingPacketQueue);
-
- fKeepAliveWindowItems:=nil;
-
  fHost.fPeerLock.Acquire;
  try
+
+  if assigned(fConnectionChallengeResponse) then begin
+   FreeMem(fConnectionChallengeResponse);
+   fConnectionChallengeResponse:=nil;
+  end;
+
+  if assigned(fConnectionToken) then begin
+   FreeMem(fConnectionToken);
+   fConnectionToken:=nil;
+  end;
+
+  if assigned(fAuthenticationToken) then begin
+   FreeMem(fAuthenticationToken);
+   fAuthenticationToken:=nil;
+  end;
+
+  fIncomingEncryptedPacketSequenceBuffer:=nil;
+
+  while fDeferredOutgoingBlockPackets.Dequeue(BlockPacket) do begin
+   BlockPacket.DecRef;
+  end;
+  FreeAndNil(fDeferredOutgoingBlockPackets);
+
+  while fOutgoingMTUProbeBlockPackets.Dequeue(BlockPacket) do begin
+   BlockPacket.DecRef;
+  end;
+  FreeAndNil(fOutgoingMTUProbeBlockPackets);
+
+  while fOutgoingBlockPackets.Dequeue(BlockPacket) do begin
+   BlockPacket.DecRef;
+  end;
+  FreeAndNil(fOutgoingBlockPackets);
+
+  while fIncomingBlockPackets.Dequeue(BlockPacket) do begin
+   BlockPacket.DecRef;
+  end;
+  FreeAndNil(fIncomingBlockPackets);
+
+  FreeAndNil(fPendingConnectionHandshakeSendData);
+
+  FreeAndNil(fChannels);
+
+  FreeAndNil(fIncomingPacketQueue);
+
+  fKeepAliveWindowItems:=nil;
 
   dec(fHost.fCountPeers);
 
