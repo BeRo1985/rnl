@@ -192,11 +192,11 @@ begin
 {  RNLNetwork.AddressSetHost(Server.Address^,'127.0.0.1');
    Server.Address.Port:=64242;{}
    Server.Compressor:=RNLCompressorClass.Create;
+   Server.MaximumCountChannels:=4;
    Server.ChannelTypes[0]:=RNL_PEER_RELIABLE_ORDERED_CHANNEL;
    Server.ChannelTypes[1]:=RNL_PEER_RELIABLE_UNORDERED_CHANNEL;
    Server.ChannelTypes[2]:=RNL_PEER_UNRELIABLE_ORDERED_CHANNEL;
    Server.ChannelTypes[3]:=RNL_PEER_UNRELIABLE_UNORDERED_CHANNEL;
-   Server.MaximumCountChannels:=4;
    Server.Start;
    fReadyEvent.SetEvent;
    Event.Initialize;
@@ -261,6 +261,11 @@ begin
   Client:=TRNLHost.Create(RNLInstance,RNLNetwork);
   try
    Client.Compressor:=RNLCompressorClass.Create;
+   Client.MaximumCountChannels:=4;
+   Client.ChannelTypes[0]:=RNL_PEER_RELIABLE_ORDERED_CHANNEL;
+   Client.ChannelTypes[1]:=RNL_PEER_RELIABLE_UNORDERED_CHANNEL;
+   Client.ChannelTypes[2]:=RNL_PEER_UNRELIABLE_ORDERED_CHANNEL;
+   Client.ChannelTypes[3]:=RNL_PEER_UNRELIABLE_UNORDERED_CHANNEL;
    Client.Start;
    ConsoleOutput('Client: Connecting');
    Address.Port:=64242;
