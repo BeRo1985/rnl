@@ -204,6 +204,18 @@ begin
     while (not Terminated) and (Server.Service(Event,1000)<>RNL_HOST_SERVICE_STATUS_ERROR) do begin
      try
       case Event.Type_ of
+       RNL_HOST_EVENT_TYPE_PEER_CHECK_CONNECTION_TOKEN:begin
+        if assigned(Event.ConnectionCandidate) then begin
+         ConsoleOutput('Server: A new client is connecting');
+         Event.ConnectionCandidate.AcceptConnectionToken;
+        end;
+       end;
+       RNL_HOST_EVENT_TYPE_PEER_CHECK_AUTHENTICATION_TOKEN:begin
+        if assigned(Event.ConnectionCandidate) then begin
+         ConsoleOutput('Server: A new client is authenticating');
+         Event.ConnectionCandidate.AcceptAuthenticationToken;
+        end;
+       end;
        RNL_HOST_EVENT_TYPE_PEER_CONNECT:begin
         ConsoleOutput(Format('Server: A new client connected, local peer ID %d, remote peer ID %d, channels count %d',
                              [Event.Peer.LocalPeerID,

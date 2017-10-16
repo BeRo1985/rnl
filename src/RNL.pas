@@ -468,7 +468,7 @@ uses {$if defined(Posix)}
 {    Generics.Defaults,
      Generics.Collections;}
 
-const RNL_VERSION='1.00.2017.10.16.18.26.0000';
+const RNL_VERSION='1.00.2017.10.16.19.01.0000';
 
 type PPRNLInt8=^PRNLInt8;
      PRNLInt8=^TRNLInt8;
@@ -1633,6 +1633,7 @@ type PRNLVersion=^TRNLVersion;
      PRNLConnectionCandidateData=^TRNLConnectionCandidateData;
      TRNLConnectionCandidateData=record
       private
+       fHost:TRNLHost;
        fPeer:TRNLPeer;
        fLocalShortTermPrivateKey:TRNLKey;
        fLocalShortTermPublicKey:TRNLKey;
@@ -1645,6 +1646,8 @@ type PRNLVersion=^TRNLVersion;
        fCountChallengeRepetitions:TRNLUInt16;
        fChallenge:TRNLConnectionChallenge;
        fSolvedChallenge:TRNLConnectionChallenge;
+       fConnectionToken:TRNLConnectionToken;
+       fAuthenticationToken:TRNLAuthenticationToken;
       public
      end;
 
@@ -1657,8 +1660,16 @@ type PRNLVersion=^TRNLVersion;
        fCreateTime:TRNLTime;
        fAddress:TRNLAddress;
        fData:PRNLConnectionCandidateData;
+       function GetConnectionToken:TRNLConnectionToken;
+       function GetAuthenticationToken:TRNLAuthenticationToken;
       public
+       procedure AcceptConnectionToken;
+       procedure RejectConnectionToken;
+       procedure AcceptAuthenticationToken;
+       procedure RejectAuthenticationToken;
        property Address:TRNLAddress read fAddress;
+       property ConnectionToken:TRNLConnectionToken read GetConnectionToken;
+       property AuthenticationToken:TRNLAuthenticationToken read GetAuthenticationToken;
      end;
 
      PRNLConnectionCandidateHashTable=^TRNLConnectionCandidateHashTable;
@@ -2336,6 +2347,8 @@ type PRNLVersion=^TRNLVersion;
      TRNLHostEventType=
       (
        RNL_HOST_EVENT_TYPE_NONE,
+       RNL_HOST_EVENT_TYPE_PEER_CHECK_CONNECTION_TOKEN,
+       RNL_HOST_EVENT_TYPE_PEER_CHECK_AUTHENTICATION_TOKEN,
        RNL_HOST_EVENT_TYPE_PEER_CONNECT,
        RNL_HOST_EVENT_TYPE_PEER_DISCONNECT,
        RNL_HOST_EVENT_TYPE_PEER_APPROVAL,
@@ -2356,6 +2369,10 @@ type PRNLVersion=^TRNLVersion;
        Peer:TRNLPeer;
        Message:TRNLMessage;
        case TRNLHostEventType of
+        RNL_HOST_EVENT_TYPE_PEER_CHECK_CONNECTION_TOKEN,
+        RNL_HOST_EVENT_TYPE_PEER_CHECK_AUTHENTICATION_TOKEN:(
+         ConnectionCandidate:PRNLConnectionCandidate;
+        );
         RNL_HOST_EVENT_TYPE_PEER_CONNECT,
         RNL_HOST_EVENT_TYPE_PEER_DISCONNECT:(
          Data:TRNLUInt64;
@@ -3374,6 +3391,10 @@ type PRNLVersion=^TRNLVersion;
 
        fRateLimiterHostAddressPeriod:TRNLUInt64;
 
+       fCheckConnectionTokens:boolean;
+
+       fCheckAuthenticationTokens:boolean;
+
        fOnPeerCheckConnectionToken:TRNLHostOnPeerCheckConnectionToken;
 
        fOnPeerCheckAuthenticationToken:TRNLHostOnPeerCheckAuthenticationToken;
@@ -3480,6 +3501,8 @@ type PRNLVersion=^TRNLVersion;
 
        function VerifyHandshakePacketChecksum(var aHandshakePacket):boolean;
 
+       procedure DispatchHandshakeConnectionRequest(const aConnectionCandidate:PRNLConnectionCandidate);
+
        procedure DispatchReceivedHandshakePacketConnectionRequest(const aIncomingPacket:PRNLProtocolHandshakePacketConnectionRequest);
 
        procedure DispatchReceivedHandshakePacketConnectionChallengeRequest(const aIncomingPacket:PRNLProtocolHandshakePacketConnectionChallengeRequest);
@@ -3564,6 +3587,8 @@ type PRNLVersion=^TRNLVersion;
        property SendBufferSize:TRNLUInt32 read fSendBufferSize write fSendBufferSize;
        property MTU:TRNLSizeUInt read fMTU write SetMTU;
        property MTUDoFragment:boolean read fMTUDoFragment write fMTUDoFragment;
+       property CheckConnectionTokens:boolean read fCheckConnectionTokens write fCheckConnectionTokens;
+       property CheckAuthenticationTokens:boolean read fCheckAuthenticationTokens write fCheckAuthenticationTokens;
        property OnPeerCheckConnectionToken:TRNLHostOnPeerCheckConnectionToken read fOnPeerCheckConnectionToken write fOnPeerCheckConnectionToken;
        property OnPeerCheckAuthenticationToken:TRNLHostOnPeerCheckAuthenticationToken read fOnPeerCheckAuthenticationToken write fOnPeerCheckAuthenticationToken;
        property OnPeerConnect:TRNLHostOnPeerConnect read fOnPeerConnect write fOnPeerConnect;
@@ -10222,6 +10247,60 @@ begin
  end;
 end;
 
+function TRNLConnectionCandidate.GetConnectionToken:TRNLConnectionToken;
+begin
+ if assigned(fData) then begin
+  result:=fData^.fConnectionToken;
+ end else begin
+  FillChar(result,SizeOf(TRNLConnectionToken),#0);
+ end;
+end;
+
+procedure TRNLConnectionCandidate.AcceptConnectionToken;
+begin
+ if assigned(fData) and assigned(fData^.fHost) then begin
+  fData^.fHost.DispatchHandshakeConnectionRequest(@self);
+ end;
+end;
+
+procedure TRNLConnectionCandidate.RejectConnectionToken;
+begin
+ if assigned(fData) then begin
+  Finalize(fData^);
+  FillChar(fData^,SizeOf(TRNLConnectionCandidateData),#0);
+  FreeMem(fData);
+  fData:=nil;
+ end;
+ fState:=RNL_CONNECTION_STATE_INVALID;
+end;
+
+function TRNLConnectionCandidate.GetAuthenticationToken:TRNLAuthenticationToken;
+begin
+ if assigned(fData) then begin
+  result:=fData^.fAuthenticationToken;
+ end else begin
+  FillChar(result,SizeOf(TRNLAuthenticationToken),#0);
+ end;
+end;
+
+procedure TRNLConnectionCandidate.AcceptAuthenticationToken;
+begin
+ if assigned(fData) and assigned(fData^.fHost) then begin
+// fData^.fHost.DispatchHandshakeConnectionRequest(@self);
+ end;
+end;
+
+procedure TRNLConnectionCandidate.RejectAuthenticationToken;
+begin
+ if assigned(fData) then begin
+  Finalize(fData^);
+  FillChar(fData^,SizeOf(TRNLConnectionCandidateData),#0);
+  FreeMem(fData);
+  fData:=nil;
+ end;
+ fState:=RNL_CONNECTION_STATE_INVALID;
+end;
+
 procedure TRNLConnectionCandidateHashTable.Clear;
 begin
  FillChar(self,SizeOf(TRNLConnectionCandidateHashTable),#0);
@@ -10239,6 +10318,7 @@ begin
 
   if assigned(Item^.fData) then begin
    Finalize(Item^.fData^);
+   FillChar(Item^.fData^,SizeOf(TRNLConnectionCandidateData),#0);
    FreeMem(Item^.fData);
    Item^.fData:=nil;
   end;
@@ -17886,6 +17966,10 @@ begin
 
  fRateLimiterHostAddressPeriod:=1000;
 
+ fCheckConnectionTokens:=false;
+
+ fCheckAuthenticationTokens:=false;
+
  fOnPeerCheckConnectionToken:=nil;
 
  fOnPeerCheckAuthenticationToken:=nil;
@@ -18428,11 +18512,47 @@ begin
  result:=DesiredChecksum=TRNLEndianness.LittleEndianToHost32(PRNLProtocolHandshakePacket(TRNLPointer(@aHandshakePacket))^.Header.Checksum);
 end;
 
+procedure TRNLHost.DispatchHandshakeConnectionRequest(const aConnectionCandidate:PRNLConnectionCandidate);
+var Index:TRNLInt32;
+    OutgoingPacket:TRNLProtocolHandshakePacketConnectionChallengeRequest;
+begin
+
+ if not (assigned(aConnectionCandidate) and assigned(aConnectionCandidate^.fData)) then begin
+  exit;
+ end;
+
+ for Index:=0 to (SizeOf(TRNLConnectionChallenge) shr 3)-1 do begin
+  PRNLUInt64Array(TRNLPointer(@aConnectionCandidate^.fData^.fChallenge))^[Index]:=fRandomGenerator.GetUInt64;
+ end;
+
+ OutgoingPacket.Header.Signature:=RNLProtocolHandshakePacketHeaderSignature;
+ OutgoingPacket.Header.ProtocolVersion:=TRNLEndianness.HostToLittleEndian64(RNL_PROTOCOL_VERSION);
+ OutgoingPacket.Header.ProtocolID:=TRNLEndianness.HostToLittleEndian64(fProtocolID);
+ OutgoingPacket.Header.PacketType:=TRNLUInt32(TRNLProtocolHandshakePacketType(RNL_PROTOCOL_HANDSHAKE_PACKET_TYPE_CONNECTION_CHALLENGE_REQUEST));
+ OutgoingPacket.PeerID:=TRNLEndianness.HostToLittleEndian16(aConnectionCandidate^.fData^.fOutgoingPeerID);
+ OutgoingPacket.OutgoingSalt:=TRNLEndianness.HostToLittleEndian64(aConnectionCandidate^.fRemoteSalt);
+ OutgoingPacket.IncomingSalt:=TRNLEndianness.HostToLittleEndian64(aConnectionCandidate^.fLocalSalt);
+ OutgoingPacket.IncomingBandwidthLimit:=TRNLEndianness.HostToLittleEndian32(fIncomingBandwidthLimit);
+ OutgoingPacket.OutgoingBandwidthLimit:=TRNLEndianness.HostToLittleEndian32(fOutgoingBandwidthLimit);
+ OutgoingPacket.CountChallengeRepetitions:=TRNLEndianness.HostToLittleEndian16(aConnectionCandidate^.fData^.fCountChallengeRepetitions);
+ OutgoingPacket.Challenge:=aConnectionCandidate^.fData^.fChallenge;
+
+ AddHandshakePacketChecksum(OutgoingPacket);
+
+ SendPacket(fReceivedAddress,
+            OutgoingPacket,
+            SizeOf(TRNLProtocolHandshakePacketConnectionChallengeRequest));
+
+ aConnectionCandidate^.fState:=RNL_CONNECTION_STATE_CHALLENGING;
+
+end;
+
 procedure TRNLHost.DispatchReceivedHandshakePacketConnectionRequest(const aIncomingPacket:PRNLProtocolHandshakePacketConnectionRequest);
 var Index:TRNLInt32;
     ConnectionKnownCandidateHostAddress:PRNLConnectionKnownCandidateHostAddress;
     ConnectionCandidate:PRNLConnectionCandidate;
     OutgoingPacket:TRNLProtocolHandshakePacketConnectionChallengeRequest;
+    HostEvent:TRNLHostEvent;
 begin
 
 {$if defined(RNL_DEBUG) and defined(RNL_DEBUG_SECURITY)}
@@ -18469,7 +18589,8 @@ begin
   exit;
  end;
 
- if assigned(fOnPeerCheckConnectionToken) and not
+ if fCheckConnectionTokens and
+    assigned(fOnPeerCheckConnectionToken) and not
     fOnPeerCheckConnectionToken(self,fReceivedAddress,aIncomingPacket^.ConnectionToken) then begin
   exit;
  end;
@@ -18505,29 +18626,26 @@ begin
 
   ConnectionCandidate^.fData^.fCountChallengeRepetitions:=Max(1,fConnectionChallengeDifficultyLevel);
 
-  for Index:=0 to (SizeOf(TRNLConnectionChallenge) shr 3)-1 do begin
-   PRNLUInt64Array(TRNLPointer(@ConnectionCandidate^.fData^.fChallenge))^[Index]:=fRandomGenerator.GetUInt64;
+  if assigned(fOnPeerCheckConnectionToken) or not fCheckConnectionTokens then begin
+
+   DispatchHandshakeConnectionRequest(ConnectionCandidate);
+
+  end else begin
+
+   ConnectionCandidate^.fData.fHost:=self;
+
+   ConnectionCandidate^.fData.fConnectionToken:=aIncomingPacket^.ConnectionToken;
+
+   try
+    HostEvent.Type_:=RNL_HOST_EVENT_TYPE_PEER_CHECK_CONNECTION_TOKEN;
+    HostEvent.Peer:=nil;
+    HostEvent.Message:=nil;
+    HostEvent.ConnectionCandidate:=ConnectionCandidate;
+   finally
+    fEventQueue.Enqueue(HostEvent);
+   end;
+
   end;
-
-  OutgoingPacket.Header.Signature:=RNLProtocolHandshakePacketHeaderSignature;
-  OutgoingPacket.Header.ProtocolVersion:=TRNLEndianness.HostToLittleEndian64(RNL_PROTOCOL_VERSION);
-  OutgoingPacket.Header.ProtocolID:=TRNLEndianness.HostToLittleEndian64(fProtocolID);
-  OutgoingPacket.Header.PacketType:=TRNLUInt32(TRNLProtocolHandshakePacketType(RNL_PROTOCOL_HANDSHAKE_PACKET_TYPE_CONNECTION_CHALLENGE_REQUEST));
-  OutgoingPacket.PeerID:=TRNLEndianness.HostToLittleEndian16(ConnectionCandidate^.fData^.fOutgoingPeerID);
-  OutgoingPacket.OutgoingSalt:=TRNLEndianness.HostToLittleEndian64(ConnectionCandidate^.fRemoteSalt);
-  OutgoingPacket.IncomingSalt:=TRNLEndianness.HostToLittleEndian64(ConnectionCandidate^.fLocalSalt);
-  OutgoingPacket.IncomingBandwidthLimit:=TRNLEndianness.HostToLittleEndian32(fIncomingBandwidthLimit);
-  OutgoingPacket.OutgoingBandwidthLimit:=TRNLEndianness.HostToLittleEndian32(fOutgoingBandwidthLimit);
-  OutgoingPacket.CountChallengeRepetitions:=TRNLEndianness.HostToLittleEndian16(ConnectionCandidate^.fData^.fCountChallengeRepetitions);
-  OutgoingPacket.Challenge:=ConnectionCandidate^.fData^.fChallenge;
-
-  AddHandshakePacketChecksum(OutgoingPacket);
-
-  SendPacket(fReceivedAddress,
-             OutgoingPacket,
-             SizeOf(TRNLProtocolHandshakePacketConnectionChallengeRequest));
-
-  ConnectionCandidate^.fState:=RNL_CONNECTION_STATE_CHALLENGING;
 
  end;
 
@@ -18970,7 +19088,8 @@ begin
 
   end;
 
-  if assigned(fOnPeerCheckAuthenticationToken) and not
+  if fCheckAuthenticationTokens and
+     assigned(fOnPeerCheckAuthenticationToken) and not
      fOnPeerCheckAuthenticationToken(self,fReceivedAddress,aIncomingPacket^.Payload.AuthenticationToken) then begin
    Authorized:=false;
   end;
