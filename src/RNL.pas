@@ -468,7 +468,7 @@ uses {$if defined(Posix)}
 {    Generics.Defaults,
      Generics.Collections;}
 
-const RNL_VERSION='1.00.2017.10.14.07.49.0000';
+const RNL_VERSION='1.00.2017.10.16.14.28.0000';
 
 type PPRNLInt8=^PRNLInt8;
      PRNLInt8=^TRNLInt8;
@@ -1292,7 +1292,7 @@ type PRNLVersion=^TRNLVersion;
        function MoveFrom(const aDataFirst,aDataLast:TRNLCircularDoublyLinkedListNode<T>):TRNLCircularDoublyLinkedListNode<T>; inline;
        function PopFromFront(out aData):boolean; inline;
        function PopFromBack(out aData):boolean; inline;
-       function ListSize:TRNLInt32;
+       function ListSize:TRNLSizeUInt;
        function GetEnumerator:TValueEnumerator;
       published
        property Next:TRNLCircularDoublyLinkedListNode<T> read fNext write fNext;
@@ -3497,6 +3497,12 @@ type PRNLVersion=^TRNLVersion;
        property PendingSendNewBandwidthLimitsSendTimeout:TRNLUInt64 read fPendingSendNewBandwidthLimitsSendTimeout write fPendingSendNewBandwidthLimitsSendTimeout;
        property RateLimiterHostAddressBurst:TRNLInt64 read fRateLimiterHostAddressBurst write fRateLimiterHostAddressBurst;
        property RateLimiterHostAddressPeriod:TRNLUInt64 read fRateLimiterHostAddressPeriod write fRateLimiterHostAddressPeriod;
+{$if defined(RNL_LINEAR_PEER_LIST)}
+       property Peers:TRNLHostPeerList read fPeerList;
+{$else}
+       property Peers:TRNLPeerListNode read fPeerList;
+{$ifend}
+       property CountPeers:TRNLUInt32 read fCountPeers;
       published
        property Instance:TRNLInstance read fInstance;
        property Network:TRNLNetwork read fNetwork;
@@ -8017,7 +8023,7 @@ begin
  end;
 end;
 
-function TRNLCircularDoublyLinkedListNode<T>.ListSize:TRNLInt32;
+function TRNLCircularDoublyLinkedListNode<T>.ListSize:TRNLSizeUInt;
 var Position:TRNLCircularDoublyLinkedListNode<T>;
 begin
  result:=0;
@@ -15968,11 +15974,11 @@ begin
 
   fRemotePeerID:=0;
 
- {$if defined(RNL_LINEAR_PEER_LIST)}
+{$if defined(RNL_LINEAR_PEER_LIST)}
   fPeerListIndex:=fHost.fPeerList.Add(self);
- {$else}
+{$else}
   fHost.fPeerList.Add(self);
- {$ifend}
+{$ifend}
 
   inc(fHost.fCountPeers);
 
@@ -16105,10 +16111,6 @@ end;
 
 destructor TRNLPeer.Destroy;
 var BlockPacket:TRNLPeerBlockPacket;
-{$if defined(RNL_LINEAR_PEER_LIST)}
-    OtherPeer:TRNLPeer;
-    OtherPeerListIndex:TRNLSizeInt;
-{$ifend}
 begin
 
  fHost.fPeerLock.Acquire;
@@ -16166,24 +16168,15 @@ begin
   fHost.fPeerIDManager.FreeID(fLocalPeerID);
 
 {$if defined(RNL_LINEAR_PEER_LIST)}
-  if (fPeerListIndex>=0) and
-     (fPeerListIndex<fHost.fPeerList.Count) and
-     (fHost.fPeerList[fPeerListIndex]=self) then begin
-   if (fHost.fPeerList.Count>1) and (fPeerListIndex<>(fHost.fPeerList.Count-1)) then begin
-    OtherPeerListIndex:=fHost.fPeerList.Count-1;
-    OtherPeer:=fHost.fPeerList[OtherPeerListIndex];
-    fHost.fPeerList.Exchange(fPeerListIndex,OtherPeerListIndex);
-    OtherPeer.fPeerListIndex:=fPeerListIndex;
-    fPeerListIndex:=OtherPeerListIndex;
-    fHost.fPeerList.Delete(OtherPeerListIndex);
-   end else begin
-    fHost.fPeerList.Delete(fPeerListIndex);
-   end;
-  end else begin
-   fHost.fPeerList.Remove(self);
+
+  if fPeerListIndex<>(fHost.fPeerList.Count-1) then begin
+   fHost.fPeerList[fHost.fPeerList.Count-1].fPeerListIndex:=fPeerListIndex;
+   fHost.fPeerList.Exchange(fHost.fPeerList.Count-1,fPeerListIndex);
   end;
 
   fPeerListIndex:=-1;
+
+  fHost.fPeerList.Delete(fHost.fPeerList.Count-1);
 
 {$else}
   Remove;
