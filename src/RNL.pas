@@ -468,7 +468,7 @@ uses {$if defined(Posix)}
 {    Generics.Defaults,
      Generics.Collections;}
 
-const RNL_VERSION='1.00.2017.10.16.18.02.0000';
+const RNL_VERSION='1.00.2017.10.16.18.26.0000';
 
 type PPRNLInt8=^PRNLInt8;
      PRNLInt8=^TRNLInt8;
@@ -674,10 +674,6 @@ const RNL_PROTOCOL_VERSION_MAJOR=1;
       RNL_PROTOCOL_PACKET_HEADER_SESSION_MASK=$ff;
 
       RNL_PROTOCOL_PACKET_HEADER_FLAG_COMPRESSED=1 shl 0;
-
-{     RNL_PEER_KEEP_ALIVE_WINDOW_BITS=2;
-      fHost.fKeepAliveWindowSize=1 shl RNL_PEER_KEEP_ALIVE_WINDOW_BITS;
-      fHost.fKeepAliveWindowMask=fHost.fKeepAliveWindowSize-1;}
 
       RNL_PEER_PACKET_LOSS_INTERVAL=10000;
 
@@ -2340,8 +2336,6 @@ type PRNLVersion=^TRNLVersion;
      TRNLHostEventType=
       (
        RNL_HOST_EVENT_TYPE_NONE,
-       RNL_HOST_EVENT_TYPE_PEER_CHECK_CONNECTION_TOKEN,
-       RNL_HOST_EVENT_TYPE_PEER_CHECK_AUTHENTICATION_TOKEN,
        RNL_HOST_EVENT_TYPE_PEER_CONNECT,
        RNL_HOST_EVENT_TYPE_PEER_DISCONNECT,
        RNL_HOST_EVENT_TYPE_PEER_APPROVAL,
@@ -2362,10 +2356,6 @@ type PRNLVersion=^TRNLVersion;
        Peer:TRNLPeer;
        Message:TRNLMessage;
        case TRNLHostEventType of
-        RNL_HOST_EVENT_TYPE_PEER_CHECK_CONNECTION_TOKEN,
-        RNL_HOST_EVENT_TYPE_PEER_CHECK_AUTHENTICATION_TOKEN:(
-         ConnectionCandidate:PRNLConnectionCandidate;
-        );
         RNL_HOST_EVENT_TYPE_PEER_CONNECT,
         RNL_HOST_EVENT_TYPE_PEER_DISCONNECT:(
          Data:TRNLUInt64;
