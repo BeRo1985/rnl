@@ -468,7 +468,7 @@ uses {$if defined(Posix)}
 {    Generics.Defaults,
      Generics.Collections;}
 
-const RNL_VERSION='1.00.2017.10.16.14.28.0000';
+const RNL_VERSION='1.00.2017.10.16.14.33.0000';
 
 type PPRNLInt8=^PRNLInt8;
      PRNLInt8=^TRNLInt8;
@@ -2381,8 +2381,6 @@ type PRNLVersion=^TRNLVersion;
      TRNLHostOnCheckConnectionToken=function(const aHost:TRNLHost;const aAddress:TRNLAddress;const aConnectionToken:TRNLConnectionToken):boolean of object;
 
      TRNLHostOnCheckAuthenticationToken=function(const aHost:TRNLHost;const aAddress:TRNLAddress;const aAuthenticationToken:TRNLAuthenticationToken):boolean of object;
-
-     TRNLHostNetworkPacketData=TBytes;
 
      TRNLHostPeerCircularDoublyLinkedListNode=TRNLCircularDoublyLinkedListNode<TRNLPeer>;
 
