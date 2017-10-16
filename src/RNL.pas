@@ -468,7 +468,7 @@ uses {$if defined(Posix)}
 {    Generics.Defaults,
      Generics.Collections;}
 
-const RNL_VERSION='1.00.2017.10.16.15.17.0000';
+const RNL_VERSION='1.00.2017.10.16.17.47.0000';
 
 type PPRNLInt8=^PRNLInt8;
      PRNLInt8=^TRNLInt8;
@@ -1592,6 +1592,12 @@ type PRNLVersion=^TRNLVersion;
        property Size:TRNLSizeUInt read fSize;
      end;
 
+     PRNLConnectionToken=^TRNLConnectionToken;
+     TRNLConnectionToken=array[0..RNL_CONNECTION_TOKEN_SIZE-1] of TRNLUInt8;
+
+     PRNLAuthenticationToken=^TRNLAuthenticationToken;
+     TRNLAuthenticationToken=array[0..RNL_AUTHENTICATION_TOKEN_SIZE-1] of TRNLUInt8;
+
      PRNLConnectionKnownCandidateHostAddress=^TRNLConnectionKnownCandidateHostAddress;
      TRNLConnectionKnownCandidateHostAddress=record
       case boolean of
@@ -1628,25 +1634,37 @@ type PRNLVersion=^TRNLVersion;
        RNL_CONNECTION_STATE_APPROVING
       );
 
+     PRNLConnectionCandidateData=^TRNLConnectionCandidateData;
+     TRNLConnectionCandidateData=record
+      private
+       Host:TRNLHost;
+       Peer:TRNLPeer;
+       LocalShortTermPrivateKey:TRNLKey;
+       LocalShortTermPublicKey:TRNLKey;
+       RemoteShortTermPublicKey:TRNLKey;
+       SharedSecretKey:TRNLKey;
+       OutgoingPeerID:TRNLUInt16;
+       IncomingBandwidthLimit:TRNLUInt32;
+       OutgoingBandwidthLimit:TRNLUInt32;
+       Nonce:TRNLUInt64;
+       CountChallengeRepetitions:TRNLUInt16;
+       Challenge:TRNLConnectionChallenge;
+       SolvedChallenge:TRNLConnectionChallenge;
+       ConnectionToken:TRNLConnectionToken;
+       AuthenticationToken:TRNLAuthenticationToken;
+      public
+     end;
+
      PRNLConnectionCandidate=^TRNLConnectionCandidate;
      TRNLConnectionCandidate=record
-      State:TRNLConnectionCandidateState;
-      RemoteSalt:TRNLUInt64;
-      LocalSalt:TRNLUInt64;
-      CreateTime:TRNLTime;
-      Address:TRNLAddress;
-      LocalShortTermPrivateKey:TRNLKey;
-      LocalShortTermPublicKey:TRNLKey;
-      RemoteShortTermPublicKey:TRNLKey;
-      SharedSecretKey:TRNLKey;
-      OutgoingPeerID:TRNLUInt16;
-      IncomingBandwidthLimit:TRNLUInt32;
-      OutgoingBandwidthLimit:TRNLUInt32;
-      Nonce:TRNLUInt64;
-      CountChallengeRepetitions:TRNLUInt16;
-      Challenge:TRNLConnectionChallenge;
-      SolvedChallenge:TRNLConnectionChallenge;
-      Peer:TRNLPeer;
+      private
+       State:TRNLConnectionCandidateState;
+       RemoteSalt:TRNLUInt64;
+       LocalSalt:TRNLUInt64;
+       CreateTime:TRNLTime;
+       Address:TRNLAddress;
+       Data:PRNLConnectionCandidateData;
+      public
      end;
 
      PRNLConnectionCandidateHashTable=^TRNLConnectionCandidateHashTable;
@@ -1661,14 +1679,9 @@ type PRNLVersion=^TRNLVersion;
        fEntries:TRNLConnectionCandidateHashTableEntries;
       public
        procedure Clear;
+       procedure Free;
        function Find(const aRandomGenerator:TRNLRandomGenerator;const aAddress:TRNLAddress;const aRemoteSalt,aLocalSalt:TRNLUInt64;const aTime,aTimeout:TRNLTime;const aAddIfNotExist:boolean):PRNLConnectionCandidate;
      end;
-
-     PRNLConnectionToken=^TRNLConnectionToken;
-     TRNLConnectionToken=array[0..RNL_CONNECTION_TOKEN_SIZE-1] of TRNLUInt8;
-
-     PRNLAuthenticationToken=^TRNLAuthenticationToken;
-     TRNLAuthenticationToken=array[0..RNL_AUTHENTICATION_TOKEN_SIZE-1] of TRNLUInt8;
 
      PRNLConnectionDenialReason=^TRNLConnectionDenialReason;
      TRNLConnectionDenialReason=
@@ -2329,6 +2342,8 @@ type PRNLVersion=^TRNLVersion;
      TRNLHostEventType=
       (
        RNL_HOST_EVENT_TYPE_NONE,
+       RNL_HOST_EVENT_TYPE_PEER_CHECK_CONNECTION_TOKEN,
+       RNL_HOST_EVENT_TYPE_PEER_CHECK_AUTHENTICATION_TOKEN,
        RNL_HOST_EVENT_TYPE_PEER_CONNECT,
        RNL_HOST_EVENT_TYPE_PEER_DISCONNECT,
        RNL_HOST_EVENT_TYPE_PEER_APPROVAL,
@@ -2349,6 +2364,10 @@ type PRNLVersion=^TRNLVersion;
        Peer:TRNLPeer;
        Message:TRNLMessage;
        case TRNLHostEventType of
+        RNL_HOST_EVENT_TYPE_PEER_CHECK_CONNECTION_TOKEN,
+        RNL_HOST_EVENT_TYPE_PEER_CHECK_AUTHENTICATION_TOKEN:(
+         ConnectionCandidate:PRNLConnectionCandidate;
+        );
         RNL_HOST_EVENT_TYPE_PEER_CONNECT,
         RNL_HOST_EVENT_TYPE_PEER_DISCONNECT:(
          Data:TRNLUInt64;
@@ -10218,6 +10237,30 @@ end;
 procedure TRNLConnectionCandidateHashTable.Clear;
 begin
  FillChar(self,SizeOf(TRNLConnectionCandidateHashTable),#0);
+ Initialize(self);
+end;
+
+procedure TRNLConnectionCandidateHashTable.Free;
+var Index:TRNLUInt32;
+    Item:PRNLConnectionCandidate;
+begin
+
+ for Index:=Low(TRNLConnectionCandidateHashTableEntries) to High(TRNLConnectionCandidateHashTableEntries) do begin
+
+  Item:=@fEntries[Index];
+
+  if assigned(Item^.Data) then begin
+   Finalize(Item^.Data^);
+   FreeMem(Item^.Data);
+   Item^.Data:=nil;
+  end;
+
+ end;
+
+ Finalize(self);
+
+ FillChar(self,SizeOf(TRNLConnectionCandidateHashTable),#0);
+
 end;
 
 function TRNLConnectionCandidateHashTable.Find(const aRandomGenerator:TRNLRandomGenerator;const aAddress:TRNLAddress;const aRemoteSalt,aLocalSalt:TRNLUInt64;const aTime,aTimeout:TRNLTime;const aAddIfNotExist:boolean):PRNLConnectionCandidate;
@@ -10250,7 +10293,12 @@ begin
   Item^.LocalSalt:=aLocalSalt;
   Item^.CreateTime:=aTime;
   Item^.Address:=aAddress;
-  Item^.Peer:=nil;
+  if assigned(Item^.Data) then begin
+   Finalize(Item^.Data^);
+   FillChar(Item^.Data^,SizeOf(TRNLConnectionCandidateData),#0);
+   FreeMem(Item^.Data);
+   Item^.Data:=nil;
+  end;
   result:=Item;
  end;
 end;
@@ -18240,6 +18288,7 @@ begin
  if fAllowIncomingConnections then begin
 
   if assigned(fConnectionCandidateHashTable) then begin
+   fConnectionCandidateHashTable^.Free;
    FreeMem(fConnectionCandidateHashTable);
    fConnectionCandidateHashTable:=nil;
   end;
@@ -18451,28 +18500,38 @@ begin
    exit;
   end;
 
-  ConnectionCandidate^.OutgoingPeerID:=TRNLEndianness.LittleEndianToHost16(aIncomingPacket^.PeerID);
+  if assigned(ConnectionCandidate^.Data) then begin
+   Finalize(ConnectionCandidate^.Data^);
+   FillChar(ConnectionCandidate^.Data^,SizeOf(TRNLConnectionCandidateData),#0);
+   Initialize(ConnectionCandidate^.Data^);
+  end else begin
+   GetMem(ConnectionCandidate^.Data,SizeOf(TRNLConnectionCandidateData));
+   FillChar(ConnectionCandidate^.Data^,SizeOf(TRNLConnectionCandidateData),#0);
+   Initialize(ConnectionCandidate^.Data^);
+  end;
 
-  ConnectionCandidate^.IncomingBandwidthLimit:=TRNLEndianness.LittleEndianToHost32(aIncomingPacket^.IncomingBandwidthLimit);
-  ConnectionCandidate^.OutgoingBandwidthLimit:=TRNLEndianness.LittleEndianToHost32(aIncomingPacket^.OutgoingBandwidthLimit);
+  ConnectionCandidate^.Data^.OutgoingPeerID:=TRNLEndianness.LittleEndianToHost16(aIncomingPacket^.PeerID);
 
-  ConnectionCandidate^.CountChallengeRepetitions:=Max(1,fConnectionChallengeDifficultyLevel);
+  ConnectionCandidate^.Data^.IncomingBandwidthLimit:=TRNLEndianness.LittleEndianToHost32(aIncomingPacket^.IncomingBandwidthLimit);
+  ConnectionCandidate^.Data^.OutgoingBandwidthLimit:=TRNLEndianness.LittleEndianToHost32(aIncomingPacket^.OutgoingBandwidthLimit);
+
+  ConnectionCandidate^.Data^.CountChallengeRepetitions:=Max(1,fConnectionChallengeDifficultyLevel);
 
   for Index:=0 to (SizeOf(TRNLConnectionChallenge) shr 3)-1 do begin
-   PRNLUInt64Array(TRNLPointer(@ConnectionCandidate^.Challenge))^[Index]:=fRandomGenerator.GetUInt64;
+   PRNLUInt64Array(TRNLPointer(@ConnectionCandidate^.Data^.Challenge))^[Index]:=fRandomGenerator.GetUInt64;
   end;
 
   OutgoingPacket.Header.Signature:=RNLProtocolHandshakePacketHeaderSignature;
   OutgoingPacket.Header.ProtocolVersion:=TRNLEndianness.HostToLittleEndian64(RNL_PROTOCOL_VERSION);
   OutgoingPacket.Header.ProtocolID:=TRNLEndianness.HostToLittleEndian64(fProtocolID);
   OutgoingPacket.Header.PacketType:=TRNLUInt32(TRNLProtocolHandshakePacketType(RNL_PROTOCOL_HANDSHAKE_PACKET_TYPE_CONNECTION_CHALLENGE_REQUEST));
-  OutgoingPacket.PeerID:=TRNLEndianness.HostToLittleEndian16(ConnectionCandidate^.OutgoingPeerID);
+  OutgoingPacket.PeerID:=TRNLEndianness.HostToLittleEndian16(ConnectionCandidate^.Data^.OutgoingPeerID);
   OutgoingPacket.OutgoingSalt:=TRNLEndianness.HostToLittleEndian64(ConnectionCandidate^.RemoteSalt);
   OutgoingPacket.IncomingSalt:=TRNLEndianness.HostToLittleEndian64(ConnectionCandidate^.LocalSalt);
   OutgoingPacket.IncomingBandwidthLimit:=TRNLEndianness.HostToLittleEndian32(fIncomingBandwidthLimit);
   OutgoingPacket.OutgoingBandwidthLimit:=TRNLEndianness.HostToLittleEndian32(fOutgoingBandwidthLimit);
-  OutgoingPacket.CountChallengeRepetitions:=TRNLEndianness.HostToLittleEndian16(ConnectionCandidate^.CountChallengeRepetitions);
-  OutgoingPacket.Challenge:=ConnectionCandidate^.Challenge;
+  OutgoingPacket.CountChallengeRepetitions:=TRNLEndianness.HostToLittleEndian16(ConnectionCandidate^.Data^.CountChallengeRepetitions);
+  OutgoingPacket.Challenge:=ConnectionCandidate^.Data^.Challenge;
 
   AddHandshakePacketChecksum(OutgoingPacket);
 
@@ -18602,23 +18661,27 @@ begin
    exit;
   end;
 
+  if not assigned(ConnectionCandidate^.Data) then begin
+   exit;
+  end;
+
   ConnectionSalt:=ConnectionCandidate^.LocalSalt xor ConnectionCandidate^.RemoteSalt;
   if ConnectionSalt<>TRNLEndianness.LittleEndianToHost64(aIncomingPacket^.ConnectionSalt) then begin
    exit;
   end;
 
-  ConnectionCandidate^.SolvedChallenge:=ConnectionCandidate^.Challenge;
+  ConnectionCandidate^.Data^.SolvedChallenge:=ConnectionCandidate^.Data^.Challenge;
 
-  for Index:=1 to ConnectionCandidate^.CountChallengeRepetitions do begin
-   TRNLSHA512.Process(ConnectionCandidate^.SolvedChallenge,
-                      ConnectionCandidate^.SolvedChallenge,
+  for Index:=1 to ConnectionCandidate^.Data^.CountChallengeRepetitions do begin
+   TRNLSHA512.Process(ConnectionCandidate^.Data^.SolvedChallenge,
+                      ConnectionCandidate^.Data^.SolvedChallenge,
                       SizeOf(TRNLConnectionChallenge));
   end;
 
   ChallengeResult:=0;
   for Index:=0 to (SizeOf(TRNLConnectionChallenge) shr 3)-1 do begin
    ChallengeResult:=ChallengeResult or
-                    (PRNLUInt64Array(TRNLPointer(@ConnectionCandidate^.SolvedChallenge))^[Index] xor
+                    (PRNLUInt64Array(TRNLPointer(@ConnectionCandidate^.Data^.SolvedChallenge))^[Index] xor
                      PRNLUInt64Array(TRNLPointer(@aIncomingPacket^.ChallengeResponse))^[Index]);
   end;
 
@@ -18627,24 +18690,24 @@ begin
   end;
 
   TRNLX25519.GeneratePublicPrivateKeyPair(fRandomGenerator,
-                                          ConnectionCandidate^.LocalShortTermPublicKey,
-                                          ConnectionCandidate^.LocalShortTermPrivateKey);
+                                          ConnectionCandidate^.Data^.LocalShortTermPublicKey,
+                                          ConnectionCandidate^.Data^.LocalShortTermPrivateKey);
 
-  ConnectionCandidate^.RemoteShortTermPublicKey:=aIncomingPacket^.ShortTermPublicKey;
+  ConnectionCandidate^.Data^.RemoteShortTermPublicKey:=aIncomingPacket^.ShortTermPublicKey;
 
-  TRNLX25519.GenerateSharedSecretKey(ConnectionCandidate^.SharedSecretKey,
-                                     ConnectionCandidate^.RemoteShortTermPublicKey,
-                                     ConnectionCandidate^.LocalShortTermPrivateKey);
+  TRNLX25519.GenerateSharedSecretKey(ConnectionCandidate^.Data^.SharedSecretKey,
+                                     ConnectionCandidate^.Data^.RemoteShortTermPublicKey,
+                                     ConnectionCandidate^.Data^.LocalShortTermPrivateKey);
  {$if defined(RNL_DEBUG) and defined(RNL_DEBUG_SECURITY_EXTENDED)}
   fInstance.fDebugLock.Acquire;
   try
-   writeln('HandleConnectionRequest SharedSecretKey: ',ConnectionCandidate^.SharedSecretKey.ui32[0],' ',ConnectionCandidate^.SharedSecretKey.ui32[1],' ',ConnectionCandidate^.SharedSecretKey.ui32[2],' ',ConnectionCandidate^.SharedSecretKey.ui32[3]);
+   writeln('HandleConnectionRequest SharedSecretKey: ',ConnectionCandidate^.Data^.SharedSecretKey.ui32[0],' ',ConnectionCandidate^.Data^.SharedSecretKey.ui32[1],' ',ConnectionCandidate^.Data^.SharedSecretKey.ui32[2],' ',ConnectionCandidate^.Data^.SharedSecretKey.ui32[3]);
   finally
    fInstance.fDebugLock.Release;
   end;
  {$ifend}
 
-  ConnectionCandidate^.Nonce:=fRandomGenerator.GetUInt64;
+  ConnectionCandidate^.Data^.Nonce:=fRandomGenerator.GetUInt64;
 
   OutgoingPacket.Header.Signature:=RNLProtocolHandshakePacketHeaderSignature;
   OutgoingPacket.Header.ProtocolVersion:=TRNLEndianness.HostToLittleEndian64(RNL_PROTOCOL_VERSION);
@@ -18652,17 +18715,17 @@ begin
 
   OutgoingPacket.Header.PacketType:=TRNLUInt32(TRNLProtocolHandshakePacketType(RNL_PROTOCOL_HANDSHAKE_PACKET_TYPE_CONNECTION_AUTHENTICATION_REQUEST));
 
-  OutgoingPacket.ConnectionAuthenticationRequest.PeerID:=TRNLEndianness.HostToLittleEndian16(ConnectionCandidate^.OutgoingPeerID);
+  OutgoingPacket.ConnectionAuthenticationRequest.PeerID:=TRNLEndianness.HostToLittleEndian16(ConnectionCandidate^.Data^.OutgoingPeerID);
   OutgoingPacket.ConnectionAuthenticationRequest.ConnectionSalt:=TRNLEndianness.HostToLittleEndian64(ConnectionSalt);
-  OutgoingPacket.ConnectionAuthenticationRequest.ShortTermPublicKey:=ConnectionCandidate^.LocalShortTermPublicKey;
-  OutgoingPacket.ConnectionAuthenticationRequest.Nonce:=TRNLEndianness.HostToLittleEndian64(ConnectionCandidate^.Nonce);
+  OutgoingPacket.ConnectionAuthenticationRequest.ShortTermPublicKey:=ConnectionCandidate^.Data^.LocalShortTermPublicKey;
+  OutgoingPacket.ConnectionAuthenticationRequest.Nonce:=TRNLEndianness.HostToLittleEndian64(ConnectionCandidate^.Data^.Nonce);
 
   OutgoingPacket.ConnectionAuthenticationRequest.Payload.LongTermPublicKey:=fLongTermPublicKey;
 
   OutgoingPacket.ConnectionAuthenticationRequest.Payload.MTU:=TRNLEndianness.HostToLittleEndian16(fMTU);
 
-  TwoKeys[0]:=ConnectionCandidate^.LocalShortTermPublicKey;
-  TwoKeys[1]:=ConnectionCandidate^.RemoteShortTermPublicKey;
+  TwoKeys[0]:=ConnectionCandidate^.Data^.LocalShortTermPublicKey;
+  TwoKeys[1]:=ConnectionCandidate^.Data^.RemoteShortTermPublicKey;
 
   TRNLED25519.Sign(OutgoingPacket.ConnectionAuthenticationRequest.Payload.Signature,
                    fLongTermPrivateKey,
@@ -18670,15 +18733,15 @@ begin
                    TwoKeys,
                    SizeOf(TRNLTwoKeys));
 
-  PRNLUInt64Array(TRNLPointer(@Nonce))^[0]:=TRNLEndianness.HostToLittleEndian64(ConnectionCandidate^.Nonce);
+  PRNLUInt64Array(TRNLPointer(@Nonce))^[0]:=TRNLEndianness.HostToLittleEndian64(ConnectionCandidate^.Data^.Nonce);
   PRNLUInt64Array(TRNLPointer(@Nonce))^[1]:=TRNLEndianness.HostToLittleEndian64(ConnectionCandidate^.RemoteSalt);
   PRNLUInt64Array(TRNLPointer(@Nonce))^[2]:=TRNLEndianness.HostToLittleEndian64(ConnectionCandidate^.LocalSalt);
 
   if not TRNLAuthenticatedEncryption.Encrypt(OutgoingPacket.ConnectionAuthenticationRequest.Payload,
-                                             ConnectionCandidate^.SharedSecretKey,
+                                             ConnectionCandidate^.Data^.SharedSecretKey,
                                              Nonce,
                                              OutgoingPacket.ConnectionAuthenticationRequest.PayloadMAC,
-                                             ConnectionCandidate^.SolvedChallenge,
+                                             ConnectionCandidate^.Data^.SolvedChallenge,
                                              SizeOf(TRNLConnectionChallenge),
                                              OutgoingPacket.ConnectionAuthenticationRequest.Payload,
                                              SizeOf(TTRNLProtocolHandshakePacketConnectionAuthenticationRequestPayload)) then begin
@@ -18879,6 +18942,10 @@ begin
    exit;
   end;
 
+  if not assigned(ConnectionCandidate^.Data) then begin
+   exit;
+  end;
+
   ConnectionSalt:=ConnectionCandidate^.LocalSalt xor ConnectionCandidate^.RemoteSalt;
   if ConnectionSalt<>TRNLEndianness.LittleEndianToHost64(aIncomingPacket^.ConnectionSalt) then begin
    exit;
@@ -18886,15 +18953,15 @@ begin
 
   Authorized:=true;
 
-  PRNLUInt64Array(TRNLPointer(@Nonce))^[0]:=TRNLEndianness.HostToLittleEndian64(ConnectionCandidate^.Nonce);
+  PRNLUInt64Array(TRNLPointer(@Nonce))^[0]:=TRNLEndianness.HostToLittleEndian64(ConnectionCandidate^.Data^.Nonce);
   PRNLUInt64Array(TRNLPointer(@Nonce))^[1]:=aIncomingPacket^.Nonce;
   PRNLUInt64Array(TRNLPointer(@Nonce))^[2]:=TRNLEndianness.HostToLittleEndian64(ConnectionSalt);
 
   if not TRNLAuthenticatedEncryption.Decrypt(aIncomingPacket^.Payload,
-                                             ConnectionCandidate^.SharedSecretKey,
+                                             ConnectionCandidate^.Data^.SharedSecretKey,
                                              Nonce,
                                              aIncomingPacket^.PayloadMAC,
-                                             ConnectionCandidate^.SolvedChallenge,
+                                             ConnectionCandidate^.Data^.SolvedChallenge,
                                              SizeOf(TRNLConnectionChallenge),
                                              aIncomingPacket^.Payload,
                                              SizeOf(TRNLProtocolHandshakePacketConnectionAuthenticationResponsePayload)) then begin
@@ -18903,8 +18970,8 @@ begin
 
   if Authorized then begin
 
-   TwoKeys[0]:=ConnectionCandidate^.RemoteShortTermPublicKey;
-   TwoKeys[1]:=ConnectionCandidate^.LocalShortTermPublicKey;
+   TwoKeys[0]:=ConnectionCandidate^.Data^.RemoteShortTermPublicKey;
+   TwoKeys[1]:=ConnectionCandidate^.Data^.LocalShortTermPublicKey;
 
    if not TRNLED25519.Verify(aIncomingPacket^.Payload.Signature,
                              aIncomingPacket^.Payload.LongTermPublicKey,
@@ -18930,15 +18997,15 @@ begin
      ((RemoteCountChannels>0) and (RemoteCountChannels<=fMaximumCountChannels)) and
      TRNLMemory.SecureIsEqual(RemoteChannelTypes,fChannelTypes,SizeOf(TRNLPeerChannelType)*RemoteCountChannels) then begin
 
-   if assigned(ConnectionCandidate^.Peer) then begin
+   if assigned(ConnectionCandidate^.Data^.Peer) then begin
 
-    Peer:=ConnectionCandidate^.Peer;
+    Peer:=ConnectionCandidate^.Data^.Peer;
 
    end else begin
 
     Peer:=TRNLPeer.Create(self);
 
-    ConnectionCandidate^.Peer:=Peer;
+    ConnectionCandidate^.Data^.Peer:=Peer;
 
     Peer.fAddress:=fReceivedAddress;
 
@@ -18946,7 +19013,7 @@ begin
 
     Peer.fMTU:=Min(Max(Min(fMTU,Peer.fRemoteMTU),RNL_MINIMUM_MTU),RNL_MAXIMUM_MTU);
 
-    Peer.fRemotePeerID:=ConnectionCandidate^.OutgoingPeerID;
+    Peer.fRemotePeerID:=ConnectionCandidate^.Data^.OutgoingPeerID;
 
     Peer.fRemoteSalt:=ConnectionCandidate^.RemoteSalt;
 
@@ -18956,19 +19023,19 @@ begin
 
     Peer.fConnectionSalt:=ConnectionSalt;
 
-    Peer.fConnectionNonce:=PRNLUInt64(TRNLPointer(@ConnectionCandidate^.SolvedChallenge))^;
+    Peer.fConnectionNonce:=PRNLUInt64(TRNLPointer(@ConnectionCandidate^.Data^.SolvedChallenge))^;
 
     Peer.fChecksumPlaceHolder:=Peer.fConnectionSalt xor (Peer.fConnectionSalt shl 32);
 
-    Peer.fSharedSecretKey:=ConnectionCandidate^.SharedSecretKey;
+    Peer.fSharedSecretKey:=ConnectionCandidate^.Data^.SharedSecretKey;
 
    end;
 
    Peer.fConnectionData:=TRNLEndianness.LittleEndianToHost64(aIncomingPacket^.Payload.Data);
 
-   Peer.fRemoteIncomingBandwidthLimit:=ConnectionCandidate^.IncomingBandwidthLimit;
+   Peer.fRemoteIncomingBandwidthLimit:=ConnectionCandidate^.Data^.IncomingBandwidthLimit;
 
-   Peer.fRemoteOutgoingBandwidthLimit:=ConnectionCandidate^.OutgoingBandwidthLimit;
+   Peer.fRemoteOutgoingBandwidthLimit:=ConnectionCandidate^.Data^.OutgoingBandwidthLimit;
 
    Peer.fLastReceivedDataTime:=fTime;
 
@@ -18980,21 +19047,21 @@ begin
    Peer.fPendingConnectionHandshakeSendData.fHandshakePacket.Header.ProtocolID:=TRNLEndianness.HostToLittleEndian64(fProtocolID);
    Peer.fPendingConnectionHandshakeSendData.fHandshakePacket.Header.PacketType:=TRNLInt32(TRNLProtocolHandshakePacketType(RNL_PROTOCOL_HANDSHAKE_PACKET_TYPE_CONNECTION_APPROVAL_RESPONSE));
 
-   Peer.fPendingConnectionHandshakeSendData.fHandshakePacket.ConnectionApprovalResponse.PeerID:=TRNLEndianness.HostToLittleEndian16(ConnectionCandidate^.OutgoingPeerID);
+   Peer.fPendingConnectionHandshakeSendData.fHandshakePacket.ConnectionApprovalResponse.PeerID:=TRNLEndianness.HostToLittleEndian16(ConnectionCandidate^.Data^.OutgoingPeerID);
    Peer.fPendingConnectionHandshakeSendData.fHandshakePacket.ConnectionApprovalResponse.ConnectionSalt:=TRNLEndianness.HostToLittleEndian64(ConnectionSalt);
-   Peer.fPendingConnectionHandshakeSendData.fHandshakePacket.ConnectionApprovalResponse.Nonce:=TRNLEndianness.HostToLittleEndian64(ConnectionCandidate^.Nonce);
+   Peer.fPendingConnectionHandshakeSendData.fHandshakePacket.ConnectionApprovalResponse.Nonce:=TRNLEndianness.HostToLittleEndian64(ConnectionCandidate^.Data^.Nonce);
 
    Peer.fPendingConnectionHandshakeSendData.fHandshakePacket.ConnectionApprovalResponse.Payload.PeerID:=TRNLEndianness.HostToLittleEndian16(Peer.fLocalPeerID);
 
-   PRNLUInt64Array(TRNLPointer(@Nonce))^[0]:=TRNLEndianness.HostToLittleEndian64(ConnectionCandidate^.Nonce);
+   PRNLUInt64Array(TRNLPointer(@Nonce))^[0]:=TRNLEndianness.HostToLittleEndian64(ConnectionCandidate^.Data^.Nonce);
    PRNLUInt64Array(TRNLPointer(@Nonce))^[1]:=TRNLEndianness.HostToLittleEndian64(ConnectionCandidate^.RemoteSalt);
    PRNLUInt64Array(TRNLPointer(@Nonce))^[2]:=TRNLEndianness.HostToLittleEndian64(ConnectionCandidate^.LocalSalt);
 
    if not TRNLAuthenticatedEncryption.Encrypt(Peer.fPendingConnectionHandshakeSendData.fHandshakePacket.ConnectionApprovalResponse.Payload,
-                                              ConnectionCandidate^.SharedSecretKey,
+                                              ConnectionCandidate^.Data^.SharedSecretKey,
                                               Nonce,
                                               Peer.fPendingConnectionHandshakeSendData.fHandshakePacket.ConnectionApprovalResponse.PayloadMAC,
-                                              ConnectionCandidate^.SolvedChallenge,
+                                              ConnectionCandidate^.Data^.SolvedChallenge,
                                               SizeOf(TRNLConnectionChallenge),
                                               Peer.fPendingConnectionHandshakeSendData.fHandshakePacket.ConnectionApprovalResponse.Payload,
                                               SizeOf(TRNLProtocolHandshakePacketConnectionApprovalResponsePayload)) then begin
@@ -19015,9 +19082,9 @@ begin
 
    OutgoingPacket.Header.PacketType:=TRNLUInt32(TRNLProtocolHandshakePacketType(RNL_PROTOCOL_HANDSHAKE_PACKET_TYPE_CONNECTION_DENIAL_RESPONSE));
 
-   OutgoingPacket.ConnectionDenialResponse.PeerID:=TRNLEndianness.HostToLittleEndian16(ConnectionCandidate^.OutgoingPeerID);
+   OutgoingPacket.ConnectionDenialResponse.PeerID:=TRNLEndianness.HostToLittleEndian16(ConnectionCandidate^.Data^.OutgoingPeerID);
    OutgoingPacket.ConnectionDenialResponse.ConnectionSalt:=TRNLEndianness.HostToLittleEndian64(ConnectionSalt);
-   OutgoingPacket.ConnectionDenialResponse.Nonce:=TRNLEndianness.HostToLittleEndian64(ConnectionCandidate^.Nonce);
+   OutgoingPacket.ConnectionDenialResponse.Nonce:=TRNLEndianness.HostToLittleEndian64(ConnectionCandidate^.Data^.Nonce);
 
    if not Authorized then begin
     OutgoingPacket.ConnectionDenialResponse.Payload.Reason:=TRNLInt32(TRNLConnectionDenialReason(RNL_CONNECTION_DENIAL_REASON_UNAUTHORIZED));
@@ -19033,15 +19100,15 @@ begin
     OutgoingPacket.ConnectionDenialResponse.Payload.Reason:=TRNLInt32(TRNLConnectionDenialReason(RNL_CONNECTION_DENIAL_REASON_UNKNOWN));
    end;
 
-   PRNLUInt64Array(TRNLPointer(@Nonce))^[0]:=TRNLEndianness.HostToLittleEndian64(ConnectionCandidate^.Nonce);
+   PRNLUInt64Array(TRNLPointer(@Nonce))^[0]:=TRNLEndianness.HostToLittleEndian64(ConnectionCandidate^.Data^.Nonce);
    PRNLUInt64Array(TRNLPointer(@Nonce))^[1]:=TRNLEndianness.HostToLittleEndian64(ConnectionCandidate^.RemoteSalt);
    PRNLUInt64Array(TRNLPointer(@Nonce))^[2]:=TRNLEndianness.HostToLittleEndian64(ConnectionCandidate^.LocalSalt);
 
    if not TRNLAuthenticatedEncryption.Encrypt(OutgoingPacket.ConnectionDenialResponse.Payload,
-                                              ConnectionCandidate^.SharedSecretKey,
+                                              ConnectionCandidate^.Data^.SharedSecretKey,
                                               Nonce,
                                               OutgoingPacket.ConnectionDenialResponse.PayloadMAC,
-                                              ConnectionCandidate^.SolvedChallenge,
+                                              ConnectionCandidate^.Data^.SolvedChallenge,
                                               SizeOf(TRNLConnectionChallenge),
                                               OutgoingPacket.ConnectionDenialResponse.Payload,
                                               SizeOf(TRNLProtocolHandshakePacketConnectionDenialResponsePayload)) then begin
@@ -19055,6 +19122,13 @@ begin
               SizeOf(TRNLProtocolHandshakePacketConnectionDenialResponse));
 
    ConnectionCandidate^.State:=RNL_CONNECTION_STATE_INVALID;
+
+   if assigned(ConnectionCandidate^.Data) then begin
+    Finalize(ConnectionCandidate^.Data^);
+    FillChar(ConnectionCandidate^.Data^,SizeOf(TRNLConnectionCandidateData),#0);
+    FreeMem(ConnectionCandidate^.Data);
+    ConnectionCandidate^.Data:=nil;
+   end;
 
   end;
 
@@ -19272,6 +19346,13 @@ begin
                                                            fPendingConnectionTimeout,
                                                            false);
   if assigned(ConnectionCandidate) then begin
+
+   if assigned(ConnectionCandidate^.Data) then begin
+    Finalize(ConnectionCandidate^.Data^);
+    FillChar(ConnectionCandidate^.Data^,SizeOf(TRNLConnectionCandidateData),#0);
+    FreeMem(ConnectionCandidate^.Data);
+    ConnectionCandidate^.Data:=nil;
+   end;
 
    ConnectionCandidate^.State:=RNL_CONNECTION_STATE_INVALID;
 
