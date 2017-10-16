@@ -468,7 +468,7 @@ uses {$if defined(Posix)}
 {    Generics.Defaults,
      Generics.Collections;}
 
-const RNL_VERSION='1.00.2017.10.16.19.01.0000';
+const RNL_VERSION='1.00.2017.10.16.19.02.0000';
 
 type PPRNLInt8=^PRNLInt8;
      PRNLInt8=^TRNLInt8;
@@ -18548,10 +18548,8 @@ begin
 end;
 
 procedure TRNLHost.DispatchReceivedHandshakePacketConnectionRequest(const aIncomingPacket:PRNLProtocolHandshakePacketConnectionRequest);
-var Index:TRNLInt32;
-    ConnectionKnownCandidateHostAddress:PRNLConnectionKnownCandidateHostAddress;
+var ConnectionKnownCandidateHostAddress:PRNLConnectionKnownCandidateHostAddress;
     ConnectionCandidate:PRNLConnectionCandidate;
-    OutgoingPacket:TRNLProtocolHandshakePacketConnectionChallengeRequest;
     HostEvent:TRNLHostEvent;
 begin
 
