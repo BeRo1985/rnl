@@ -204,7 +204,7 @@ begin
     while (not Terminated) and (Server.Service(Event,1000)<>RNL_HOST_SERVICE_STATUS_ERROR) do begin
      try
       case Event.Type_ of
-       RNL_HOST_EVENT_TYPE_CONNECT:begin
+       RNL_HOST_EVENT_TYPE_PEER_CONNECT:begin
         ConsoleOutput(Format('Server: A new client connected, local peer ID %d, remote peer ID %d, channels count %d',
                              [Event.Peer.LocalPeerID,
                               Event.Peer.RemotePeerID,
@@ -215,16 +215,16 @@ begin
         Event.Peer.Channels[0].SendMessageString('Hello another world in an world! Yet another hello world with an yet another hello world!');
   //    Server.Flush;
        end;
-       RNL_HOST_EVENT_TYPE_DISCONNECT:begin
+       RNL_HOST_EVENT_TYPE_PEER_DISCONNECT:begin
         ConsoleOutput(Format('Server: A client disconnected, local peer ID %d, remote peer ID %d, channels count %d',
                              [Event.Peer.LocalPeerID,
                               Event.Peer.RemotePeerID,
                               Event.Peer.CountChannels]));
        end;
-       RNL_HOST_EVENT_TYPE_MTU:begin
+       RNL_HOST_EVENT_TYPE_PEER_MTU:begin
         ConsoleOutput('Server: A client '+IntToStr(TRNLPtrUInt(Event.Peer))+' has new MTU '+IntToStr(TRNLPtrUInt(Event.MTU)));
        end;
-       RNL_HOST_EVENT_TYPE_RECEIVE:begin
+       RNL_HOST_EVENT_TYPE_PEER_RECEIVE:begin
         ConsoleOutput('Server: A message received');
        end;
       end;
@@ -283,7 +283,7 @@ begin
      try
       if Client.Service(Event,5000)=RNL_HOST_SERVICE_STATUS_EVENT then begin
        case Event.Type_ of
-        RNL_HOST_EVENT_TYPE_APPROVAL:begin
+        RNL_HOST_EVENT_TYPE_PEER_APPROVAL:begin
          if Event.Peer=Peer then begin
           ConsoleOutput(Format('Client: Connected, local peer ID %d, remote peer ID %d, channels count %d',
                                [Event.Peer.LocalPeerID,
@@ -295,7 +295,7 @@ begin
             case Event.Type_ of
              RNL_HOST_EVENT_TYPE_NONE:begin
              end;
-             RNL_HOST_EVENT_TYPE_CONNECT:begin
+             RNL_HOST_EVENT_TYPE_PEER_CONNECT:begin
               if Event.Peer=Peer then begin
                ConsoleOutput(Format('Client: Connected, local peer ID %d, remote peer ID %d, channels count %d',
                                     [Event.Peer.LocalPeerID,
@@ -303,7 +303,7 @@ begin
                                      Event.Peer.CountChannels]));
               end;
              end;
-             RNL_HOST_EVENT_TYPE_DISCONNECT:begin
+             RNL_HOST_EVENT_TYPE_PEER_DISCONNECT:begin
               ConsoleOutput(Format('Client: Disconnected, local peer ID %d, remote peer ID %d, channels count %d',
                                    [Event.Peer.LocalPeerID,
                                     Event.Peer.RemotePeerID,
@@ -313,17 +313,17 @@ begin
                break;
               end;
              end;
-             RNL_HOST_EVENT_TYPE_DENIAL:begin
+             RNL_HOST_EVENT_TYPE_PEER_DENIAL:begin
               if Event.Peer=Peer then begin
                ConsoleOutput('Client: Denied');
                Disconnected:=true;
                break;
               end;
              end;
-             RNL_HOST_EVENT_TYPE_MTU:begin
+             RNL_HOST_EVENT_TYPE_PEER_MTU:begin
               ConsoleOutput('Client: New MTU '+IntToStr(TRNLPtrUInt(Event.MTU)));
              end;
-             RNL_HOST_EVENT_TYPE_RECEIVE:begin
+             RNL_HOST_EVENT_TYPE_PEER_RECEIVE:begin
               ConsoleOutput('Client: A message received on channel '+IntToStr(Event.Channel)+': "'+String(Event.Message.AsString)+'"');
              end;
             end;
@@ -337,9 +337,9 @@ begin
            while Client.Service(Event,3000)<>RNL_HOST_SERVICE_STATUS_ERROR do begin
             try
              case Event.type_ of
-              RNL_HOST_EVENT_TYPE_RECEIVE:begin
+              RNL_HOST_EVENT_TYPE_PEER_RECEIVE:begin
               end;
-              RNL_HOST_EVENT_TYPE_DISCONNECT:begin
+              RNL_HOST_EVENT_TYPE_PEER_DISCONNECT:begin
                ConsoleOutput(Format('Client: Disconnected, local peer ID %d, remote peer ID %d, channels count %d',
                                     [Event.Peer.LocalPeerID,
                                      Event.Peer.RemotePeerID,
@@ -358,7 +358,7 @@ begin
           ConsoleOutput('Connection failed');
          end;
         end;
-        RNL_HOST_EVENT_TYPE_DENIAL:begin
+        RNL_HOST_EVENT_TYPE_PEER_DENIAL:begin
          ConsoleOutput('Connection denied');
         end;
         else begin
