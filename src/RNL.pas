@@ -468,7 +468,7 @@ uses {$if defined(Posix)}
 {    Generics.Defaults,
      Generics.Collections;}
 
-const RNL_VERSION='1.00.2017.10.16.22.55.0000';
+const RNL_VERSION='1.00.2017.10.16.23.01.0000';
 
 type PPRNLInt8=^PRNLInt8;
      PRNLInt8=^TRNLInt8;
@@ -767,7 +767,7 @@ type PRNLVersion=^TRNLVersion;
      TRNLMemory=record
       public
        class function SecureIsEqual(const aLocationA,aLocationB;const aSize:TRNLSizeUInt):boolean; static; inline;
-       class function SecureIsNonEqual(const aLocationA,aLocationB;const aSize:TRNLSizeUInt):boolean; static; inline;
+       class function SecureIsNotEqual(const aLocationA,aLocationB;const aSize:TRNLSizeUInt):boolean; static; inline;
        class function SecureIsZero(const aLocation;const aSize:TRNLSizeUInt):boolean; static; inline;
        class function SecureIsNonZero(const aLocation;const aSize:TRNLSizeUInt):boolean; static; inline;
      end;
@@ -1589,10 +1589,22 @@ type PRNLVersion=^TRNLVersion;
      end;
 
      PRNLConnectionToken=^TRNLConnectionToken;
-     TRNLConnectionToken=array[0..RNL_CONNECTION_TOKEN_SIZE-1] of TRNLUInt8;
+     TRNLConnectionToken=packed record
+      public
+       class operator Equal(const a,b:TRNLConnectionToken):boolean; inline;
+       class operator NotEqual(const a,b:TRNLConnectionToken):boolean; inline;
+      public
+       Data:array[0..RNL_CONNECTION_TOKEN_SIZE-1] of TRNLUInt8;
+     end;
 
      PRNLAuthenticationToken=^TRNLAuthenticationToken;
-     TRNLAuthenticationToken=array[0..RNL_AUTHENTICATION_TOKEN_SIZE-1] of TRNLUInt8;
+     TRNLAuthenticationToken=packed record
+      public
+       class operator Equal(const a,b:TRNLAuthenticationToken):boolean; inline;
+       class operator NotEqual(const a,b:TRNLAuthenticationToken):boolean; inline;
+      public
+       Data:array[0..RNL_AUTHENTICATION_TOKEN_SIZE-1] of TRNLUInt8;
+     end;
 
      PRNLConnectionKnownCandidateHostAddress=^TRNLConnectionKnownCandidateHostAddress;
      TRNLConnectionKnownCandidateHostAddress=record
@@ -5121,7 +5133,7 @@ begin
  result:=Temporary=0;
 end;
 
-class function TRNLMemory.SecureIsNonEqual(const aLocationA,aLocationB;const aSize:TRNLSizeUInt):boolean;
+class function TRNLMemory.SecureIsNotEqual(const aLocationA,aLocationB;const aSize:TRNLSizeUInt):boolean;
 var Index,Position:TRNLSizeUInt;
     Temporary:TRNLUInt32;
 begin
@@ -10226,6 +10238,26 @@ begin
   Move(aData,fData[fSize],result);
   inc(fSize,result);
  end;
+end;
+
+class operator TRNLConnectionToken.Equal(const a,b:TRNLConnectionToken):boolean;
+begin
+ result:=TRNLMemory.SecureIsEqual(a,b,SizeOf(TRNLConnectionToken));
+end;
+
+class operator TRNLConnectionToken.NotEqual(const a,b:TRNLConnectionToken):boolean;
+begin
+ result:=TRNLMemory.SecureIsNotEqual(a,b,SizeOf(TRNLConnectionToken));
+end;
+
+class operator TRNLAuthenticationToken.Equal(const a,b:TRNLAuthenticationToken):boolean;
+begin
+ result:=TRNLMemory.SecureIsEqual(a,b,SizeOf(TRNLAuthenticationToken));
+end;
+
+class operator TRNLAuthenticationToken.NotEqual(const a,b:TRNLAuthenticationToken):boolean;
+begin
+ result:=TRNLMemory.SecureIsNotEqual(a,b,SizeOf(TRNLAuthenticationToken));
 end;
 
 procedure TRNLConnectionKnownCandidateHostAddressHashTable.Clear;
@@ -18480,7 +18512,7 @@ begin
   result.fConnectionToken^:=aConnectionToken^;
  end else begin
   for Index:=0 to SizeOf(TRNLConnectionToken)-1 do begin
-   result.fConnectionToken^[Index]:=fRandomGenerator.GetUInt32;
+   result.fConnectionToken^.Data[Index]:=fRandomGenerator.GetUInt32;
   end;
  end;
 
@@ -18495,7 +18527,7 @@ begin
   result.fAuthenticationToken^:=aAuthenticationToken^;
  end else begin
   for Index:=0 to SizeOf(TRNLAuthenticationToken)-1 do begin
-   result.fAuthenticationToken^[Index]:=fRandomGenerator.GetUInt32;
+   result.fAuthenticationToken^.Data[Index]:=fRandomGenerator.GetUInt32;
   end;
  end;
 
@@ -19326,7 +19358,7 @@ begin
     DenialReason:=RNL_CONNECTION_DENIAL_REASON_TOO_LESS_CHANNELS;
    end else if RemoteCountChannels>fMaximumCountChannels then begin
     DenialReason:=RNL_CONNECTION_DENIAL_REASON_TOO_MANY_CHANNELS;
-   end else if TRNLMemory.SecureIsNonEqual(RemoteChannelTypes,fChannelTypes,SizeOf(TRNLPeerChannelType)*RemoteCountChannels) then begin
+   end else if TRNLMemory.SecureIsNotEqual(RemoteChannelTypes,fChannelTypes,SizeOf(TRNLPeerChannelType)*RemoteCountChannels) then begin
     DenialReason:=RNL_CONNECTION_DENIAL_REASON_WRONG_CHANNEL_TYPES;
    end else begin
     DenialReason:=RNL_CONNECTION_DENIAL_REASON_UNKNOWN;
