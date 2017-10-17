@@ -468,7 +468,7 @@ uses {$if defined(Posix)}
 {    Generics.Defaults,
      Generics.Collections;}
 
-const RNL_VERSION='1.00.2017.10.16.23.01.0000';
+const RNL_VERSION='1.00.2017.10.17.16.30.0000';
 
 type PPRNLInt8=^PRNLInt8;
      PRNLInt8=^TRNLInt8;
@@ -3148,11 +3148,13 @@ type PRNLVersion=^TRNLVersion;
 
        fUnacknowlegmentedBlockPackets:TRNLUInt32;
 
+       fRoundTripTimeFirst:boolean;
+
        fRoundTripTime:TRNLInt64;
 
        fRoundTripTimeVariance:TRNLInt64;
 
-       fRetransmissionTimeOut:TRNLInt64;
+       fRetransmissionTimeout:TRNLInt64;
 
        fPacketLoss:TRNLInt64;
 
@@ -3402,6 +3404,10 @@ type PRNLVersion=^TRNLVersion;
 
        fPendingSendNewBandwidthLimitsSendTimeout:TRNLUInt64;
 
+       fMinimumRetransmissionTimeout:TRNLInt64;
+
+       fMinimumRetransmissionTimeoutLimit:TRNLInt64;
+
        fRateLimiterHostAddressBurst:TRNLInt64;
 
        fRateLimiterHostAddressPeriod:TRNLUInt64;
@@ -3582,6 +3588,8 @@ type PRNLVersion=^TRNLVersion;
        property PendingDisconnectionTimeout:TRNLUInt64 read fPendingDisconnectionTimeout write fPendingDisconnectionTimeout;
        property PendingDisconnectionSendTimeout:TRNLUInt64 read fPendingDisconnectionSendTimeout write fPendingDisconnectionSendTimeout;
        property PendingSendNewBandwidthLimitsSendTimeout:TRNLUInt64 read fPendingSendNewBandwidthLimitsSendTimeout write fPendingSendNewBandwidthLimitsSendTimeout;
+       property MinimumRetransmissionTimeout:TRNLInt64 read fMinimumRetransmissionTimeout write fMinimumRetransmissionTimeout;
+       property MinimumRetransmissionTimeoutLimit:TRNLInt64 read fMinimumRetransmissionTimeoutLimit write fMinimumRetransmissionTimeoutLimit;
        property RateLimiterHostAddressBurst:TRNLInt64 read fRateLimiterHostAddressBurst write fRateLimiterHostAddressBurst;
        property RateLimiterHostAddressPeriod:TRNLUInt64 read fRateLimiterHostAddressPeriod write fRateLimiterHostAddressPeriod;
 {$if defined(RNL_LINEAR_PEER_LIST)}
@@ -16235,11 +16243,13 @@ begin
 
  fUnacknowlegmentedBlockPackets:=0;
 
+ fRoundTripTimeFirst:=true;
+
  fRoundTripTime:=TRNLUInt64(500) shl 32;
 
  fRoundTripTimeVariance:=0;
 
- fRetransmissionTimeOut:=TRNLUInt64(500) shl 32;
+ fRetransmissionTimeout:=TRNLUInt64(500) shl 32;
 
  fPacketLoss:=0;
 
@@ -16463,10 +16473,16 @@ end;
 procedure TRNLPeer.UpdateRoundTripTime(const aRoundTripTime:TRNLInt64);
 var ValueError:TRNLInt64;
 begin
- ValueError:=(aRoundTripTime shl 32)-fRoundTripTime;
- inc(fRoundTripTime,SARInt64(ValueError,3));
- inc(fRoundTripTimeVariance,SARInt64(abs(ValueError),2)-SARInt64(fRoundTripTimeVariance,2));
- fRetransmissionTimeOut:=fRoundTripTime+(fRoundTripTimeVariance shl 2);
+ if fRoundTripTimeFirst then begin
+  fRoundTripTimeFirst:=false;
+  fRoundTripTime:=aRoundTripTime shl 32;
+  fRoundTripTimeVariance:=0;
+ end else begin
+  ValueError:=(aRoundTripTime shl 32)-fRoundTripTime;
+  inc(fRoundTripTime,SARInt64(ValueError,3));
+  inc(fRoundTripTimeVariance,SARInt64(abs(ValueError),2)-SARInt64(fRoundTripTimeVariance,2));
+ end;
+ fRetransmissionTimeout:=fRoundTripTime+(fRoundTripTimeVariance shl 2);
 end;
 
 procedure TRNLPeer.UpdatePatchLossStatistics;
@@ -17055,8 +17071,8 @@ begin
     inc(OutgoingBlockPacket.fCountSendAttempts);
 
     if OutgoingBlockPacket.fRoundTripTimeout=0 then begin
-     OutgoingBlockPacket.fRoundTripTimeout:=Max(fRetransmissionTimeOut shr 32,1);
-     OutgoingBlockPacket.fRoundTripTimeoutLimit:=Max(fRetransmissionTimeOut shr 30,1);
+     OutgoingBlockPacket.fRoundTripTimeout:=Max(Max(fRetransmissionTimeout shr 32,fHost.fMinimumRetransmissionTimeout),1);
+     OutgoingBlockPacket.fRoundTripTimeoutLimit:=Max(Max(fRetransmissionTimeout shr 30,fHost.fMinimumRetransmissionTimeoutLimit),1);
     end;
 
     if (fNextReliableBlockPacketTimeout.Value=0) or
@@ -18017,6 +18033,10 @@ begin
  fPendingDisconnectionSendTimeout:=50;
 
  fPendingSendNewBandwidthLimitsSendTimeout:=50;
+
+ fMinimumRetransmissionTimeout:=1;
+
+ fMinimumRetransmissionTimeoutLimit:=4;
 
  fRateLimiterHostAddressBurst:=20;
 
