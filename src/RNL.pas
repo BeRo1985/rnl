@@ -468,7 +468,7 @@ uses {$if defined(Posix)}
 {    Generics.Defaults,
      Generics.Collections;}
 
-const RNL_VERSION='1.00.2017.10.17.16.30.0000';
+const RNL_VERSION='1.00.2017.10.17.18.46.0000';
 
 type PPRNLInt8=^PRNLInt8;
      PRNLInt8=^TRNLInt8;
@@ -3406,7 +3406,11 @@ type PRNLVersion=^TRNLVersion;
 
        fMinimumRetransmissionTimeout:TRNLInt64;
 
+       fMaximumRetransmissionTimeout:TRNLInt64;
+
        fMinimumRetransmissionTimeoutLimit:TRNLInt64;
+
+       fMaximumRetransmissionTimeoutLimit:TRNLInt64;
 
        fRateLimiterHostAddressBurst:TRNLInt64;
 
@@ -3589,7 +3593,9 @@ type PRNLVersion=^TRNLVersion;
        property PendingDisconnectionSendTimeout:TRNLUInt64 read fPendingDisconnectionSendTimeout write fPendingDisconnectionSendTimeout;
        property PendingSendNewBandwidthLimitsSendTimeout:TRNLUInt64 read fPendingSendNewBandwidthLimitsSendTimeout write fPendingSendNewBandwidthLimitsSendTimeout;
        property MinimumRetransmissionTimeout:TRNLInt64 read fMinimumRetransmissionTimeout write fMinimumRetransmissionTimeout;
+       property MaximumRetransmissionTimeout:TRNLInt64 read fMaximumRetransmissionTimeout write fMaximumRetransmissionTimeout;
        property MinimumRetransmissionTimeoutLimit:TRNLInt64 read fMinimumRetransmissionTimeoutLimit write fMinimumRetransmissionTimeoutLimit;
+       property MaximumRetransmissionTimeoutLimit:TRNLInt64 read fMaximumRetransmissionTimeoutLimit write fMaximumRetransmissionTimeoutLimit;
        property RateLimiterHostAddressBurst:TRNLInt64 read fRateLimiterHostAddressBurst write fRateLimiterHostAddressBurst;
        property RateLimiterHostAddressPeriod:TRNLUInt64 read fRateLimiterHostAddressPeriod write fRateLimiterHostAddressPeriod;
 {$if defined(RNL_LINEAR_PEER_LIST)}
@@ -17071,8 +17077,8 @@ begin
     inc(OutgoingBlockPacket.fCountSendAttempts);
 
     if OutgoingBlockPacket.fRoundTripTimeout=0 then begin
-     OutgoingBlockPacket.fRoundTripTimeout:=Max(Max(fRetransmissionTimeout shr 32,fHost.fMinimumRetransmissionTimeout),1);
-     OutgoingBlockPacket.fRoundTripTimeoutLimit:=Max(Max(fRetransmissionTimeout shr 30,fHost.fMinimumRetransmissionTimeoutLimit),1);
+     OutgoingBlockPacket.fRoundTripTimeout:=Min(Max(fRetransmissionTimeout shr 32,fHost.fMinimumRetransmissionTimeout),fHost.fMaximumRetransmissionTimeout);
+     OutgoingBlockPacket.fRoundTripTimeoutLimit:=Min(Max(fRetransmissionTimeout shr 30,fHost.fMinimumRetransmissionTimeoutLimit),fHost.fMaximumRetransmissionTimeoutLimit);
     end;
 
     if (fNextReliableBlockPacketTimeout.Value=0) or
@@ -18036,7 +18042,11 @@ begin
 
  fMinimumRetransmissionTimeout:=1;
 
+ fMaximumRetransmissionTimeout:=500;
+
  fMinimumRetransmissionTimeoutLimit:=4;
+
+ fMaximumRetransmissionTimeoutLimit:=5000;
 
  fRateLimiterHostAddressBurst:=20;
 
