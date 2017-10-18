@@ -468,7 +468,7 @@ uses {$if defined(Posix)}
 {    Generics.Defaults,
      Generics.Collections;}
 
-const RNL_VERSION='1.00.2017.10.17.18.46.0000';
+const RNL_VERSION='1.00.2017.10.18.03.20.0000';
 
 type PPRNLInt8=^PRNLInt8;
      PRNLInt8=^TRNLInt8;
@@ -9805,7 +9805,7 @@ var EntropyData:TRNLRandomGeneratorEntropyData;
   function GUIDGetEntropyData(out aBuffer;const aSize:TRNLSizeUInt):boolean;
   var Index,Remain,ToDo:TRNLSizeUInt;
       Value:TGUID;
-{$if not (defined(Windows) or defined(fpc))}
+{$if not (defined(Windows) or defined(fpc) or defined(NextGen))}
       OK:boolean;
       fs:TFileStream;
       s:TRNLRawByteString;
@@ -9825,6 +9825,9 @@ var EntropyData:TRNLRandomGeneratorEntropyData;
     CreateGUID(Value);
 {$elseif defined(Windows)}
     CoCreateGUID(Value);
+{$elseif defined(NextGen)}
+    // In this case, we hope, that the next-gen delphi ecosystem stuff is doing already the right thing
+    CreateGUID(Value);
 {$else}
     OK:=false;
     if (not OK) and FileExists('/proc/sys/kernel/random/uuid') then begin
