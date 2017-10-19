@@ -190,6 +190,7 @@
 unit RNL;
 {$ifdef fpc}
  {$mode delphi}
+ {-$codepage utf8}
  {$ifdef CPUI386}
   {$define CPU386}
  {$endif}
@@ -393,6 +394,7 @@ unit RNL;
   {$warn implicit_string_cast off}
   {$warn suspicious_typecast off}
   {$warn unit_platform off}
+  {$warn duplicate_ctor_dtor off}
  {$endif}
 {$endif}
 {$if defined(Win32) or defined(Win64)}
@@ -468,7 +470,7 @@ uses {$if defined(Posix)}
 {    Generics.Defaults,
      Generics.Collections;}
 
-const RNL_VERSION='1.00.2017.10.19.17.01.0000';
+const RNL_VERSION='1.00.2017.10.19.22.16.0000';
 
 type PPRNLInt8=^PRNLInt8;
      PRNLInt8=^TRNLInt8;
@@ -599,6 +601,10 @@ type PPRNLInt8=^PRNLInt8;
      PPRNLUTF16String=^PRNLUTF16String;
      PRNLUTF16String=^TRNLUTF16String;
      TRNLUTF16String={$if declared(UnicodeString)}UnicodeString{$else}WideString{$ifend};
+
+     PPRNLString=^PRNLString;
+     PRNLString=^TRNLString;
+     TRNLString=String;
 
      PRNLInt8Array=^TRNLUInt8Array;
      TRNLInt8Array=array[0..65535] of TRNLInt8;
@@ -2112,10 +2118,19 @@ type PRNLVersion=^TRNLVersion;
        fOnFree:TRNLMessageOnFree;
        fUserData:TRNLPointer;
        procedure Initialize;
-       function GetDataAsString:TRNLRawByteString;
+       function GetDataAsBytes:TBytes;
+       function GetDataAsRawByteString:TRNLRawByteString;
+       function GetDataAsUTF8String:TRNLUTF8String;
+       function GetDataAsUTF16String:TRNLUTF16String;
+       function GetDataAsString:TRNLString;
       public
        constructor CreateFromMemory(const aData:TRNLPointer;const aDataLength:TRNLUInt32;const aFlags:TRNLMessageFlags=[]); reintroduce; overload;
-       constructor CreateFromString(const aData:TRNLRawByteString;const aFlags:TRNLMessageFlags=[]); reintroduce; overload;
+       constructor CreateFromBytes(const aData:TBytes;const aFlags:TRNLMessageFlags=[]); reintroduce; overload;
+       constructor CreateFromBytes(const aData:array of TRNLUInt8;const aFlags:TRNLMessageFlags=[]); reintroduce; overload;
+       constructor CreateFromRawByteString(const aData:TRNLRawByteString;const aFlags:TRNLMessageFlags=[]); reintroduce; overload;
+       constructor CreateFromUTF8String(const aData:TRNLUTF8String;const aFlags:TRNLMessageFlags=[]); reintroduce; overload;
+       constructor CreateFromUTF16String(const aData:TRNLUTF16String;const aFlags:TRNLMessageFlags=[]); reintroduce; overload;
+       constructor CreateFromString(const aData:TRNLString;const aFlags:TRNLMessageFlags=[]); reintroduce; overload;
        constructor CreateFromStream(const aStream:TStream;const aFlags:TRNLMessageFlags=[]); reintroduce; overload;
        destructor Destroy; override;
        procedure IncRef;
@@ -2123,12 +2138,16 @@ type PRNLVersion=^TRNLVersion;
        procedure Resize(const aDataLength:TRNLUInt32);
        property Data:TRNLPointer read fData write fData;
        property UserData:TRNLPointer read fUserData write fUserData;
+       property AsBytes:TBytes read GetDataAsBytes;
       published
        property ReferenceCounter:TRNLUInt32 read fReferenceCounter write fReferenceCounter;
        property Flags:TRNLMessageFlags read fFlags write fFlags;
        property DataLength:TRNLUInt32 read fDataLength write fDataLength;
        property OnFree:TRNLMessageOnFree read fOnFree write fOnFree;
-       property AsString:TRNLRawByteString read GetDataAsString;
+       property AsRawByteString:TRNLRawByteString read GetDataAsRawByteString;
+       property AsUTF8String:TRNLUTF8String read GetDataAsUTF8String;
+       property AsUTF16String:TRNLUTF16String read GetDataAsUTF16String;
+       property AsString:TRNLString read GetDataAsString;
      end;
 
      TRNLMessageQueue=TRNLQueue<TRNLMessage>;
@@ -2778,7 +2797,12 @@ type PRNLVersion=^TRNLVersion;
 
        procedure SendMessage(const aMessage:TRNLMessage);
        procedure SendMessageData(const aData:TRNLPointer;const aDataLength:TRNLUInt32;const aFlags:TRNLMessageFlags=[]);
-       procedure SendMessageString(const aString:TRNLRawByteString;const aFlags:TRNLMessageFlags=[]);
+       procedure SendMessageBytes(const aBytes:TBytes;const aFlags:TRNLMessageFlags=[]); overload;
+       procedure SendMessageBytes(const aBytes:array of TRNLUInt8;const aFlags:TRNLMessageFlags=[]); overload;
+       procedure SendMessageRawByteString(const aString:TRNLRawByteString;const aFlags:TRNLMessageFlags=[]);
+       procedure SendMessageUTF8String(const aString:TRNLUTF8String;const aFlags:TRNLMessageFlags=[]);
+       procedure SendMessageUTF16String(const aString:TRNLUTF16String;const aFlags:TRNLMessageFlags=[]);
+       procedure SendMessageString(const aString:TRNLString;const aFlags:TRNLMessageFlags=[]);
        procedure SendMessageStream(const aStream:TStream;const aFlags:TRNLMessageFlags=[]);
 
        property MaximumUnfragmentedMessageSize:TRNLSizeUInt read GetMaximumUnfragmentedMessageSize;
@@ -3573,7 +3597,12 @@ type PRNLVersion=^TRNLVersion;
                         const aAuthenticationToken:PRNLAuthenticationToken=nil):TRNLPeer;
        procedure BroadcastMessage(const aChannel:TRNLUInt8;const aMessage:TRNLMessage);
        procedure BroadcastMessageData(const aChannel:TRNLUInt8;const aData:TRNLPointer;const aDataLength:TRNLUInt32;const aFlags:TRNLMessageFlags=[]);
-       procedure BroadcastMessageString(const aChannel:TRNLUInt8;const aString:TRNLRawByteString;const aFlags:TRNLMessageFlags=[]);
+       procedure BroadcastMessageBytes(const aChannel:TRNLUInt8;const aBytes:TBytes;const aFlags:TRNLMessageFlags=[]); overload;
+       procedure BroadcastMessageBytes(const aChannel:TRNLUInt8;const aBytes:array of TRNLUInt8;const aFlags:TRNLMessageFlags=[]); overload;
+       procedure BroadcastMessageRawByteString(const aChannel:TRNLUInt8;const aString:TRNLRawByteString;const aFlags:TRNLMessageFlags=[]);
+       procedure BroadcastMessageUTF8String(const aChannel:TRNLUInt8;const aString:TRNLUTF8String;const aFlags:TRNLMessageFlags=[]);
+       procedure BroadcastMessageUTF16String(const aChannel:TRNLUInt8;const aString:TRNLUTF16String;const aFlags:TRNLMessageFlags=[]);
+       procedure BroadcastMessageString(const aChannel:TRNLUInt8;const aString:TRNLString;const aFlags:TRNLMessageFlags=[]);
        procedure BroadcastMessageStream(const aChannel:TRNLUInt8;const aStream:TStream;const aFlags:TRNLMessageFlags=[]);
        function Service(var aEvent:TRNLHostEvent;const aTimeout:TRNLInt64=1000):TRNLHostServiceStatus;
        function CheckEvents(var aEvent:TRNLHostEvent):boolean;
@@ -10441,9 +10470,42 @@ begin
  fFlags:=aFlags;
 end;
 
-constructor TRNLMessage.CreateFromString(const aData:TRNLRawByteString;const aFlags:TRNLMessageFlags);
+constructor TRNLMessage.CreateFromBytes(const aData:TBytes;const aFlags:TRNLMessageFlags);
 begin
- CreateFromMemory(@aData[1],length(aData),aFlags);
+ CreateFromMemory(@aData[0],
+                  length(aData),
+                  aFlags-[RNL_MESSAGE_FLAG_NO_ALLOCATE,RNL_MESSAGE_FLAG_NO_FREE]);
+end;
+
+constructor TRNLMessage.CreateFromBytes(const aData:array of TRNLUInt8;const aFlags:TRNLMessageFlags);
+begin
+ CreateFromMemory(@aData[0],
+                  length(aData),
+                  aFlags-[RNL_MESSAGE_FLAG_NO_ALLOCATE,RNL_MESSAGE_FLAG_NO_FREE]);
+end;
+
+constructor TRNLMessage.CreateFromRawByteString(const aData:TRNLRawByteString;const aFlags:TRNLMessageFlags);
+begin
+ CreateFromMemory({$ifdef NextGen}MarshaledAString{$else}PAnsiChar{$endif}(aData),
+                  length(aData),
+                  aFlags-[RNL_MESSAGE_FLAG_NO_ALLOCATE,RNL_MESSAGE_FLAG_NO_FREE]);
+end;
+
+constructor TRNLMessage.CreateFromUTF8String(const aData:TRNLUTF8String;const aFlags:TRNLMessageFlags);
+begin
+ CreateFromMemory({$ifdef NextGen}MarshaledAString{$else}PAnsiChar{$endif}(aData),
+                  length(aData),
+                  aFlags-[RNL_MESSAGE_FLAG_NO_ALLOCATE,RNL_MESSAGE_FLAG_NO_FREE]);
+end;
+
+constructor TRNLMessage.CreateFromUTF16String(const aData:TRNLUTF16String;const aFlags:TRNLMessageFlags);
+begin
+ CreateFromUTF8String(UTF8Encode(aData));
+end;
+
+constructor TRNLMessage.CreateFromString(const aData:TRNLString;const aFlags:TRNLMessageFlags);
+begin
+ CreateFromUTF8String(UTF8Encode(aData));
 end;
 
 constructor TRNLMessage.CreateFromStream(const aStream:TStream;const aFlags:TRNLMessageFlags);
@@ -10530,17 +10592,60 @@ begin
  end;
 end;
 
-function TRNLMessage.GetDataAsString:TRNLRawByteString;
-{$if defined(NEXTGEN)}
+function TRNLMessage.GetDataAsBytes:TBytes;
 begin
- SetLength(result,fDataLength);
- Move(fData^,result[1],fDataLength);
+ result:=nil;
+ if fDataLength>0 then begin
+  SetLength(result,fDataLength);
+  Move(fData^,result[0],fDataLength);
+ end;
+end;
+
+function TRNLMessage.GetDataAsRawByteString:TRNLRawByteString;
+{$if defined(fpc)}
+begin
+ result:='';
+ if fDataLength>0 then begin
+  SetLength(result,fDataLength);
+  Move(fData^,result[1],fDataLength);
+ end;
 end;
 {$else}
 begin
- result:=copy(PAnsiChar(fData),0,fDataLength);
+ result:='';
+ if fDataLength>0 then begin
+  SetString(result,{$ifdef NextGen}MarshaledAString{$else}PAnsiChar{$endif}(fData),fDataLength);
+ end;
 end;
 {$ifend}
+
+function TRNLMessage.GetDataAsUTF8String:TRNLUTF8String;
+{$if defined(fpc)}
+begin
+ result:='';
+ if fDataLength>0 then begin
+  SetLength(result,fDataLength);
+  Move(fData^,result[1],fDataLength);
+ end;
+end;
+{$else}
+begin
+ result:='';
+ if fDataLength>0 then begin
+  SetString(result,{$ifdef NextGen}MarshaledAString{$else}PAnsiChar{$endif}(fData),fDataLength);
+ end;
+end;
+{$ifend}
+
+function TRNLMessage.GetDataAsUTF16String:TRNLUTF16String;
+begin
+ result:={$ifdef fpc}UTF8Decode{$else}UTF8ToUnicodeString{$endif}(GetDataAsUTF8String);
+end;
+
+function TRNLMessage.GetDataAsString:TRNLString;
+begin
+ result:={$ifdef fpc}UTF8Decode{$else}UTF8ToString{$endif}(GetDataAsUTF8String);
+end;
 
 var CRC32CTable:array[0..7,TRNLUInt8] of TRNLUInt32;
 
@@ -14464,7 +14569,62 @@ begin
  end;
 end;
 
-procedure TRNLPeerChannel.SendMessageString(const aString:TRNLRawByteString;const aFlags:TRNLMessageFlags=[]);
+procedure TRNLPeerChannel.SendMessageBytes(const aBytes:TBytes;const aFlags:TRNLMessageFlags=[]);
+var Message:TRNLMessage;
+begin
+ Message:=TRNLMessage.CreateFromBytes(aBytes,aFlags);
+ try
+  SendMessage(Message);
+ finally
+  Message.DecRef;
+ end;
+end;
+
+procedure TRNLPeerChannel.SendMessageBytes(const aBytes:array of TRNLUInt8;const aFlags:TRNLMessageFlags=[]);
+var Message:TRNLMessage;
+begin
+ Message:=TRNLMessage.CreateFromBytes(aBytes,aFlags);
+ try
+  SendMessage(Message);
+ finally
+  Message.DecRef;
+ end;
+end;
+
+procedure TRNLPeerChannel.SendMessageRawByteString(const aString:TRNLRawByteString;const aFlags:TRNLMessageFlags=[]);
+var Message:TRNLMessage;
+begin
+ Message:=TRNLMessage.CreateFromRawByteString(aString,aFlags);
+ try
+  SendMessage(Message);
+ finally
+  Message.DecRef;
+ end;
+end;
+
+procedure TRNLPeerChannel.SendMessageUTF8String(const aString:TRNLUTF8String;const aFlags:TRNLMessageFlags=[]);
+var Message:TRNLMessage;
+begin
+ Message:=TRNLMessage.CreateFromUTF8String(aString,aFlags);
+ try
+  SendMessage(Message);
+ finally
+  Message.DecRef;
+ end;
+end;
+
+procedure TRNLPeerChannel.SendMessageUTF16String(const aString:TRNLUTF16String;const aFlags:TRNLMessageFlags=[]);
+var Message:TRNLMessage;
+begin
+ Message:=TRNLMessage.CreateFromUTF16String(aString,aFlags);
+ try
+  SendMessage(Message);
+ finally
+  Message.DecRef;
+ end;
+end;
+
+procedure TRNLPeerChannel.SendMessageString(const aString:TRNLString;const aFlags:TRNLMessageFlags=[]);
 var Message:TRNLMessage;
 begin
  Message:=TRNLMessage.CreateFromString(aString,aFlags);
@@ -19866,7 +20026,62 @@ begin
  end;
 end;
 
-procedure TRNLHost.BroadcastMessageString(const aChannel:TRNLUInt8;const aString:TRNLRawByteString;const aFlags:TRNLMessageFlags=[]);
+procedure TRNLHost.BroadcastMessageBytes(const aChannel:TRNLUInt8;const aBytes:TBytes;const aFlags:TRNLMessageFlags=[]);
+var Message:TRNLMessage;
+begin
+ Message:=TRNLMessage.CreateFromBytes(aBytes,aFlags);
+ try
+  BroadcastMessage(aChannel,Message);
+ finally
+  Message.DecRef;
+ end;
+end;
+
+procedure TRNLHost.BroadcastMessageBytes(const aChannel:TRNLUInt8;const aBytes:array of TRNLUInt8;const aFlags:TRNLMessageFlags=[]);
+var Message:TRNLMessage;
+begin
+ Message:=TRNLMessage.CreateFromBytes(aBytes,aFlags);
+ try
+  BroadcastMessage(aChannel,Message);
+ finally
+  Message.DecRef;
+ end;
+end;
+
+procedure TRNLHost.BroadcastMessageRawByteString(const aChannel:TRNLUInt8;const aString:TRNLRawByteString;const aFlags:TRNLMessageFlags=[]);
+var Message:TRNLMessage;
+begin
+ Message:=TRNLMessage.CreateFromRawByteString(aString,aFlags);
+ try
+  BroadcastMessage(aChannel,Message);
+ finally
+  Message.DecRef;
+ end;
+end;
+
+procedure TRNLHost.BroadcastMessageUTF8String(const aChannel:TRNLUInt8;const aString:TRNLUTF8String;const aFlags:TRNLMessageFlags=[]);
+var Message:TRNLMessage;
+begin
+ Message:=TRNLMessage.CreateFromUTF8String(aString,aFlags);
+ try
+  BroadcastMessage(aChannel,Message);
+ finally
+  Message.DecRef;
+ end;
+end;
+
+procedure TRNLHost.BroadcastMessageUTF16String(const aChannel:TRNLUInt8;const aString:TRNLUTF16String;const aFlags:TRNLMessageFlags=[]);
+var Message:TRNLMessage;
+begin
+ Message:=TRNLMessage.CreateFromUTF16String(aString,aFlags);
+ try
+  BroadcastMessage(aChannel,Message);
+ finally
+  Message.DecRef;
+ end;
+end;
+
+procedure TRNLHost.BroadcastMessageString(const aChannel:TRNLUInt8;const aString:TRNLString;const aFlags:TRNLMessageFlags=[]);
 var Message:TRNLMessage;
 begin
  Message:=TRNLMessage.CreateFromString(aString,aFlags);
