@@ -468,7 +468,7 @@ uses {$if defined(Posix)}
 {    Generics.Defaults,
      Generics.Collections;}
 
-const RNL_VERSION='1.00.2017.10.18.03.20.0000';
+const RNL_VERSION='1.00.2017.10.19.17.01.0000';
 
 type PPRNLInt8=^PRNLInt8;
      PRNLInt8=^TRNLInt8;
@@ -14790,7 +14790,7 @@ begin
       (IndirectBlockPacket^.fSequenceNumber.fValue=aBlockPacketSequenceNumber.fValue) then begin
     try
      fIncomingAcknowledgements[aBlockPacketSequenceNumber.fValue and fHost.fReliableChannelBlockPacketWindowMask]:=fIncomingAcknowledgementSequenceNumber.fValue;
-     fPeer.UpdateRoundTripTime(abs(TRNLInt16(TRNLUInt16(IndirectBlockPacket^.fSentTime.fValue-aBlockPacketReceivedTime.fValue))));
+     fPeer.UpdateRoundTripTime(abs(TRNLInt16(TRNLUInt16(aBlockPacketReceivedTime.fValue-IndirectBlockPacket^.fSentTime.fValue))));
      dec(fPeer.fUnacknowlegmentedBlockPackets);
      IndirectBlockPacket^.Remove;
     finally
@@ -16691,9 +16691,7 @@ begin
        end;
       until false;
 
-      if (TRNLUInt16(KeepAliveWindowItem^.Time.fValue)=IncomingBlockPacket.fBlockPacket.Pong.SentTime) then begin
-       UpdateRoundTripTime(TRNLTime.Difference(fHost.fTime,KeepAliveWindowItem^.Time));
-      end;
+      UpdateRoundTripTime(abs(TRNLInt16(TRNLInt16(fHost.fTime.fValue-IncomingBlockPacket.fBlockPacket.Pong.SentTime))));
 
 {$if defined(RNL_DEBUG) and defined(RNL_DEBUG_PING)}
       fHost.fInstance.fDebugLock.Acquire;
