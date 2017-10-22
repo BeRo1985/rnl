@@ -470,7 +470,7 @@ uses {$if defined(Posix)}
 {    Generics.Defaults,
      Generics.Collections;}
 
-const RNL_VERSION='1.00.2017.10.19.22.16.0000';
+const RNL_VERSION='1.00.2017.10.22.11.47.0000';
 
 type PPRNLInt8=^PRNLInt8;
      PRNLInt8=^TRNLInt8;
@@ -1665,6 +1665,9 @@ type PRNLVersion=^TRNLVersion;
        fNonce:TRNLUInt64;
        fMTU:TRNLUInt16;
        fCountChallengeRepetitions:TRNLUInt16;
+       fNextChallengeTimeout:TRNLTime;
+       fNextShortTermKeyPairTimeout:TRNLTime;
+       fNextNonceTimeout:TRNLTime;
        fChallenge:TRNLConnectionChallenge;
        fSolvedChallenge:TRNLConnectionChallenge;
        fConnectionToken:TRNLConnectionToken;
@@ -3212,6 +3215,10 @@ type PRNLVersion=^TRNLVersion;
 
        fNextPendingConnectionSendTimeout:TRNLTime;
 
+       fNextPendingConnectionSaltTimeout:TRNLTime;
+
+       fNextPendingConnectionShortTermKeyPairTimeout:TRNLTime;
+
        fNextPendingDisconnectionSendTimeout:TRNLTime;
 
        fDisconnectionTimeout:TRNLTime;
@@ -3422,6 +3429,14 @@ type PRNLVersion=^TRNLVersion;
 
        fPendingConnectionSendTimeout:TRNLUInt64;
 
+       fPendingConnectionSaltTimeout:TRNLUInt64;
+
+       fPendingConnectionShortTermKeyPairTimeout:TRNLUInt64;
+
+       fPendingConnectionChallengeTimeout:TRNLUInt64;
+
+       fPendingConnectionNonceTimeout:TRNLUInt64;
+
        fPendingDisconnectionTimeout:TRNLUInt64;
 
        fPendingDisconnectionSendTimeout:TRNLUInt64;
@@ -3618,6 +3633,10 @@ type PRNLVersion=^TRNLVersion;
        property PingResendTimeout:TRNLTime read fPingResendTimeout write SetPingResendTimeout;
        property PendingConnectionTimeout:TRNLUInt64 read fPendingConnectionTimeout write fPendingConnectionTimeout;
        property PendingConnectionSendTimeout:TRNLUInt64 read fPendingConnectionSendTimeout write fPendingConnectionSendTimeout;
+       property PendingConnectionSaltTimeout:TRNLUInt64 read fPendingConnectionSaltTimeout write fPendingConnectionSaltTimeout;
+       property PendingConnectionShortTermKeyPairTimeout:TRNLUInt64 read fPendingConnectionShortTermKeyPairTimeout write fPendingConnectionShortTermKeyPairTimeout;
+       property PendingConnectionChallengeTimeout:TRNLUInt64 read fPendingConnectionChallengeTimeout write fPendingConnectionChallengeTimeout;
+       property PendingConnectionNonceTimeout:TRNLUInt64 read fPendingConnectionNonceTimeout write fPendingConnectionNonceTimeout;
        property PendingDisconnectionTimeout:TRNLUInt64 read fPendingDisconnectionTimeout write fPendingDisconnectionTimeout;
        property PendingDisconnectionSendTimeout:TRNLUInt64 read fPendingDisconnectionSendTimeout write fPendingDisconnectionSendTimeout;
        property PendingSendNewBandwidthLimitsSendTimeout:TRNLUInt64 read fPendingSendNewBandwidthLimitsSendTimeout write fPendingSendNewBandwidthLimitsSendTimeout;
@@ -16394,6 +16413,10 @@ begin
 
  fNextPendingConnectionSendTimeout:=0;
 
+ fNextPendingConnectionSaltTimeout:=0;
+
+ fNextPendingConnectionShortTermKeyPairTimeout:=0;
+
  fNextPendingDisconnectionSendTimeout:=0;
 
  fDisconnectionTimeout:=0;
@@ -16992,10 +17015,14 @@ begin
      RNL_PEER_STATE_CONNECTION_REQUESTING:begin
       if assigned(fPendingConnectionHandshakeSendData) and
          (fPendingConnectionHandshakeSendData.fHandshakePacket.Header.PacketType=TRNLUInt32(TRNLProtocolHandshakePacketType(RNL_PROTOCOL_HANDSHAKE_PACKET_TYPE_CONNECTION_REQUEST))) then begin
-       fLocalSalt:=fHost.fRandomGenerator.GetUInt64;
-       fConnectionSalt:=fLocalSalt;
-       fChecksumPlaceHolder:=fConnectionSalt xor (fConnectionSalt shl 32);
-       fPendingConnectionHandshakeSendData.fHandshakePacket.ConnectionRequest.OutgoingSalt:=TRNLEndianness.HostToLittleEndian64(fLocalSalt);
+       if (fNextPendingConnectionSaltTimeout.fValue=0) or
+          (fHost.fTime>=fNextPendingConnectionSaltTimeout) then begin
+        fNextPendingConnectionSaltTimeout:=fHost.fTime+fHost.fPendingConnectionSaltTimeout;
+        fLocalSalt:=fHost.fRandomGenerator.GetUInt64;
+        fConnectionSalt:=fLocalSalt;
+        fChecksumPlaceHolder:=fConnectionSalt xor (fConnectionSalt shl 32);
+        fPendingConnectionHandshakeSendData.fHandshakePacket.ConnectionRequest.OutgoingSalt:=TRNLEndianness.HostToLittleEndian64(fLocalSalt);
+       end;
        fPendingConnectionHandshakeSendData.Send;
       end else begin
        fState:=RNL_PEER_STATE_DISCONNECTED;
@@ -17004,10 +17031,14 @@ begin
      RNL_PEER_STATE_CONNECTION_CHALLENGING:begin
       if assigned(fPendingConnectionHandshakeSendData) and
          (fPendingConnectionHandshakeSendData.fHandshakePacket.Header.PacketType=TRNLUInt32(TRNLProtocolHandshakePacketType(RNL_PROTOCOL_HANDSHAKE_PACKET_TYPE_CONNECTION_CHALLENGE_RESPONSE))) then begin
-       TRNLX25519.GeneratePublicPrivateKeyPair(fHost.fRandomGenerator,
-                                               fLocalShortTermPublicKey,
-                                               fLocalShortTermPrivateKey);
-       fPendingConnectionHandshakeSendData.fHandshakePacket.ConnectionChallengeResponse.ShortTermPublicKey:=fLocalShortTermPublicKey;
+       if (fNextPendingConnectionShortTermKeyPairTimeout.fValue=0) or
+          (fHost.fTime>=fNextPendingConnectionShortTermKeyPairTimeout) then begin
+        fNextPendingConnectionShortTermKeyPairTimeout:=fHost.fTime+fHost.fPendingConnectionShortTermKeyPairTimeout;
+        TRNLX25519.GeneratePublicPrivateKeyPair(fHost.fRandomGenerator,
+                                                fLocalShortTermPublicKey,
+                                                fLocalShortTermPrivateKey);
+        fPendingConnectionHandshakeSendData.fHandshakePacket.ConnectionChallengeResponse.ShortTermPublicKey:=fLocalShortTermPublicKey;
+       end;
        fPendingConnectionHandshakeSendData.Send;
       end else begin
        fState:=RNL_PEER_STATE_DISCONNECTED;
@@ -18195,6 +18226,14 @@ begin
 
  fPendingConnectionSendTimeout:=100;
 
+ fPendingConnectionSaltTimeout:=1000;
+
+ fPendingConnectionShortTermKeyPairTimeout:=1000;
+
+ fPendingConnectionChallengeTimeout:=1000;
+
+ fPendingConnectionNonceTimeout:=1000;
+
  fPendingDisconnectionTimeout:=5000;
 
  fPendingDisconnectionSendTimeout:=50;
@@ -18666,6 +18705,8 @@ begin
 
  result.fNextPendingConnectionSendTimeout:=fTime+fPendingConnectionSendTimeout;
 
+ result.fNextPendingConnectionSaltTimeout:=fTime+fPendingConnectionSaltTimeout;
+
  result.fAddress:=aAddress;
 
  result.fOutgoingEncryptedPacketSequenceNumber:=0;
@@ -18736,8 +18777,6 @@ begin
  result.fPendingConnectionHandshakeSendData.fHandshakePacket.ConnectionRequest.ConnectionToken:=result.fConnectionToken^;
  result.fPendingConnectionHandshakeSendData.Send;
 
- result.fNextPendingConnectionSendTimeout:=fTime+fPendingConnectionSendTimeout;
-
 end;
 
 procedure TRNLHost.AddHandshakePacketChecksum(var aHandshakePacket);
@@ -18768,8 +18807,15 @@ begin
   exit;
  end;
 
- for Index:=0 to (SizeOf(TRNLConnectionChallenge) shr 3)-1 do begin
-  PRNLUInt64Array(TRNLPointer(@aConnectionCandidate^.fData^.fChallenge))^[Index]:=fRandomGenerator.GetUInt64;
+ if (aConnectionCandidate^.fData^.fNextChallengeTimeout.fValue=0) or
+    (fTime>=aConnectionCandidate^.fData^.fNextChallengeTimeout.fValue) then begin
+
+  aConnectionCandidate^.fData^.fNextChallengeTimeout:=fTime+fPendingConnectionChallengeTimeout;
+
+  for Index:=0 to (SizeOf(TRNLConnectionChallenge) shr 3)-1 do begin
+   PRNLUInt64Array(TRNLPointer(@aConnectionCandidate^.fData^.fChallenge))^[Index]:=fRandomGenerator.GetUInt64;
+  end;
+
  end;
 
  OutgoingPacket.Header.Signature:=RNLProtocolHandshakePacketHeaderSignature;
@@ -18861,14 +18907,17 @@ begin
  if assigned(ConnectionCandidate) then begin
 
   if not (ConnectionCandidate^.fState in [RNL_CONNECTION_STATE_REQUESTING,
-                                         RNL_CONNECTION_STATE_CHALLENGING]) then begin
+                                          RNL_CONNECTION_STATE_CHALLENGING]) then begin
    exit;
   end;
 
   if assigned(ConnectionCandidate^.fData) then begin
-   Finalize(ConnectionCandidate^.fData^);
-   FillChar(ConnectionCandidate^.fData^,SizeOf(TRNLConnectionCandidateData),#0);
-   Initialize(ConnectionCandidate^.fData^);
+   if TRNLMemory.SecureIsNotEqual(ConnectionCandidate^.fAddress,fReceivedAddress,SizeOf(TRNLAddress)) or
+      (ConnectionCandidate^.fRemoteSalt<>TRNLEndianness.LittleEndianToHost64(aIncomingPacket^.OutgoingSalt)) then begin
+    Finalize(ConnectionCandidate^.fData^);
+    FillChar(ConnectionCandidate^.fData^,SizeOf(TRNLConnectionCandidateData),#0);
+    Initialize(ConnectionCandidate^.fData^);
+   end;
   end else begin
    GetMem(ConnectionCandidate^.fData,SizeOf(TRNLConnectionCandidateData));
    FillChar(ConnectionCandidate^.fData^,SizeOf(TRNLConnectionCandidateData),#0);
@@ -18982,6 +19031,8 @@ begin
 
  Peer.fNextPendingConnectionSendTimeout:=fTime+fPendingConnectionSendTimeout;
 
+ Peer.fNextPendingConnectionShortTermKeyPairTimeout:=fTime+fPendingConnectionShortTermKeyPairTimeout;
+
  Peer.fState:=RNL_PEER_STATE_CONNECTION_CHALLENGING;
 
 end;
@@ -19020,7 +19071,7 @@ begin
  if assigned(ConnectionCandidate) then begin
 
   if not (ConnectionCandidate^.fState in [RNL_CONNECTION_STATE_CHALLENGING,
-                                         RNL_CONNECTION_STATE_AUTHENTICATING]) then begin
+                                          RNL_CONNECTION_STATE_AUTHENTICATING]) then begin
    exit;
   end;
 
@@ -19052,9 +19103,16 @@ begin
    exit;
   end;
 
-  TRNLX25519.GeneratePublicPrivateKeyPair(fRandomGenerator,
-                                          ConnectionCandidate^.fData^.fLocalShortTermPublicKey,
-                                          ConnectionCandidate^.fData^.fLocalShortTermPrivateKey);
+  if (ConnectionCandidate^.fData^.fNextShortTermKeyPairTimeout.fValue=0) or
+     (fTime>=ConnectionCandidate^.fData^.fNextShortTermKeyPairTimeout) then begin
+
+   ConnectionCandidate^.fData^.fNextShortTermKeyPairTimeout:=fTime+fPendingConnectionShortTermKeyPairTimeout;
+
+   TRNLX25519.GeneratePublicPrivateKeyPair(fRandomGenerator,
+                                           ConnectionCandidate^.fData^.fLocalShortTermPublicKey,
+                                           ConnectionCandidate^.fData^.fLocalShortTermPrivateKey);
+
+  end;
 
   ConnectionCandidate^.fData^.fRemoteShortTermPublicKey:=aIncomingPacket^.ShortTermPublicKey;
 
@@ -19070,7 +19128,14 @@ begin
   end;
  {$ifend}
 
-  ConnectionCandidate^.fData^.fNonce:=fRandomGenerator.GetUInt64;
+  if (ConnectionCandidate^.fData^.fNextNonceTimeout.fValue=0) or
+     (fTime>=ConnectionCandidate^.fData^.fNextNonceTimeout) then begin
+
+   ConnectionCandidate^.fData^.fNextNonceTimeout:=fTime+fPendingConnectionNonceTimeout;
+
+   ConnectionCandidate^.fData^.fNonce:=fRandomGenerator.GetUInt64;
+
+  end;
 
   OutgoingPacket.Header.Signature:=RNLProtocolHandshakePacketHeaderSignature;
   OutgoingPacket.Header.ProtocolVersion:=TRNLEndianness.HostToLittleEndian64(RNL_PROTOCOL_VERSION);
@@ -19450,7 +19515,7 @@ begin
  if assigned(ConnectionCandidate) then begin
 
   if not (ConnectionCandidate^.fState in [RNL_CONNECTION_STATE_AUTHENTICATING,
-                                         RNL_CONNECTION_STATE_APPROVING]) then begin
+                                          RNL_CONNECTION_STATE_APPROVING]) then begin
    exit;
   end;
 
