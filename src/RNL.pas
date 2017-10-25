@@ -470,7 +470,7 @@ uses {$if defined(Posix)}
 {    Generics.Defaults,
      Generics.Collections;}
 
-const RNL_VERSION='1.00.2017.10.22.11.47.0000';
+const RNL_VERSION='1.00.2017.10.25.18.55.0000';
 
 type PPRNLInt8=^PRNLInt8;
      PRNLInt8=^TRNLInt8;
@@ -606,7 +606,7 @@ type PPRNLInt8=^PRNLInt8;
      PRNLString=^TRNLString;
      TRNLString=String;
 
-     PRNLInt8Array=^TRNLUInt8Array;
+     PRNLInt8Array=^TRNLInt8Array;
      TRNLInt8Array=array[0..65535] of TRNLInt8;
 
      PRNLUInt8Array=^TRNLUInt8Array;
