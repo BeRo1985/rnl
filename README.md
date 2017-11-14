@@ -14,7 +14,11 @@ And at game client side, the whole network stuff should run, if possible, in an 
  
 And for larger games with masses of clients in a single game world, you should use several subdivided TRNLHost instances, so that each TRNLHost must handle only few connected clients, in multiple threads and that in turn on multiple physical dedicated servers, which also in turn may communicate with each other to mimic the impression of a single very large game world. At least a single TRNLHost instance is rather designed for typical low client numbers, as these
 are the typical case for egoshooters, racing games, and so forth. Or in other words for large game worlds with masses of clients: Divide and conquer (for example with partially sector-border overlapping game world sectors for just as an example of an divide-and-conquer concept idea)
- 
+
+# Support me
+
+[Support me at Patreon](https://www.patreon.com/bero)
+
 # Features
 
    - Mostly fully object oriented code design
