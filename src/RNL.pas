@@ -471,7 +471,7 @@ uses {$if defined(Posix)}
 {    Generics.Defaults,
      Generics.Collections;}
 
-const RNL_VERSION='1.00.2017.12.06.20.22.0000';
+const RNL_VERSION='1.00.2017.12.06.21.35.0000';
 
 type PPRNLInt8=^PRNLInt8;
      PRNLInt8=^TRNLInt8;
@@ -8872,7 +8872,7 @@ const SOCKET_ERROR=-1;
 
 {$ifndef fpc}
 {$if defined(Linux) or defined(Android)}
-     FIONREAD=$541;
+     FIONREAD=$541b;
      FIONBIO=$5421;
      FIOASYNC=$5452;
 {$else}
@@ -10914,6 +10914,9 @@ end;
 constructor TRNLNetworkEvent.Create;
 {$if not defined(Windows)}
 var t:TRNLInt32;
+{$ifndef fpc}
+    PipeDescriptors:TPipeDescriptors;
+{$endif}
 {$ifend}
 begin
  inherited Create;
@@ -10932,12 +10935,16 @@ begin
   if t<0 then begin
    raise ERNLRealNetwork.Create('Pipe error');
   end;
-  fpfcntl(fEventPipeFDs[0],F_SETFL,t or O_NONBLOCK);
+  if fpfcntl(fEventPipeFDs[0],F_SETFL,t or O_NONBLOCK)<0 then begin
+   raise ERNLRealNetwork.Create('Pipe error');
+  end;
   t:=fpfcntl(fEventPipeFDs[1],F_GETFL);
   if t<0 then begin
    raise ERNLRealNetwork.Create('Pipe error');
   end;
-  fpfcntl(fEventPipeFDs[1],F_SETFL,t or O_NONBLOCK);
+  if fpfcntl(fEventPipeFDs[1],F_SETFL,t or O_NONBLOCK)<0 then begin
+   raise ERNLRealNetwork.Create('Pipe error');
+  end;
  except
   on e:ERNLRealNetwork do begin
    fpclose(fEventPipeFDs[0]);
@@ -10948,20 +10955,26 @@ begin
   end;
  end;
 {$else}
- if pipe(@fEventPipeFDs)<0 then begin
+ if pipe(PipeDescriptors)<0 then begin
   raise ERNLRealNetwork.Create('Pipe error');
  end;
+ fEventPipeFDs[0]:=PipeDescriptors.ReadDes;
+ fEventPipeFDs[1]:=PipeDescriptors.WriteDes;
  try
   t:=fcntl(fEventPipeFDs[0],F_GETFL);
   if t<0 then begin
    raise ERNLRealNetwork.Create('Pipe error');
   end;
-  fcntl(fEventPipeFDs[0],F_SETFL,t or O_NONBLOCK);
+  if fcntl(fEventPipeFDs[0],F_SETFL,t or O_NONBLOCK)<0 then begin
+   raise ERNLRealNetwork.Create('Pipe error');
+  end;
   t:=fcntl(fEventPipeFDs[1],F_GETFL);
   if t<0 then begin
    raise ERNLRealNetwork.Create('Pipe error');
   end;
-  fcntl(fEventPipeFDs[1],F_SETFL,t or O_NONBLOCK);
+  if fcntl(fEventPipeFDs[1],F_SETFL,t or O_NONBLOCK)<0 then begin
+   raise ERNLRealNetwork.Create('Pipe error');
+  end;
  except
   on e:ERNLRealNetwork do begin
    __close(fEventPipeFDs[0]);
@@ -11005,7 +11018,7 @@ end;
 procedure TRNLNetworkEvent.SetEvent;
 {$if not defined(Windows)}
 const b:TRNLUInt8=1;
-var Count:TRNLSizeInt;
+var Count:TRNLInt32;
 {$ifend}
 begin
 {$if defined(Windows)}
@@ -11031,7 +11044,7 @@ end;
 procedure TRNLNetworkEvent.ResetEvent;
 {$if not defined(Windows)}
 var b:TRNLUInt8;
-    Count:TRNLSizeInt;
+    Count:TRNLInt32;
 {$ifend}
 begin
 {$if defined(Windows)}
