@@ -471,7 +471,7 @@ uses {$if defined(Posix)}
 {    Generics.Defaults,
      Generics.Collections;}
 
-const RNL_VERSION='1.00.2017.12.06.19.24.0000';
+const RNL_VERSION='1.00.2017.12.06.19.50.0000';
 
 type PPRNLInt8=^PRNLInt8;
      PRNLInt8=^TRNLInt8;
@@ -2436,6 +2436,7 @@ type PRNLVersion=^TRNLVersion;
       (
        RNL_HOST_SERVICE_STATUS_ERROR,
        RNL_HOST_SERVICE_STATUS_TIMEOUT,
+       RNL_HOST_SERVICE_STATUS_INTERRUPT,
        RNL_HOST_SERVICE_STATUS_EVENT
       );
 
@@ -3561,6 +3562,9 @@ type PRNLVersion=^TRNLVersion;
 
        fOutgoingPacketBuffer:TRNLOutgoingPacketBuffer;
 
+       function GetInterruptible:boolean;
+       procedure SetInterruptible(const aInterruptible:boolean);
+
        procedure ClearPeerToFreeList;
 
        procedure SetReliableChannelBlockPacketWindowSize(const aReliableChannelBlockPacketWindowSize:TRNLUInt32);
@@ -3695,6 +3699,7 @@ type PRNLVersion=^TRNLVersion;
        property Instance:TRNLInstance read fInstance;
        property Network:TRNLNetwork read fNetwork;
        property Compressor:TRNLCompressor read fCompressor write fCompressor;
+       property Interruptible:boolean read GetInterruptible write SetInterruptible;
        property AllowIncomingConnections:boolean read fAllowIncomingConnections write fAllowIncomingConnections;
        property MaximumCountPeers:TRNLUInt32 read fMaximumCountPeers write fMaximumCountPeers;
        property MaximumCountChannels:TRNLUInt32 read fMaximumCountChannels write SetMaximumCountChannels;
@@ -11075,6 +11080,8 @@ begin
     result:=wrError;
    end;
   end;
+ end else begin
+  result:=wrTimeOut;
  end;
 end;
 {$else}
@@ -11175,6 +11182,8 @@ begin
 {$endif}
    end;
   end;
+ end else begin
+  result:=-1;
  end;
 end;
 {$else}
@@ -12104,74 +12113,91 @@ function TRNLRealNetwork.SocketSelect(const aMaxSocket:TRNLSocket;var aReadSet,a
 type TPollFDs=array[0..63] of TRNLRealNetworkPollFD;
 var Index,SubIndex,Found,CountPollFDs,PollCount:TRNLInt32;
     PollFDs:TPollFDs;
+    tv:{$if defined(Windows)}TTimeVal{$elseif defined(fpc)}TTimeVal{$else}TimeVal{$ifend};
+    t:pointer;
 begin
 
- PollFDs[0].events:=0;
+ if assigned(aEvent) then begin
 
- CountPollFDs:=0;
+  PollFDs[0].events:=0;
 
- for Index:=0 to aReadSet.fd_count-1 do begin
-  Found:=-1;
-  for SubIndex:=0 to CountPollFDs-1 do begin
-   if PollFDs[SubIndex].fd=aReadSet.fd_array[Index] then begin
-    Found:=SubIndex;
-    break;
+  CountPollFDs:=0;
+
+  for Index:=0 to aReadSet.fd_count-1 do begin
+   Found:=-1;
+   for SubIndex:=0 to CountPollFDs-1 do begin
+    if PollFDs[SubIndex].fd=aReadSet.fd_array[Index] then begin
+     Found:=SubIndex;
+     break;
+    end;
+   end;
+   if Found<0 then begin
+    Found:=CountPollFDs;
+    inc(CountPollFDs);
+    PollFDs[Found].fd:=aReadSet.fd_array[Index];
+    PollFDs[Found].events:=0;
+    PollFDs[Found].revents:=0;
+   end;
+   PollFDs[Found].events:=PollFDs[Found].events or POLLIN;
+  end;
+
+  for Index:=0 to aWriteSet.fd_count-1 do begin
+   Found:=-1;
+   for SubIndex:=0 to CountPollFDs-1 do begin
+    if PollFDs[SubIndex].fd=aWriteSet.fd_array[Index] then begin
+     Found:=SubIndex;
+     break;
+    end;
+   end;
+   if Found<0 then begin
+    Found:=CountPollFDs;
+    inc(CountPollFDs);
+    PollFDs[Found].fd:=aWriteSet.fd_array[Index];
+    PollFDs[Found].events:=0;
+    PollFDs[Found].revents:=0;
+   end;
+   PollFDs[Found].events:=PollFDs[Found].events or POLLOUT;
+  end;
+
+  FD_ZERO(aReadSet);
+  FD_ZERO(aWriteSet);
+
+  PollCount:=EmulatePoll(@PollFDs[0],CountPollFDs,aTimeout.fValue,aEvent);
+
+  if PollCount<0 then begin
+   if PollCount=-3 then begin
+    result:=0;
+   end else begin
+    result:=-1;
+   end;
+   exit;
+  end;
+
+  result:=0;
+
+  for Index:=0 to CountPollFDs-1 do begin
+   if (PollFDs[Index].revents and (POLLIN or POLLOUT))<>0 then begin
+    if (PollFDs[Index].revents and POLLIN)<>0 then begin
+     FD_SET(PollFDs[Index].FD,aReadSet);
+    end;
+    if (PollFDs[Index].revents and POLLOUT)<>0 then begin
+     FD_SET(PollFDs[Index].FD,aWriteSet);
+    end;
+    inc(result);
    end;
   end;
-  if Found<0 then begin
-   Found:=CountPollFDs;
-   inc(CountPollFDs);
-   PollFDs[Found].fd:=aReadSet.fd_array[Index];
-   PollFDs[Found].events:=0;
-   PollFDs[Found].revents:=0;
-  end;
-  PollFDs[Found].events:=PollFDs[Found].events or POLLIN;
- end;
 
- for Index:=0 to aWriteSet.fd_count-1 do begin
-  Found:=-1;
-  for SubIndex:=0 to CountPollFDs-1 do begin
-   if PollFDs[SubIndex].fd=aWriteSet.fd_array[Index] then begin
-    Found:=SubIndex;
-    break;
-   end;
-  end;
-  if Found<0 then begin
-   Found:=CountPollFDs;
-   inc(CountPollFDs);
-   PollFDs[Found].fd:=aWriteSet.fd_array[Index];
-   PollFDs[Found].events:=0;
-   PollFDs[Found].revents:=0;
-  end;
-  PollFDs[Found].events:=PollFDs[Found].events or POLLOUT;
- end;
+ end else begin
 
- FD_ZERO(aReadSet);
- FD_ZERO(aWriteSet);
-
- PollCount:=EmulatePoll(@PollFDs[0],CountPollFDs,aTimeout.fValue,aEvent);
-
- if PollCount<0 then begin
-  if PollCount=-3 then begin
-   result:=0;
+  if aTimeout.fValue<0 then begin
+   t:=nil;
   end else begin
-   result:=-1;
+   tv.tv_sec:=aTimeout div 1000;
+   tv.tv_usec:=(aTimeout mod 1000)*1000;
+   t:=@tv;
   end;
-  exit;
- end;
+  result:=_select(aMaxSocket+1,@aReadSet,@aWriteSet,nil,t);
 
- result:=0;
-
- for Index:=0 to CountPollFDs-1 do begin
-  if (PollFDs[Index].revents and (POLLIN or POLLOUT))<>0 then begin
-   if (PollFDs[Index].revents and POLLIN)<>0 then begin
-    FD_SET(PollFDs[Index].FD,aReadSet);
-   end;
-   if (PollFDs[Index].revents and POLLOUT)<>0 then begin
-    FD_SET(PollFDs[Index].FD,aWriteSet);
-   end;
-   inc(result);
-  end;
  end;
 
 end;
@@ -12233,55 +12259,114 @@ function TRNLRealNetwork.SocketWait(const aSockets:array of TRNLSocket;var aCond
 // Under Windows, we do simulate the POSIX-style poll function ourself,
 // so that we can also wait on an event additionally, if needed
 type TPollFDs=array[0..1] of TRNLRealNetworkPollFD;
-var Index,CountPollFDs,PollCount:TRNLInt32;
+var Index,CountPollFDs,PollCount,SelectCount:TRNLInt32;
     PollFDs:TPollFDs;
+    ReadSet,WriteSet:TRNLSocketSet;
+    tv:{$if defined(Windows)}TTimeVal{$elseif defined(fpc)}TTimeVal{$else}TimeVal{$ifend};
+    MaxSocket:TRNLSocket;
 begin
 
- CountPollFDs:=0;
+ if assigned(aEvent) then begin
 
- for Index:=0 to length(aSockets)-1 do begin
-  if aSockets[Index]<>RNL_SOCKET_NULL then begin
-   PollFDs[CountPollFDs].fd:=aSockets[Index];
-   PollFDs[CountPollFDs].events:=0;
-   if RNL_SOCKET_WAIT_CONDITION_IO_RECEIVE in aConditions then begin
-    PollFDs[CountPollFDs].events:=PollFDs[CountPollFDs].events or POLLIN;
+  CountPollFDs:=0;
+
+  for Index:=0 to length(aSockets)-1 do begin
+   if aSockets[Index]<>RNL_SOCKET_NULL then begin
+    PollFDs[CountPollFDs].fd:=aSockets[Index];
+    PollFDs[CountPollFDs].events:=0;
+    if RNL_SOCKET_WAIT_CONDITION_IO_RECEIVE in aConditions then begin
+     PollFDs[CountPollFDs].events:=PollFDs[CountPollFDs].events or POLLIN;
+    end;
+    if RNL_SOCKET_WAIT_CONDITION_IO_SEND in aConditions then begin
+     PollFDs[CountPollFDs].events:=PollFDs[CountPollFDs].events or POLLOUT;
+    end;
+    PollFDs[CountPollFDs].revents:=0;
+    inc(CountPollFDs);
    end;
-   if RNL_SOCKET_WAIT_CONDITION_IO_SEND in aConditions then begin
-    PollFDs[CountPollFDs].events:=PollFDs[CountPollFDs].events or POLLOUT;
-   end;
-   PollFDs[CountPollFDs].revents:=0;
-   inc(CountPollFDs);
   end;
- end;
 
- PollCount:=EmulatePoll(@PollFDs[0],CountPollFDs,aTimeout.fValue,aEvent);
+  PollCount:=EmulatePoll(@PollFDs[0],CountPollFDs,aTimeout.fValue,aEvent);
 
- if PollCount<0 then begin
-  if (RNL_SOCKET_WAIT_CONDITION_SERVICE_INTERRUPT in aConditions) and (PollCount=(-3)) then begin
-   aConditions:=[RNL_SOCKET_WAIT_CONDITION_SERVICE_INTERRUPT];
-   result:=true;
-  end else if (RNL_SOCKET_WAIT_CONDITION_IO_INTERRUPT in aConditions) and (PollCount=(-2)) then begin
-   aConditions:=[RNL_SOCKET_WAIT_CONDITION_IO_INTERRUPT];
-   result:=true;
-  end else begin
+  if PollCount<0 then begin
+   if (RNL_SOCKET_WAIT_CONDITION_SERVICE_INTERRUPT in aConditions) and (PollCount=(-3)) then begin
+    aConditions:=[RNL_SOCKET_WAIT_CONDITION_SERVICE_INTERRUPT];
+    result:=true;
+   end else if (RNL_SOCKET_WAIT_CONDITION_IO_INTERRUPT in aConditions) and (PollCount=(-2)) then begin
+    aConditions:=[RNL_SOCKET_WAIT_CONDITION_IO_INTERRUPT];
+    result:=true;
+   end else begin
+    result:=false;
+   end;
+   exit;
+  end;
+
+  aConditions:=[];
+
+  for Index:=0 to CountPollFDs-1 do begin
+   if (PollFDs[Index].revents and POLLIN)<>0 then begin
+    Include(aConditions,RNL_SOCKET_WAIT_CONDITION_IO_RECEIVE);
+   end;
+   if (PollFDs[Index].revents and POLLOUT)<>0 then begin
+    Include(aConditions,RNL_SOCKET_WAIT_CONDITION_IO_SEND);
+   end;
+  end;
+
+  result:=true;
+
+ end else begin
+
+  tv.tv_sec:=aTimeout div 1000;
+  tv.tv_usec:=(aTimeout mod 1000)*1000;
+
+  FD_ZERO(ReadSet);
+  FD_ZERO(WriteSet);
+
+  for Index:=0 to length(aSockets)-1 do begin
+   if aSockets[Index]<>RNL_SOCKET_NULL then begin
+    if RNL_SOCKET_WAIT_CONDITION_IO_RECEIVE in aConditions then begin
+     FD_SET(aSockets[Index],ReadSet);
+    end;
+    if RNL_SOCKET_WAIT_CONDITION_IO_SEND in aConditions then begin
+     FD_SET(aSockets[Index],WriteSet);
+    end;
+   end;
+  end;
+
+  MaxSocket:=0;
+
+  for Index:=0 to length(aSockets)-1 do begin
+   if (aSockets[Index]<>RNL_SOCKET_NULL) and (MaxSocket<aSockets[Index]) then begin
+    MaxSocket:=aSockets[Index];
+   end;
+  end;
+
+  SelectCount:=_select(MaxSocket+1,@ReadSet,@WriteSet,nil,@tv);
+  if SelectCount<0 then begin
    result:=false;
+   exit;
   end;
-  exit;
+
+  aConditions:=[];
+
+  if SelectCount=0 then begin
+   result:=true;
+   exit;
+  end;
+
+  for Index:=0 to length(aSockets)-1 do begin
+   if aSockets[Index]<>RNL_SOCKET_NULL then begin
+    if FD_ISSET(aSockets[Index],ReadSet) then begin
+     Include(aConditions,RNL_SOCKET_WAIT_CONDITION_IO_RECEIVE);
+    end;
+    if FD_ISSET(aSockets[Index],WriteSet) then begin
+     Include(aConditions,RNL_SOCKET_WAIT_CONDITION_IO_SEND);
+    end;
+   end;
+  end;
+
+  result:=true;
+
  end;
-
- aConditions:=[];
-
- for Index:=0 to CountPollFDs-1 do begin
-  if (PollFDs[Index].revents and POLLIN)<>0 then begin
-   Include(aConditions,RNL_SOCKET_WAIT_CONDITION_IO_RECEIVE);
-  end;
-  if (PollFDs[Index].revents and POLLOUT)<>0 then begin
-   Include(aConditions,RNL_SOCKET_WAIT_CONDITION_IO_SEND);
-  end;
- end;
-
- result:=true;
-
 end;
 {$elseif defined(fpc) and defined(Unix) and declared(fppoll) and not defined(Darwin)}
 // Use poll on POSIX-based targets except on iOS/macOS, because the first MacOS X version until 10.3
@@ -19062,7 +19147,7 @@ begin
 
  fNetwork:=aNetwork;
 
- fNetworkEvent:=TRNLNetworkEvent.Create;
+ fNetworkEvent:=nil;
 
  fRandomGenerator:=TRNLRandomGenerator.Create;
 
@@ -19290,6 +19375,22 @@ begin
  FreeAndNil(fNetworkEvent);
 
  inherited Destroy;
+end;
+
+function TRNLHost.GetInterruptible:boolean;
+begin
+ result:=assigned(fNetworkEvent);
+end;
+
+procedure TRNLHost.SetInterruptible(const aInterruptible:boolean);
+begin
+ if aInterruptible then begin
+  if not assigned(fNetworkEvent) then begin
+   fNetworkEvent:=TRNLNetworkEvent.Create;
+  end;
+ end else if assigned(fNetworkEvent) then begin
+  FreeAndNil(fNetworkEvent);
+ end;
 end;
 
 procedure TRNLHost.ClearPeerToFreeList;
@@ -21202,12 +21303,15 @@ begin
     exit;
    end;
 
-  until (RNL_SOCKET_WAIT_CONDITION_SERVICE_INTERRUPT in WaitConditions) or
-        not (RNL_SOCKET_WAIT_CONDITION_IO_INTERRUPT in WaitConditions);
+   if RNL_SOCKET_WAIT_CONDITION_SERVICE_INTERRUPT in WaitConditions then begin
+    result:=RNL_HOST_SERVICE_STATUS_INTERRUPT;
+    exit;
+   end;
 
- until (RNL_SOCKET_WAIT_CONDITION_SERVICE_INTERRUPT in WaitConditions) or
-       ((not (RNL_SOCKET_WAIT_CONDITION_IO_RECEIVE in WaitConditions)) and
-        (fInstance.Time>=Timeout));
+  until not (RNL_SOCKET_WAIT_CONDITION_IO_INTERRUPT in WaitConditions);
+
+ until (not (RNL_SOCKET_WAIT_CONDITION_IO_RECEIVE in WaitConditions)) and
+       (fInstance.Time>=Timeout);
 
 end;
 
