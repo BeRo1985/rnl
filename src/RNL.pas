@@ -471,7 +471,7 @@ uses {$if defined(Posix)}
 {    Generics.Defaults,
      Generics.Collections;}
 
-const RNL_VERSION='1.00.2017.12.06.03.41.0000';
+const RNL_VERSION='1.00.2017.12.06.03.55.0000';
 
 type PPRNLInt8=^PRNLInt8;
      PRNLInt8=^TRNLInt8;
@@ -11095,7 +11095,7 @@ begin
 
   if assigned(aEvent) then begin
 {$ifdef fpc}
-   case WaitForSingleObject(TRNLPtrInt(aEvent.Handle),TimeOut) of
+   case WaitForSingleObject(THandle(pointer(aEvent.Handle)^),TimeOut) of
     WSA_WAIT_EVENT_0:begin
      result:=0;
     end;
@@ -11225,7 +11225,11 @@ begin
   end;
 
   if assigned(aEvent) then begin
-   Events[CountEvents]:=TRNLPtrInt(aEvent.Handle);
+{$ifdef fpc}
+   Events[CountEvents]:=THandle(pointer(aEvent.Handle)^);
+{$else}
+   Events[CountEvents]:=aEvent.Handle;
+{$endif}
    inc(CountEvents);
   end;
 
