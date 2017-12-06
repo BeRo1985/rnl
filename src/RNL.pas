@@ -10746,7 +10746,7 @@ end;
 
 function TRNLMessage.GetDataAsString:TRNLString;
 begin
- result:={$ifdef fpc}UTF8Decode{$else}UTF8ToString{$endif}(GetDataAsUTF8String);
+ result:=TRNLString({$ifdef fpc}UTF8Decode{$else}UTF8ToString{$endif}(GetDataAsUTF8String));
 end;
 
 var CRC32CTable:array[0..7,TRNLUInt8] of TRNLUInt32;
@@ -11094,7 +11094,8 @@ begin
  if aCount=0 then begin
 
   if assigned(aEvent) then begin
-   case WaitForSingleObject(aEvent.Handle,TimeOut) of
+{$ifdef fpc}
+   case WaitForSingleObject(TRNLPtrInt(aEvent.Handle),TimeOut) of
     WSA_WAIT_EVENT_0:begin
      result:=0;
     end;
@@ -11108,6 +11109,22 @@ begin
      result:=-1;
     end;
    end;
+{$else}
+   case aEvent.WaitFor(TimeOut) of
+    wrSignaled:begin
+     result:=0;
+    end;
+    wrTimeout:begin
+     result:=0;
+    end;
+    wrIOCompletion:begin
+     result:=0;
+    end;
+    else {wrAbandoned,wrError:}begin
+     result:=-1;
+    end;
+   end;
+{$endif}
   end else begin
    if SleepEx(TimeOut,true)=0 then begin
     result:=0;
@@ -11208,7 +11225,7 @@ begin
   end;
 
   if assigned(aEvent) then begin
-   Events[CountEvents]:=aEvent.Handle;
+   Events[CountEvents]:=TRNLPtrInt(aEvent.Handle);
    inc(CountEvents);
   end;
 
@@ -11816,6 +11833,8 @@ type TPollFDs=array[0..63] of TRNLRealNetworkPollFD;
 var Index,SubIndex,Found,CountPollFDs,PollCount:TRNLInt32;
     PollFDs:TPollFDs;
 begin
+
+ PollFDs[0].events:=0;
 
  CountPollFDs:=0;
 
