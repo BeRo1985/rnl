@@ -471,7 +471,7 @@ uses {$if defined(Posix)}
 {    Generics.Defaults,
      Generics.Collections;}
 
-const RNL_VERSION='1.00.2017.12.06.08.16.0000';
+const RNL_VERSION='1.00.2017.12.06.19.24.0000';
 
 type PPRNLInt8=^PRNLInt8;
      PRNLInt8=^TRNLInt8;
@@ -2493,6 +2493,23 @@ type PRNLVersion=^TRNLVersion;
        RNL_NETWORK_SEND_RESULT_BANDWIDTH_RATE_LIMITER_DROP
       );
 
+     TRNLNetworkEvent=class
+      private
+{$ifdef Windows}
+       fEvent:THandle;
+{$else}
+       fEventLock:TCriticalSection;
+       fEventPipeFDs:{$ifdef fpc}TFilDes{$else}array[0..1] of TRNLInt32{$endif};
+{$endif}
+      public
+       constructor Create; reintroduce;
+       destructor Destroy; override;
+       procedure SetEvent;
+       procedure ResetEvent;
+       function WaitFor(const aTimeOut:TRNLInt64):TWaitResult;
+       class function WaitForMultipleEvents(const aEvents:array of TRNLNetworkEvent;const aTimeOut:TRNLInt64):TRNLInt32; static;
+     end;
+
      TRNLNetwork=class
       private
        fInstance:TRNLInstance;
@@ -2512,9 +2529,8 @@ type PRNLVersion=^TRNLVersion;
        function SocketListen(const aSocket:TRNLSocket;const aBackLog:TRNLInt32):boolean; virtual;
        function SocketConnect(const aSocket:TRNLSocket;const aAddress:TRNLAddress;const aFamily:TRNLAddressFamily):boolean; virtual;
        function SocketAccept(const aSocket:TRNLSocket;const aAddress:PRNLAddress;const aFamily:TRNLAddressFamily):TRNLSocket; virtual;
-       function SocketSelect(const aMaxSocket:TRNLSocket;var aReadSet,aWriteSet:TRNLSocketSet;const aTimeout:TRNLTime):TRNLInt32; virtual;
-       function SocketWait(const aSockets:array of TRNLSocket;var aConditions:TRNLSocketWaitConditions;const aTimeout:TRNLTime):boolean; virtual;
-       procedure InterruptWait; virtual;
+       function SocketSelect(const aMaxSocket:TRNLSocket;var aReadSet,aWriteSet:TRNLSocketSet;const aTimeout:TRNLTime;const aEvent:TRNLNetworkEvent=nil):TRNLInt32; virtual;
+       function SocketWait(const aSockets:array of TRNLSocket;var aConditions:TRNLSocketWaitConditions;const aTimeout:TRNLTime;const aEvent:TRNLNetworkEvent=nil):boolean; virtual;
        function Send(const aSocket:TRNLSocket;const aAddress:PRNLAddress;const aData;const aDataLength:TRNLSizeInt;const aFamily:TRNLAddressFamily):TRNLSizeInt; virtual;
        function Receive(const aSocket:TRNLSocket;const aAddress:PRNLAddress;out aData;const aDataLength:TRNLSizeInt;const aFamily:TRNLAddressFamily):TRNLSizeInt; virtual;
       published
@@ -2536,12 +2552,9 @@ type PRNLVersion=^TRNLVersion;
             PRNLRealNetworkPollFDs=^TRNLRealNetworkPollFDs;
             TRNLRealNetworkPollFDs=array[0..65535] of TRNLRealNetworkPollFD;
       private
-       fEvent:THandle;
-       function EmulatePoll(const aPollFDs:PRNLRealNetworkPollFDs;const aCount:TRNLSizeInt;const aTimeOut:TRNLInt64;const aEvent:THandle=0):TRNLInt32;
+       function EmulatePoll(const aPollFDs:PRNLRealNetworkPollFDs;const aCount:TRNLSizeInt;const aTimeOut:TRNLInt64;const aEvent:TRNLNetworkEvent=nil):TRNLInt32;
 {$else}
       private
-       fEventLock:TCriticalSection;
-       fEventPipeFDs:{$ifdef fpc}TFilDes{$else}array[0..1] of TRNLInt32{$endif};
 {$endif}
        class procedure GlobalInitialize;
        class procedure GlobalFinalize;
@@ -2561,9 +2574,8 @@ type PRNLVersion=^TRNLVersion;
        function SocketListen(const aSocket:TRNLSocket;const aBackLog:TRNLInt32):boolean; override;
        function SocketConnect(const aSocket:TRNLSocket;const aAddress:TRNLAddress;const aFamily:TRNLAddressFamily):boolean; override;
        function SocketAccept(const aSocket:TRNLSocket;const aAddress:PRNLAddress;const aFamily:TRNLAddressFamily):TRNLSocket; override;
-       function SocketSelect(const aMaxSocket:TRNLSocket;var aReadSet,aWriteSet:TRNLSocketSet;const aTimeout:TRNLTime):TRNLInt32; override;
-       function SocketWait(const aSockets:array of TRNLSocket;var aConditions:TRNLSocketWaitConditions;const aTimeout:TRNLTime):boolean; override;
-       procedure InterruptWait; override;
+       function SocketSelect(const aMaxSocket:TRNLSocket;var aReadSet,aWriteSet:TRNLSocketSet;const aTimeout:TRNLTime;const aEvent:TRNLNetworkEvent=nil):TRNLInt32; override;
+       function SocketWait(const aSockets:array of TRNLSocket;var aConditions:TRNLSocketWaitConditions;const aTimeout:TRNLTime;const aEvent:TRNLNetworkEvent=nil):boolean; override;
        function Send(const aSocket:TRNLSocket;const aAddress:PRNLAddress;const aData;const aDataLength:TRNLSizeInt;const aFamily:TRNLAddressFamily):TRNLSizeInt; override;
        function Receive(const aSocket:TRNLSocket;const aAddress:PRNLAddress;out aData;const aDataLength:TRNLSizeInt;const aFamily:TRNLAddressFamily):TRNLSizeInt; override;
      end;
@@ -2598,8 +2610,7 @@ type PRNLVersion=^TRNLVersion;
             TRNLVirtualNetworkSocketInstanceHashMap=array[0..RNL_VIRTUAL_NETWORK_SOCKET_HASH_SIZE-1] of TRNLVirtualNetworkSocketInstanceListNode;
       private
        fLock:TCriticalSection;
-       fInterruptWaitState:TRNLInt32;
-       fNewDataEvent:TEvent;
+       fNewDataEvent:TRNLNetworkEvent;
        fSocketCounter:TRNLSocket;
        fFreeSockets:TRNLVirtualNetworkSocketStack;
        fSocketInstanceList:TRNLVirtualNetworkSocketInstanceListNode;
@@ -2625,9 +2636,8 @@ type PRNLVersion=^TRNLVersion;
        function SocketListen(const aSocket:TRNLSocket;const aBackLog:TRNLInt32):boolean; override;
        function SocketConnect(const aSocket:TRNLSocket;const aAddress:TRNLAddress;const aFamily:TRNLAddressFamily):boolean; override;
        function SocketAccept(const aSocket:TRNLSocket;const aAddress:PRNLAddress;const aFamily:TRNLAddressFamily):TRNLSocket; override;
-       function SocketSelect(const aMaxSocket:TRNLSocket;var aReadSet,aWriteSet:TRNLSocketSet;const aTimeout:TRNLTime):TRNLInt32; override;
-       function SocketWait(const aSockets:array of TRNLSocket;var aConditions:TRNLSocketWaitConditions;const aTimeout:TRNLTime):boolean; override;
-       procedure InterruptWait; override;
+       function SocketSelect(const aMaxSocket:TRNLSocket;var aReadSet,aWriteSet:TRNLSocketSet;const aTimeout:TRNLTime;const aEvent:TRNLNetworkEvent=nil):TRNLInt32; override;
+       function SocketWait(const aSockets:array of TRNLSocket;var aConditions:TRNLSocketWaitConditions;const aTimeout:TRNLTime;const aEvent:TRNLNetworkEvent=nil):boolean; override;
        function Send(const aSocket:TRNLSocket;const aAddress:PRNLAddress;const aData;const aDataLength:TRNLSizeInt;const aFamily:TRNLAddressFamily):TRNLSizeInt; override;
        function Receive(const aSocket:TRNLSocket;const aAddress:PRNLAddress;out aData;const aDataLength:TRNLSizeInt;const aFamily:TRNLAddressFamily):TRNLSizeInt; override;
      end;
@@ -2696,9 +2706,8 @@ type PRNLVersion=^TRNLVersion;
        function SocketListen(const aSocket:TRNLSocket;const aBackLog:TRNLInt32):boolean; override;
        function SocketConnect(const aSocket:TRNLSocket;const aAddress:TRNLAddress;const aFamily:TRNLAddressFamily):boolean; override;
        function SocketAccept(const aSocket:TRNLSocket;const aAddress:PRNLAddress;const aFamily:TRNLAddressFamily):TRNLSocket; override;
-       function SocketSelect(const aMaxSocket:TRNLSocket;var aReadSet,aWriteSet:TRNLSocketSet;const aTimeout:TRNLTime):TRNLInt32; override;
-       function SocketWait(const aSockets:array of TRNLSocket;var aConditions:TRNLSocketWaitConditions;const aTimeout:TRNLTime):boolean; override;
-       procedure InterruptWait; override;
+       function SocketSelect(const aMaxSocket:TRNLSocket;var aReadSet,aWriteSet:TRNLSocketSet;const aTimeout:TRNLTime;const aEvent:TRNLNetworkEvent=nil):TRNLInt32; override;
+       function SocketWait(const aSockets:array of TRNLSocket;var aConditions:TRNLSocketWaitConditions;const aTimeout:TRNLTime;const aEvent:TRNLNetworkEvent=nil):boolean; override;
        function Send(const aSocket:TRNLSocket;const aAddress:PRNLAddress;const aData;const aDataLength:TRNLSizeInt;const aFamily:TRNLAddressFamily):TRNLSizeInt; override;
        function Receive(const aSocket:TRNLSocket;const aAddress:PRNLAddress;out aData;const aDataLength:TRNLSizeInt;const aFamily:TRNLAddressFamily):TRNLSizeInt; override;
       published
@@ -3377,6 +3386,8 @@ type PRNLVersion=^TRNLVersion;
        fInstance:TRNLInstance;
 
        fNetwork:TRNLNetwork;
+
+       fNetworkEvent:TRNLNetworkEvent;
 
        fRandomGenerator:TRNLRandomGenerator;
 
@@ -10895,6 +10906,345 @@ begin
  inherited Destroy;
 end;
 
+constructor TRNLNetworkEvent.Create;
+{$if not defined(Windows)}
+var t:TRNLInt32;
+{$ifend}
+begin
+ inherited Create;
+{$if defined(Windows)}
+ fEvent:=CreateEvent(nil,false,false,'');
+{$else}
+ fEventLock:=TCriticalSection.Create;
+ fEventPipeFDs[0]:=-1;
+ fEventPipeFDs[1]:=-1;
+{$if defined(fpc)}
+ if fppipe(fEventPipeFDs)<0 then begin
+  raise ERNLRealNetwork.Create('Pipe error');
+ end;
+ try
+  t:=fpfcntl(fEventPipeFDs[0],F_GETFL);
+  if t<0 then begin
+   raise ERNLRealNetwork.Create('Pipe error');
+  end;
+  fpfcntl(fEventPipeFDs[0],F_SETFL,t or O_NONBLOCK);
+  t:=fpfcntl(fEventPipeFDs[1],F_GETFL);
+  if t<0 then begin
+   raise ERNLRealNetwork.Create('Pipe error');
+  end;
+  fpfcntl(fEventPipeFDs[1],F_SETFL,t or O_NONBLOCK);
+ except
+  on e:ERNLRealNetwork do begin
+   fpclose(fEventPipeFDs[0]);
+   fpclose(fEventPipeFDs[1]);
+   fEventPipeFDs[0]:=-1;
+   fEventPipeFDs[1]:=-1;
+   raise;
+  end;
+ end;
+{$else}
+ if pipe(@fEventPipeFDs)<0 then begin
+  raise ERNLRealNetwork.Create('Pipe error');
+ end;
+ try
+  t:=fcntl(fEventPipeFDs[0],F_GETFL);
+  if t<0 then begin
+   raise ERNLRealNetwork.Create('Pipe error');
+  end;
+  fcntl(fEventPipeFDs[0],F_SETFL,t or O_NONBLOCK);
+  t:=fcntl(fEventPipeFDs[1],F_GETFL);
+  if t<0 then begin
+   raise ERNLRealNetwork.Create('Pipe error');
+  end;
+  fcntl(fEventPipeFDs[1],F_SETFL,t or O_NONBLOCK);
+ except
+  on e:ERNLRealNetwork do begin
+   __close(fEventPipeFDs[0]);
+   __close(fEventPipeFDs[1]);
+   fEventPipeFDs[0]:=-1;
+   fEventPipeFDs[1]:=-1;
+   raise;
+  end;
+ end;
+{$ifend}
+{$ifend}
+end;
+
+destructor TRNLNetworkEvent.Destroy;
+begin
+{$if defined(Windows)}
+ CloseHandle(fEvent);
+{$else}
+{$if defined(fpc)}
+ if fEventPipeFDs[0]>=0 then begin
+  fpclose(fEventPipeFDs[0]);
+ end;
+ if fEventPipeFDs[1]>=0 then begin
+  fpclose(fEventPipeFDs[1]);
+ end;
+{$else}
+ if fEventPipeFDs[0]>=0 then begin
+  __close(fEventPipeFDs[0]);
+ end;
+ if fEventPipeFDs[1]>=0 then begin
+  __close(fEventPipeFDs[1]);
+ end;
+{$ifend}
+ fEventPipeFDs[0]:=-1;
+ fEventPipeFDs[1]:=-1;
+ FreeAndNil(fEventLock);
+{$ifend}
+ inherited Destroy;
+end;
+
+procedure TRNLNetworkEvent.SetEvent;
+{$if not defined(Windows)}
+const b:TRNLUInt8=1;
+var Count:TRNLSizeInt;
+{$ifend}
+begin
+{$if defined(Windows)}
+ Windows.SetEvent(fEvent);
+{$else}
+ fEventLock.Acquire;
+ try
+{$ifdef fpc}
+  if (fpioctl(fEventPipeFDs[0],FIONREAD,@Count)=0) and (Count=0) then begin
+   fpwrite(fEventPipeFDs[1],b,SizeOf(TRNLUInt8));
+  end;
+{$else}
+  if (ioctl(fEventPipeFDs[0],FIONREAD,@Count)=0) and (Count=0) then begin
+   __write(fEventPipeFDs[1],@b,SizeOf(TRNLUInt8));
+  end;
+{$endif}
+ finally
+  fEventLock.Release;
+ end;
+{$ifend}
+end;
+
+procedure TRNLNetworkEvent.ResetEvent;
+{$if not defined(Windows)}
+var b:TRNLUInt8;
+    Count:TRNLSizeInt;
+{$ifend}
+begin
+{$if defined(Windows)}
+ Windows.ResetEvent(fEvent);
+{$else}
+ fEventLock.Acquire;
+ try
+{$ifdef fpc}
+  if (fpioctl(fEventPipeFDs[0],FIONREAD,@Count)=0) and (Count>0) then begin
+   fpread(fEventPipeFDs[0],b,SizeOf(TRNLUInt8));
+  end;
+{$else}
+  if (ioctl(fEventPipeFDs[0],FIONREAD,@Count)=0) and (Count>0) then begin
+   __read(fEventPipeFDs[0],@b,SizeOf(TRNLUInt8));
+  end;
+{$endif}
+ finally
+  fEventLock.Release;
+ end;
+{$ifend}
+end;
+
+function TRNLNetworkEvent.WaitFor(const aTimeOut:TRNLInt64):TWaitResult;
+{$if defined(Windows)}
+var TimeOut:TRNLUInt32;
+begin
+ if aTimeOut>=0 then begin
+  TimeOut:=aTimeOut;
+ end else begin
+  TimeOut:=INFINITE;
+ end;
+ if TimeOut>0 then begin
+  case WaitForSingleObject(fEvent,TimeOut) of
+   WAIT_OBJECT_0:begin
+    result:=wrSignaled;
+   end;
+   WAIT_TIMEOUT:begin
+    result:=wrTimeOut;
+   end;
+{$ifndef fpc}
+   WAIT_IO_COMPLETION:begin
+    result:=wrIOCompletion;
+   end;
+{$endif}
+   else {WAIT_FAILED:}begin
+    result:=wrError;
+   end;
+  end;
+ end;
+end;
+{$else}
+var tv:{$if defined(Windows)}TTimeVal{$elseif defined(fpc)}TTimeVal{$else}TimeVal{$ifend};
+    ReadSet,WriteSet:TRNLSocketSet;
+    t:pointer;
+    r:TRNLSizeInt;
+begin
+ if aTimeOut<0 then begin
+  t:=nil;
+ end else begin
+  tv.tv_sec:=aTimeout div 1000;
+  tv.tv_usec:=(aTimeout mod 1000)*1000;
+  t:=@tv;
+ end;
+{$if defined(Posix)}
+  __fd_zero(ReadSet);
+  __fd_zero(WriteSet);
+  __fd_set(fEventPipeFDs[0],ReadSet);
+{$elseif defined(Unix)}
+  füFD_ZERO(ReadSet);
+  fpFD_ZERO(WriteSet);
+  fpFD_SET(fEventPipeFDs[0],ReadSet);
+{$else}
+  FD_ZERO(ReadSet);
+  FD_ZERO(WriteSet);
+  FD_SET(fEventPipeFDs[0],ReadSet);
+{$ifend}
+{$if defined(fpc)}
+ r:=fpselect(fEventPipeFDs[0]+1,@ReadSet,@WriteSet,nil,t);
+{$else}
+ r:=Posix.SysSelect.select(fEventPipeFDs[0]+1,@ReadSet,@WriteSet,nil,t);
+{$ifend}
+ if r<0 then begin
+  result:=wrError;
+  exit;
+ end;
+ if {$if defined(Windows)}FD_ISSET(fEventPipeFDs[0],ReadSet)
+    {$elseif defined(fpc)}
+     fpFD_ISSET(fEventPipeFDs[0],ReadSet)=1
+    {$else}
+     __fd_isset(fEventPipeFDs[0],ReadSet)
+    {$ifend} then begin
+  ResetEvent;
+ end;
+ result:=wrTimeOut;
+end;
+{$ifend}
+
+class function TRNLNetworkEvent.WaitForMultipleEvents(const aEvents:array of TRNLNetworkEvent;const aTimeOut:TRNLInt64):TRNLInt32;
+{$if defined(Windows)}
+var TimeOut:TRNLUInt32;
+    r:TRNLInt32;
+    Events:array of THandle;
+    Index:TRNLSizeInt;
+begin
+ if aTimeOut>=0 then begin
+  TimeOut:=aTimeOut;
+ end else begin
+  TimeOut:=INFINITE;
+ end;
+ if TimeOut>0 then begin
+  if length(aEvents)>0 then begin
+   Events:=nil;
+   try
+    SetLength(Events,length(aEvents));
+    for Index:=0 to length(aEvents)-1 do begin
+     Events[Index]:=aEvents[Index].fEvent;
+    end;
+    r:=WaitForMultipleObjects(length(Events),@Events[0],false,TimeOut);
+    case r of
+     WAIT_OBJECT_0..WAIT_OBJECT_0+$7f:begin
+      result:=r-WAIT_OBJECT_0;
+     end;
+     WAIT_TIMEOUT:begin
+      result:=-1;
+     end;
+{$ifndef fpc}
+     WAIT_IO_COMPLETION:begin
+      result:=-2;
+     end;
+{$endif}
+     else {WAIT_FAILED:}begin
+      result:=-3;
+     end;
+    end;
+   finally
+    Events:=nil;
+   end;
+  end else begin
+   if SleepEx(TimeOut,true)=0 then begin
+    result:=-1;
+   end else begin
+{$ifdef fpc}
+    result:=-1;
+{$else}
+    result:=-2;
+{$endif}
+   end;
+  end;
+ end;
+end;
+{$else}
+var tv:{$if defined(Windows)}TTimeVal{$elseif defined(fpc)}TTimeVal{$else}TimeVal{$ifend};
+    ReadSet,WriteSet:TRNLSocketSet;
+    t:pointer;
+    Index,r:TRNLSizeInt;
+    MaxFD:TRNLInt32;
+begin
+ if aTimeOut<0 then begin
+  t:=nil;
+ end else begin
+  tv.tv_sec:=aTimeout div 1000;
+  tv.tv_usec:=(aTimeout mod 1000)*1000;
+  t:=@tv;
+ end;
+ MaxFD:=0;
+{$if defined(Posix)}
+  __fd_zero(ReadSet);
+  __fd_zero(WriteSet);
+  for Index:=0 to length(aEvents)-1 do begin
+   __fd_set(aEvents[Index].fEventPipeFDs[0],ReadSet);
+   MaxFD:=Max(MaxFD,aEvents[Index].fEventPipeFDs[0]);
+  end;
+{$elseif defined(Unix)}
+  füFD_ZERO(ReadSet);
+  fpFD_ZERO(WriteSet);
+  for Index:=0 to length(aEvents)-1 do begin
+   fpFD_SET(aEvents[Index].fEventPipeFDs[0],ReadSet);
+   MaxFD:=Max(MaxFD,aEvents[Index].fEventPipeFDs[0]);
+  end;
+{$else}
+  FD_ZERO(ReadSet);
+  FD_ZERO(WriteSet);
+  for Index:=0 to length(aEvents)-1 do begin
+   FD_SET(aEvents[Index].fEventPipeFDs[0],ReadSet);
+   MaxFD:=Max(MaxFD,aEvents[Index].fEventPipeFDs[0]);
+  end;
+{$ifend}
+{$if defined(fpc)}
+ r:=fpselect(MaxFD+1,@ReadSet,@WriteSet,nil,t);
+{$else}
+ r:=Posix.SysSelect.select(MaxFD+1,@ReadSet,@WriteSet,nil,t);
+{$ifend}
+ if r<0 then begin
+  if errno={$ifdef fpc}ESysEINTR{$else}EINTR{$endif} then begin
+   result:=-2;
+  end else begin
+   result:=-3;
+  end;
+ end;
+ result:=-1;
+ if r>0 then begin
+  for Index:=0 to length(aEvents)-1 do begin
+   if {$if defined(Windows)}FD_ISSET(aEvents[Index].fEventPipeFDs[0],ReadSet)
+      {$elseif defined(fpc)}
+       fpFD_ISSET(aEvents[Index].fEventPipeFDs[0],ReadSet)=1
+      {$else}
+       __fd_isset(aEvents[Index].fEventPipeFDs[0],ReadSet)
+      {$ifend} then begin
+    aEvents[Index].ResetEvent;
+    if result<0 then begin
+     result:=Index;
+    end;
+   end;
+  end;
+ end;
+end;
+{$ifend}
+
 constructor TRNLNetwork.Create(const aInstance:TRNLInstance);
 begin
  inherited Create;
@@ -10970,19 +11320,15 @@ begin
  result:=RNL_SOCKET_NULL;
 end;
 
-function TRNLNetwork.SocketSelect(const aMaxSocket:TRNLSocket;var aReadSet,aWriteSet:TRNLSocketSet;const aTimeout:TRNLTime):TRNLInt32;
+function TRNLNetwork.SocketSelect(const aMaxSocket:TRNLSocket;var aReadSet,aWriteSet:TRNLSocketSet;const aTimeout:TRNLTime;const aEvent:TRNLNetworkEvent=nil):TRNLInt32;
 begin
  result:=-1;
 end;
 
-function TRNLNetwork.SocketWait(const aSockets:array of TRNLSocket;var aConditions:TRNLSocketWaitConditions;const aTimeout:TRNLTime):boolean;
+function TRNLNetwork.SocketWait(const aSockets:array of TRNLSocket;var aConditions:TRNLSocketWaitConditions;const aTimeout:TRNLTime;const aEvent:TRNLNetworkEvent=nil):boolean;
 begin
  aConditions:=[];
  result:=false;
-end;
-
-procedure TRNLNetwork.InterruptWait;
-begin
 end;
 
 function TRNLNetwork.Send(const aSocket:TRNLSocket;const aAddress:PRNLAddress;const aData;const aDataLength:TRNLSizeInt;const aFamily:TRNLAddressFamily):TRNLSizeInt;
@@ -10996,81 +11342,16 @@ begin
 end;
 
 constructor TRNLRealNetwork.Create(const aInstance:TRNLInstance);
-{$if not defined(Windows)}
-var t:TRNLInt32;
-{$ifend}
 begin
  if RNLNetworkInitializationReferenceCounter=0 then begin
   GlobalInitialize;
   inc(RNLNetworkInitializationReferenceCounter);
  end;
  inherited Create(aInstance);
-{$if defined(Windows)}
- fEvent:=CreateEvent(nil,false,false,'');
-{$else}
- fEventLock:=TCriticalSection.Create;
-{$if defined(fpc)}
- if fppipe(fEventPipeFDs)<0 then begin
-  raise ERNLRealNetwork.Create('Pipe error');
- end;
- try
-  t:=fpfcntl(fEventPipeFDs[0],F_GETFL);
-  if t<0 then begin
-   raise ERNLRealNetwork.Create('Pipe error');
-  end;
-  fpfcntl(fEventPipeFDs[0],F_SETFL,t or O_NONBLOCK);
-  t:=fpfcntl(fEventPipeFDs[1],F_GETFL);
-  if t<0 then begin
-   raise ERNLRealNetwork.Create('Pipe error');
-  end;
-  fpfcntl(fEventPipeFDs[1],F_SETFL,t or O_NONBLOCK);
- except
-  on e:ERNLRealNetwork do begin
-   fpclose(fEventPipeFDs[0]);
-   fpclose(fEventPipeFDs[1]);
-   raise;
-  end;
- end;
-{$else}
- if pipe(@fEventPipeFDs)<0 then begin
-  raise ERNLRealNetwork.Create('Pipe error');
- end;
- try
-  t:=fcntl(fEventPipeFDs[0],F_GETFL);
-  if t<0 then begin
-   raise ERNLRealNetwork.Create('Pipe error');
-  end;
-  fcntl(fEventPipeFDs[0],F_SETFL,t or O_NONBLOCK);
-  t:=fcntl(fEventPipeFDs[1],F_GETFL);
-  if t<0 then begin
-   raise ERNLRealNetwork.Create('Pipe error');
-  end;
-  fcntl(fEventPipeFDs[1],F_SETFL,t or O_NONBLOCK);
- except
-  on e:ERNLRealNetwork do begin
-   __close(fEventPipeFDs[0]);
-   __close(fEventPipeFDs[1]);
-   raise;
-  end;
- end;
-{$ifend}
-{$ifend}
 end;
 
 destructor TRNLRealNetwork.Destroy;
 begin
-{$if defined(Windows)}
- CloseHandle(fEvent);
-{$else}
-{$if defined(fpc)}
- fpclose(fEventPipeFDs[0]);
- fpclose(fEventPipeFDs[1]);
-{$else}
- __close(fEventPipeFDs[0]);
- __close(fEventPipeFDs[1]);
-{$ifend}
- FreeAndNil(fEventLock);
-{$ifend}
  inherited Destroy;
  if RNLNetworkInitializationReferenceCounter>0 then begin
   dec(RNLNetworkInitializationReferenceCounter);
@@ -11081,7 +11362,7 @@ begin
 end;
 
 {$ifdef Windows}
-function TRNLRealNetwork.EmulatePoll(const aPollFDs:PRNLRealNetworkPollFDs;const aCount:TRNLSizeInt;const aTimeOut:TRNLInt64;const AEvent:THandle=0):TRNLInt32;
+function TRNLRealNetwork.EmulatePoll(const aPollFDs:PRNLRealNetworkPollFDs;const aCount:TRNLSizeInt;const aTimeOut:TRNLInt64;const AEvent:TRNLNetworkEvent=nil):TRNLInt32;
 var TimeOut,Mask,CountEvents,LastResult:TRNLUInt32;
     Events:TRNLRealNetworkHandles;
     Count,Index:TRNLSizeInt;
@@ -11101,8 +11382,8 @@ begin
 
  if aCount=0 then begin
 
-  if aEvent<>0 then begin
-   case WaitForSingleObject(aEvent,TimeOut) of
+  if assigned(aEvent) then begin
+   case WaitForSingleObject(aEvent.fEvent,TimeOut) of
     WSA_WAIT_EVENT_0:begin
      result:=0;
     end;
@@ -11131,7 +11412,7 @@ begin
  Events:=nil;
  try
 
-  if aEvent<>0 then begin
+  if assigned(aEvent) then begin
    SetLength(Events,aCount+1);
   end else begin
    SetLength(Events,aCount);
@@ -11215,8 +11496,8 @@ begin
 
   end;
 
-  if aEvent<>0 then begin
-   Events[CountEvents]:=aEvent;
+  if assigned(aEvent) then begin
+   Events[CountEvents]:=aEvent.fEvent;
    inc(CountEvents);
   end;
 
@@ -11816,7 +12097,7 @@ begin
  end;
 end;
 
-function TRNLRealNetwork.SocketSelect(const aMaxSocket:TRNLSocket;var aReadSet,aWriteSet:TRNLSocketSet;const aTimeout:TRNLTime):TRNLInt32;
+function TRNLRealNetwork.SocketSelect(const aMaxSocket:TRNLSocket;var aReadSet,aWriteSet:TRNLSocketSet;const aTimeout:TRNLTime;const aEvent:TRNLNetworkEvent=nil):TRNLInt32;
 {$if defined(Windows)}
 // Under Windows, we use the self-simulated POSIX-style poll function,
 // so that we can also wait on an event additionally, if needed
@@ -11868,7 +12149,7 @@ begin
  FD_ZERO(aReadSet);
  FD_ZERO(aWriteSet);
 
- PollCount:=EmulatePoll(@PollFDs[0],CountPollFDs,aTimeout.fValue,fEvent);
+ PollCount:=EmulatePoll(@PollFDs[0],CountPollFDs,aTimeout.fValue,aEvent);
 
  if PollCount<0 then begin
   if PollCount=-3 then begin
@@ -11896,59 +12177,58 @@ begin
 end;
 {$else}
 var tv:{$if defined(Windows)}TTimeVal{$elseif defined(fpc)}TTimeVal{$else}TimeVal{$ifend};
+    t:pointer;
 {$if not defined(Windows)}
     b:TRNLUInt8;
     ReadSet,WriteSet:TRNLSocketSet;
     Count:TRNLInt32;
 {$ifend}
 begin
- tv.tv_sec:=aTimeout div 1000;
- tv.tv_usec:=(aTimeout mod 1000)*1000;
+ if aTimeout.fValue<0 then begin
+  t:=nil;
+ end else begin
+  tv.tv_sec:=aTimeout div 1000;
+  tv.tv_usec:=(aTimeout mod 1000)*1000;
+  t:=@tv;
+ end;
 {$if defined(Windows)}
- result:=_select(aMaxSocket+1,@aReadSet,@aWriteSet,nil,@tv);
+ result:=_select(aMaxSocket+1,@aReadSet,@aWriteSet,nil,t);
 {$else}
- ReadSet:=aReadSet;
- WriteSet:=aWriteSet;
+ if assigned(aEvent) then begin
+  ReadSet:=aReadSet;
+  WriteSet:=aWriteSet;
 {$if defined(Posix)}
-  __fd_set(fEventPipeFDs[0],ReadSet);
+   __fd_set(aEvent.fEventPipeFDs[0],ReadSet);
 {$elseif defined(Unix)}
-  fpFD_SET(fEventPipeFDs[0],ReadSet);
+   fpFD_SET(aEvent.fEventPipeFDs[0],ReadSet);
 {$else}
-  FD_SET(fEventPipeFDs[0],ReadSet);
+   FD_SET(aEvent.fEventPipeFDs[0],ReadSet);
 {$ifend}
 {$if defined(fpc)}
- result:=fpselect(Max(fEventPipeFDs[0],aMaxSocket)+1,@ReadSet,@WriteSet,nil,@tv);
+  result:=fpselect(Max(aEvent.fEventPipeFDs[0],aMaxSocket)+1,@ReadSet,@WriteSet,nil,t);
 {$else}
- result:=Posix.SysSelect.select(Max(fEventPipeFDs[0],aMaxSocket)+1,@ReadSet,@WriteSet,nil,@tv);
+  result:=Posix.SysSelect.select(Max(aEvent.fEventPipeFDs[0],aMaxSocket)+1,@ReadSet,@WriteSet,nil,t);
 {$ifend}
- if fEventPipeFDs[0]<>0 then begin
-  if {$if defined(Windows)}FD_ISSET(fEventPipeFDs[0],aReadSet)
+  if {$if defined(Windows)}FD_ISSET(aEvent.fEventPipeFDs[0],ReadSet)
      {$elseif defined(fpc)}
-      fpFD_ISSET(fEventPipeFDs[0],aReadSet)=1
+      fpFD_ISSET(aEvent.fEventPipeFDs[0],ReadSet)=1
      {$else}
-      __fd_isset(fEventPipeFDs[0],aReadSet)
+      __fd_isset(aEvent.fEventPipeFDs[0],ReadSet)
      {$ifend} then begin
-   fEventLock.Acquire;
-   try
-{$ifdef fpc}
-    if (fpioctl(fEventPipeFDs[0],FIONREAD,@Count)=0) and (Count>0) then begin
-     fpread(fEventPipeFDs[0],b,SizeOf(TRNLUInt8));
-    end;
-{$else}
-    if (ioctl(fEventPipeFDs[0],FIONREAD,@Count)=0) and (Count>0) then begin
-     __read(fEventPipeFDs[0],@b,SizeOf(TRNLUInt8));
-    end;
-{$endif}
-   finally
-    fEventLock.Release;
-   end;
+   aEvent.ResetEvent;
   end;
+ end else begin
+{$if defined(fpc)}
+  result:=fpselect(aMaxSocket+1,@aReadSet,@aWriteSet,nil,t);
+{$else}
+  result:=Posix.SysSelect.select(aMaxSocket+1,@aReadSet,@aWriteSet,nil,t);
+{$ifend}
  end;
 {$ifend}
 end;
 {$ifend}
 
-function TRNLRealNetwork.SocketWait(const aSockets:array of TRNLSocket;var aConditions:TRNLSocketWaitConditions;const aTimeout:TRNLTime):boolean;
+function TRNLRealNetwork.SocketWait(const aSockets:array of TRNLSocket;var aConditions:TRNLSocketWaitConditions;const aTimeout:TRNLTime;const aEvent:TRNLNetworkEvent=nil):boolean;
 {$if defined(Windows)}
 // Under Windows, we do simulate the POSIX-style poll function ourself,
 // so that we can also wait on an event additionally, if needed
@@ -11974,7 +12254,7 @@ begin
   end;
  end;
 
- PollCount:=EmulatePoll(@PollFDs[0],CountPollFDs,aTimeout.fValue,fEvent);
+ PollCount:=EmulatePoll(@PollFDs[0],CountPollFDs,aTimeout.fValue,aEvent);
 
  if PollCount<0 then begin
   if (RNL_SOCKET_WAIT_CONDITION_SERVICE_INTERRUPT in aConditions) and (PollCount=(-3)) then begin
@@ -12146,15 +12426,23 @@ begin
 
 {$else}
 
+ if assigned(aEvent) then begin
+
 {$if defined(Posix)}
- __fd_set(fEventPipeFDs[0],ReadSet);
+  __fd_set(aEvent.fEventPipeFDs[0],ReadSet);
 {$elseif defined(Unix)}
- fpFD_SET(fEventPipeFDs[0],ReadSet);
+  fpFD_SET(aEvent.fEventPipeFDs[0],ReadSet);
 {$else}
- FD_SET(fEventPipeFDs[0],ReadSet);
+  FD_SET(aEvent.fEventPipeFDs[0],ReadSet);
 {$ifend}
 
- MaxSocket:=fEventPipeFDs[0];
+  MaxSocket:=aEvent.fEventPipeFDs[0];
+
+ end else begin
+
+  MaxSocket:=0;
+
+ end;
 
 {$ifend}
 
@@ -12200,32 +12488,16 @@ begin
  end;
 
 {$if not defined(Windows)}
- if fEventPipeFDs[0]<>0 then begin
-  if {$if defined(Windows)}FD_ISSET(fEventPipeFDs[0],ReadSet)
+ if assigned(aEvent) then begin
+  if {$if defined(Windows)}FD_ISSET(aEvent.fEventPipeFDs[0],ReadSet)
      {$elseif defined(fpc)}
-      fpFD_ISSET(fEventPipeFDs[0],ReadSet)=1
+      fpFD_ISSET(aEvent.fEventPipeFDs[0],ReadSet)=1
      {$else}
-      __fd_isset(fEventPipeFDs[0],ReadSet)
+      __fd_isset(aEvent.fEventPipeFDs[0],ReadSet)
      {$ifend} then begin
-   fEventLock.Acquire;
-   try
-{$ifdef fpc}
-    if (fpioctl(fEventPipeFDs[0],FIONREAD,@Count)=0) and (Count>0) then begin
-     fpread(fEventPipeFDs[0],b,SizeOf(TRNLUInt8));
-     if ServiceInterrupt then begin
-      Include(aConditions,RNL_SOCKET_WAIT_CONDITION_SERVICE_INTERRUPT);
-     end;
-    end;
-{$else}
-    if (ioctl(fEventPipeFDs[0],FIONREAD,@Count)=0) and (Count>0) then begin
-     __read(fEventPipeFDs[0],@b,SizeOf(TRNLUInt8));
-     if ServiceInterrupt then begin
-      Include(aConditions,RNL_SOCKET_WAIT_CONDITION_SERVICE_INTERRUPT);
-     end;
-    end;
-{$endif}
-   finally
-    fEventLock.Release;
+   aEvent.ResetEvent;
+   if ServiceInterrupt then begin
+    Include(aConditions,RNL_SOCKET_WAIT_CONDITION_SERVICE_INTERRUPT);
    end;
   end;
  end;
@@ -12255,32 +12527,6 @@ begin
  result:=true;
 end;
 {$ifend}
-
-procedure TRNLRealNetwork.InterruptWait;
-{$if not defined(Windows)}
-const b:TRNLUInt8=1;
-var Count:TRNLINt32;
-{$ifend}
-begin
-{$if defined(Windows)}
- WSASetEvent(fEvent);
-{$else}
- fEventLock.Acquire;
- try
-{$if defined(fpc)}
-  if (fpioctl(fEventPipeFDs[0],FIONREAD,@Count)=0) and (Count=0) then begin
-   fpwrite(fEventPipeFDs[1],b,SizeOf(TRNLUInt8));
-  end;
-{$else}
-  if (ioctl(fEventPipeFDs[0],FIONREAD,@Count)=0) and (Count=0) then begin
-   __write(fEventPipeFDs[1],@b,SizeOf(TRNLUInt8));
-  end;
-{$ifend}
- finally
-  fEventLock.Release;
- end;
-{$ifend}
-end;
 
 function TRNLRealNetwork.Send(const aSocket:TRNLSocket;const aAddress:PRNLAddress;const aData;const aDataLength:TRNLSizeInt;const aFamily:TRNLAddressFamily):TRNLSizeInt;
 {$if defined(Windows)}
@@ -12518,9 +12764,7 @@ begin
 
  fLock:=TCriticalSection.Create;
 
- fInterruptWaitState:=0;
-
- fNewDataEvent:=TEvent.Create(nil,false,false,'');
+ fNewDataEvent:=TRNLNetworkEvent.Create;
 
  fSocketCounter:=0;
 
@@ -13002,7 +13246,7 @@ begin
  result:=RNL_SOCKET_NULL;
 end;
 
-function TRNLVirtualNetwork.SocketSelect(const aMaxSocket:TRNLSocket;var aReadSet,aWriteSet:TRNLSocketSet;const aTimeout:TRNLTime):TRNLInt32;
+function TRNLVirtualNetwork.SocketSelect(const aMaxSocket:TRNLSocket;var aReadSet,aWriteSet:TRNLSocketSet;const aTimeout:TRNLTime;const aEvent:TRNLNetworkEvent=nil):TRNLInt32;
 var SocketInstanceListNode:TRNLVirtualNetworkSocketInstanceListNode;
     Socket:TRNLSocket;
     Timeout:TRNLTime;
@@ -13055,15 +13299,18 @@ begin
   if (result<>0) or (TimeoutDifference<=0) then begin
    break;
   end else begin
-   fNewDataEvent.WaitFor(TimeoutDifference);
-   if {$if defined(Windows) or defined(fpc)}InterlockedCompareExchange{$else}AtomicCmpExchange{$ifend}(fInterruptWaitState,0,-1)=-1 then begin
-    break;
+   if assigned(aEvent) then begin
+    if TRNLNetworkEvent.WaitForMultipleEvents([fNewDataEvent,aEvent],TimeoutDifference)<>0 then begin
+     break;
+    end;
+   end else begin
+    fNewDataEvent.WaitFor(TimeoutDifference);
    end;
   end;
  until false;
 end;
 
-function TRNLVirtualNetwork.SocketWait(const aSockets:array of TRNLSocket;var aConditions:TRNLSocketWaitConditions;const aTimeout:TRNLTime):boolean;
+function TRNLVirtualNetwork.SocketWait(const aSockets:array of TRNLSocket;var aConditions:TRNLSocketWaitConditions;const aTimeout:TRNLTime;const aEvent:TRNLNetworkEvent=nil):boolean;
 var Socket:TRNLSocket;
     SocketInstance:TRNLVirtualNetworkSocketInstance;
     Timeout:TRNLTime;
@@ -13092,19 +13339,16 @@ begin
   if (aConditions<>[]) or (TimeoutDifference<=0) then begin
    break;
   end else begin
-   fNewDataEvent.WaitFor(TimeoutDifference);
-   if {$if defined(Windows) or defined(fpc)}InterlockedCompareExchange{$else}AtomicCmpExchange{$ifend}(fInterruptWaitState,0,-1)=-1 then begin
-    break;
+   if assigned(aEvent) then begin
+    if TRNLNetworkEvent.WaitForMultipleEvents([fNewDataEvent,aEvent],TimeoutDifference)<>0 then begin
+     break;
+    end;
+   end else begin
+    fNewDataEvent.WaitFor(TimeoutDifference);
    end;
   end;
  until false;
  result:=true;
-end;
-
-procedure TRNLVirtualNetwork.InterruptWait;
-begin
- {$if defined(Windows) or defined(fpc)}InterlockedExchange{$else}AtomicExchange{$ifend}(fInterruptWaitState,1);
- fNewDataEvent.SetEvent;
 end;
 
 function TRNLVirtualNetwork.Send(const aSocket:TRNLSocket;const aAddress:PRNLAddress;const aData;const aDataLength:TRNLSizeInt;const aFamily:TRNLAddressFamily):TRNLSizeInt;
@@ -13557,7 +13801,7 @@ begin
  result:=fNetwork.SocketAccept(aSocket,aAddress,aFamily);
 end;
 
-function TRNLNetworkInterferenceSimulator.SocketSelect(const aMaxSocket:TRNLSocket;var aReadSet,aWriteSet:TRNLSocketSet;const aTimeout:TRNLTime):TRNLInt32;
+function TRNLNetworkInterferenceSimulator.SocketSelect(const aMaxSocket:TRNLSocket;var aReadSet,aWriteSet:TRNLSocketSet;const aTimeout:TRNLTime;const aEvent:TRNLNetworkEvent=nil):TRNLInt32;
 var Time:TRNLTime;
     Timeout:TRNLInt64;
 begin
@@ -13569,14 +13813,14 @@ begin
    Timeout:=Max(1,TRNLTime.RelativeDifference(TRNLTime.Minimum(Time+aTimeout,fNextTimeout),Time));
    fLock.Release;
    try
-    result:=fNetwork.SocketSelect(aMaxSocket,aReadSet,aWriteSet,TRNLTime(TRNLUInt64(Timeout)));
+    result:=fNetwork.SocketSelect(aMaxSocket,aReadSet,aWriteSet,TRNLTime(TRNLUInt64(Timeout)),aEvent);
    finally
     fLock.Acquire;
    end;
   end else begin
    fLock.Release;
    try
-    result:=fNetwork.SocketSelect(aMaxSocket,aReadSet,aWriteSet,aTimeout);
+    result:=fNetwork.SocketSelect(aMaxSocket,aReadSet,aWriteSet,aTimeout,aEvent);
    finally
     fLock.Acquire;
    end;
@@ -13586,7 +13830,7 @@ begin
  end;
 end;
 
-function TRNLNetworkInterferenceSimulator.SocketWait(const aSockets:array of TRNLSocket;var aConditions:TRNLSocketWaitConditions;const aTimeout:TRNLTime):boolean;
+function TRNLNetworkInterferenceSimulator.SocketWait(const aSockets:array of TRNLSocket;var aConditions:TRNLSocketWaitConditions;const aTimeout:TRNLTime;const aEvent:TRNLNetworkEvent=nil):boolean;
 var Time:TRNLTime;
     Timeout:TRNLInt64;
 begin
@@ -13598,7 +13842,7 @@ begin
    Timeout:=Max(1,TRNLTime.RelativeDifference(TRNLTime.Minimum(Time+aTimeout,fNextTimeout),Time));
    fLock.Release;
    try
-    result:=fNetwork.SocketWait(aSockets,aConditions,TRNLTime(TRNLUInt64(Timeout)));
+    result:=fNetwork.SocketWait(aSockets,aConditions,TRNLTime(TRNLUInt64(Timeout)),aEvent);
    finally
     fLock.Acquire;
    end;
@@ -13613,11 +13857,6 @@ begin
  finally
   fLock.Release;
  end;
-end;
-
-procedure TRNLNetworkInterferenceSimulator.InterruptWait;
-begin
- fNetwork.InterruptWait;
 end;
 
 function TRNLNetworkInterferenceSimulator.Send(const aSocket:TRNLSocket;const aAddress:PRNLAddress;const aData;const aDataLength:TRNLSizeInt;const aFamily:TRNLAddressFamily):TRNLSizeInt;
@@ -18823,6 +19062,8 @@ begin
 
  fNetwork:=aNetwork;
 
+ fNetworkEvent:=TRNLNetworkEvent.Create;
+
  fRandomGenerator:=TRNLRandomGenerator.Create;
 
  fPeerLock:=TCriticalSection.Create;
@@ -19045,6 +19286,8 @@ begin
  Finalize(fOutgoingPacketBuffer);
 
  FreeAndNil(fCompressor);
+
+ FreeAndNil(fNetworkEvent);
 
  inherited Destroy;
 end;
@@ -20951,9 +21194,10 @@ begin
                     RNL_SOCKET_WAIT_CONDITION_IO_INTERRUPT,
                     RNL_SOCKET_WAIT_CONDITION_SERVICE_INTERRUPT];
 
-  if not fNetwork.SocketWait(fSockets,
+   if not fNetwork.SocketWait(fSockets,
                               WaitConditions,
-                              TRNLTime.Difference(NextTimeout,fTime)) then begin
+                              TRNLTime.Difference(NextTimeout,fTime),
+                              fNetworkEvent) then begin
     result:=RNL_HOST_SERVICE_STATUS_ERROR;
     exit;
    end;
@@ -20984,8 +21228,8 @@ end;
 
 procedure TRNLHost.Interrupt;
 begin
- if assigned(fNetwork) then begin
-  fNetwork.InterruptWait;
+ if assigned(fNetworkEvent) then begin
+  fNetworkEvent.SetEvent;
  end;
 end;
 
