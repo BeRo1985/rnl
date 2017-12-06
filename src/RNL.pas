@@ -471,7 +471,7 @@ uses {$if defined(Posix)}
 {    Generics.Defaults,
      Generics.Collections;}
 
-const RNL_VERSION='1.00.2017.12.06.06.23.0000';
+const RNL_VERSION='1.00.2017.12.06.06.48.0000';
 
 type PPRNLInt8=^PRNLInt8;
      PRNLInt8=^TRNLInt8;
@@ -2539,6 +2539,7 @@ type PRNLVersion=^TRNLVersion;
        function EmulatePoll(const aPollFDs:PRNLRealNetworkPollFDs;const aCount:TRNLSizeInt;const aTimeOut:TRNLInt64;const aEvent:TEvent=nil):TRNLInt32;
 {$else}
       private
+       fEventLock:TCriticalSection;
        fEventPipeFDs:{$ifdef fpc}TFilDes{$else}array[0..1] of TRNLInt32{$endif};
 {$endif}
        class procedure GlobalInitialize;
@@ -11005,7 +11006,9 @@ begin
  inherited Create(aInstance);
 {$if defined(Windows)}
  fEvent:=TEvent.Create(nil,false,false,'');
-{$elseif defined(fpc)}
+{$else}
+ fEventLock:=TCriticalSection.Create;
+{$if defined(fpc)}
  if fppipe(fEventPipeFDs)<0 then begin
   raise ERNLRealNetwork.Create('Pipe error');
  end;
@@ -11050,18 +11053,22 @@ begin
   end;
  end;
 {$ifend}
+{$ifend}
 end;
 
 destructor TRNLRealNetwork.Destroy;
 begin
 {$if defined(Windows)}
  FreeAndNil(fEvent);
-{$elseif defined(fpc)}
+{$else}
+{$if defined(fpc)}
  fpclose(fEventPipeFDs[0]);
  fpclose(fEventPipeFDs[1]);
 {$else}
  __close(fEventPipeFDs[0]);
  __close(fEventPipeFDs[1]);
+{$ifend}
+ FreeAndNil(fEventLock);
 {$ifend}
  inherited Destroy;
  if RNLNetworkInitializationReferenceCounter>0 then begin
@@ -11937,15 +11944,20 @@ begin
      {$else}
       __fd_isset(fEventPipeFDs[0],aReadSet)
      {$ifend} then begin
+   fEventLock.Acquire;
+   try
 {$ifdef fpc}
-   if (fpioctl(fEventPipeFDs[0],FIONREAD,@Count)=0) and (Count>0) then begin
-    fpread(fEventPipeFDs[0],b,SizeOf(TRNLUInt8));
-   end;
+    if (fpioctl(fEventPipeFDs[0],FIONREAD,@Count)=0) and (Count>0) then begin
+     fpread(fEventPipeFDs[0],b,SizeOf(TRNLUInt8));
+    end;
 {$else}
-   if (ioctl(fEventPipeFDs[0],FIONREAD,@Count)=0) and (Count>0) then begin
-    __read(fEventPipeFDs[0],@b,SizeOf(TRNLUInt8));
-   end;
+    if (ioctl(fEventPipeFDs[0],FIONREAD,@Count)=0) and (Count>0) then begin
+     __read(fEventPipeFDs[0],@b,SizeOf(TRNLUInt8));
+    end;
 {$endif}
+   finally
+    fEventLock.Release;
+   end;
   end;
  end;
 {$ifend}
@@ -12052,15 +12064,20 @@ begin
 
  for Index:=0 to CountPollFDs-1 do begin
   if PollFDs[Index].fd=fEventPipeFDs[0] then begin
+   fEventLock.Acquire;
+   try
 {$ifdef fpc}
-   if (fpioctl(fEventPipeFDs[0],FIONREAD,@Count)=0) and (Count>0) then begin
-    fpread(fEventPipeFDs[0],b,SizeOf(TRNLUInt8));
-   end;
+    if (fpioctl(fEventPipeFDs[0],FIONREAD,@Count)=0) and (Count>0) then begin
+     fpread(fEventPipeFDs[0],b,SizeOf(TRNLUInt8));
+    end;
 {$else}
-   if (ioctl(fEventPipeFDs[0],FIONREAD,@Count)=0) and (Count>0) then begin
-    __read(fEventPipeFDs[0],@b,SizeOf(TRNLUInt8));
-   end;
+    if (ioctl(fEventPipeFDs[0],FIONREAD,@Count)=0) and (Count>0) then begin
+     __read(fEventPipeFDs[0],@b,SizeOf(TRNLUInt8));
+    end;
 {$endif}
+   finally
+    fEventLock.Release;
+   end;
   end else begin
    if (PollFDs[Index].revents and POLLIN)<>0 then begin
     Include(aConditions,RNL_SOCKET_WAIT_CONDITION_RECEIVE);
@@ -12189,15 +12206,20 @@ begin
      {$else}
       __fd_isset(fEventPipeFDs[0],ReadSet)
      {$ifend} then begin
+   fEventLock.Acquire;
+   try
 {$ifdef fpc}
-   if (fpioctl(fEventPipeFDs[0],FIONREAD,@Count)=0) and (Count>0) then begin
-    fpread(fEventPipeFDs[0],b,SizeOf(TRNLUInt8));
-   end;
+    if (fpioctl(fEventPipeFDs[0],FIONREAD,@Count)=0) and (Count>0) then begin
+     fpread(fEventPipeFDs[0],b,SizeOf(TRNLUInt8));
+    end;
 {$else}
-   if (ioctl(fEventPipeFDs[0],FIONREAD,@Count)=0) and (Count>0) then begin
-    __read(fEventPipeFDs[0],@b,SizeOf(TRNLUInt8));
-   end;
+    if (ioctl(fEventPipeFDs[0],FIONREAD,@Count)=0) and (Count>0) then begin
+     __read(fEventPipeFDs[0],@b,SizeOf(TRNLUInt8));
+    end;
 {$endif}
+   finally
+    fEventLock.Release;
+   end;
   end;
  end;
 {$ifend}
@@ -12235,13 +12257,20 @@ var Count:TRNLINt32;
 begin
 {$if defined(Windows)}
  fEvent.SetEvent;
-{$elseif defined(fpc)}
- if (fpioctl(fEventPipeFDs[0],FIONREAD,@Count)=0) and (Count=0) then begin
-  fpwrite(fEventPipeFDs[1],b,SizeOf(TRNLUInt8));
- end;
 {$else}
- if (ioctl(fEventPipeFDs[0],FIONREAD,@Count)=0) and (Count=0) then begin
-  __write(fEventPipeFDs[1],@b,SizeOf(TRNLUInt8));
+ fEventLock.Acquire;
+ try
+{$if defined(fpc)}
+  if (fpioctl(fEventPipeFDs[0],FIONREAD,@Count)=0) and (Count=0) then begin
+   fpwrite(fEventPipeFDs[1],b,SizeOf(TRNLUInt8));
+  end;
+{$else}
+  if (ioctl(fEventPipeFDs[0],FIONREAD,@Count)=0) and (Count=0) then begin
+   __write(fEventPipeFDs[1],@b,SizeOf(TRNLUInt8));
+  end;
+{$ifend}
+ finally
+  fEventLock.Release;
  end;
 {$ifend}
 end;
