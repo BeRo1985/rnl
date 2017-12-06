@@ -471,7 +471,7 @@ uses {$if defined(Posix)}
 {    Generics.Defaults,
      Generics.Collections;}
 
-const RNL_VERSION='1.00.2017.12.06.08.14.0000';
+const RNL_VERSION='1.00.2017.12.06.08.16.0000';
 
 type PPRNLInt8=^PRNLInt8;
      PRNLInt8=^TRNLInt8;
@@ -12025,10 +12025,10 @@ begin
   if aSockets[Index]<>RNL_SOCKET_NULL then begin
    PollFDs[CountPollFDs].fd:=aSockets[Index];
    PollFDs[CountPollFDs].events:=0;
-   if RNL_SOCKET_WAIT_CONDITION_RECEIVE in aConditions then begin
+   if RNL_SOCKET_WAIT_CONDITION_IO_RECEIVE in aConditions then begin
     PollFDs[CountPollFDs].events:=PollFDs[CountPollFDs].events or POLLIN;
    end;
-   if RNL_SOCKET_WAIT_CONDITION_SEND in aConditions then begin
+   if RNL_SOCKET_WAIT_CONDITION_IO_SEND in aConditions then begin
     PollFDs[CountPollFDs].events:=PollFDs[CountPollFDs].events or POLLOUT;
    end;
    PollFDs[CountPollFDs].revents:=0;
@@ -12076,10 +12076,10 @@ begin
    end;
   end else begin
    if (PollFDs[Index].revents and POLLIN)<>0 then begin
-    Include(aConditions,RNL_SOCKET_WAIT_CONDITION_RECEIVE);
+    Include(aConditions,RNL_SOCKET_WAIT_CONDITION_IO_RECEIVE);
    end;
    if (PollFDs[Index].revents and POLLOUT)<>0 then begin
-    Include(aConditions,RNL_SOCKET_WAIT_CONDITION_SEND);
+    Include(aConditions,RNL_SOCKET_WAIT_CONDITION_IO_SEND);
    end;
   end;
  end;
@@ -12115,7 +12115,7 @@ begin
 
  for Index:=0 to length(aSockets)-1 do begin
   if aSockets[Index]<>RNL_SOCKET_NULL then begin
-   if RNL_SOCKET_WAIT_CONDITION_RECEIVE in aConditions then begin
+   if RNL_SOCKET_WAIT_CONDITION_IO_RECEIVE in aConditions then begin
 {$if defined(Windows)}
     FD_SET(aSockets[Index],ReadSet);
 {$elseif defined(Posix)}
@@ -12126,7 +12126,7 @@ begin
     FD_SET(aSockets[Index],ReadSet);
 {$ifend}
    end;
-   if RNL_SOCKET_WAIT_CONDITION_SEND in aConditions then begin
+   if RNL_SOCKET_WAIT_CONDITION_IO_SEND in aConditions then begin
 {$if defined(Windows)}
     FD_SET(aSockets[Index],WriteSet);
 {$elseif defined(Posix)}
@@ -12178,8 +12178,8 @@ begin
 {$endif}
  if SelectCount<0 then begin
   if (errno={$ifdef fpc}ESysEINTR{$else}EINTR{$endif}) and
-     (RNL_SOCKET_WAIT_CONDITION_INTERRUPT in aConditions) then begin
-   aConditions:=[RNL_SOCKET_WAIT_CONDITION_INTERRUPT];
+     (RNL_SOCKET_WAIT_CONDITION_IO_INTERRUPT in aConditions) then begin
+   aConditions:=[RNL_SOCKET_WAIT_CONDITION_IO_INTERRUPT];
    result:=true;
   end else begin
    result:=false;
@@ -12239,7 +12239,7 @@ begin
       {$else}
        __fd_isset(aSockets[Index],ReadSet)
       {$ifend} then begin
-    Include(aConditions,RNL_SOCKET_WAIT_CONDITION_RECEIVE);
+    Include(aConditions,RNL_SOCKET_WAIT_CONDITION_IO_RECEIVE);
    end;
    if {$if defined(Windows)}FD_ISSET(aSockets[Index],WriteSet)
       {$elseif defined(fpc)}
@@ -12247,7 +12247,7 @@ begin
       {$else}
        __fd_isset(aSockets[Index],WriteSet)
       {$ifend} then begin
-    Include(aConditions,RNL_SOCKET_WAIT_CONDITION_SEND);
+    Include(aConditions,RNL_SOCKET_WAIT_CONDITION_IO_SEND);
    end;
   end;
  end;
