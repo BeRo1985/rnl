@@ -471,7 +471,7 @@ uses {$if defined(Posix)}
 {    Generics.Defaults,
      Generics.Collections;}
 
-const RNL_VERSION='1.00.2017.12.06.03.55.0000';
+const RNL_VERSION='1.00.2017.12.06.06.23.0000';
 
 type PPRNLInt8=^PRNLInt8;
      PRNLInt8=^TRNLInt8;
@@ -11908,7 +11908,7 @@ var tv:{$if defined(Windows)}TTimeVal{$elseif defined(fpc)}TTimeVal{$else}TimeVa
 {$if not defined(Windows)}
     b:TRNLUInt8;
     ReadSet,WriteSet:TRNLSocketSet;
-    PipeReadSet,PipeWriteSet:TRNLSocketSet;
+    Count:TRNLInt32;
 {$ifend}
 begin
  tv.tv_sec:=aTimeout div 1000;
@@ -11937,37 +11937,15 @@ begin
      {$else}
       __fd_isset(fEventPipeFDs[0],aReadSet)
      {$ifend} then begin
-   while {$ifdef fpc}fpread{$else}__read{$endif}(fEventPipeFDs[0],{$ifdef fpc}b{$else}@b{$endif},SizeOf(TRNLUInt8))=SizeOf(TRNLUInt8) do begin
-{$if defined(fpc)}
-    fpFD_ZERO(PipeReadSet);
-    fpFD_ZERO(PipeWriteSet);
-{$else}
-    FD_ZERO(PipeReadSet);
-    FD_ZERO(PipeWriteSet);
-{$ifend}
-{$if defined(Posix)}
-    __fd_set(fEventPipeFDs[0],PipeReadSet);
-{$elseif defined(Unix)}
-    fpFD_SET(fEventPipeFDs[0],PipeReadSet);
-{$else}
-    FD_SET(fEventPipeFDs[0],PipeReadSet);
-{$ifend}
-    if {$ifdef fpc}
-        fpselect(fEventPipeFDs[0]+1,@PipeReadSet,@PipeWriteSet,nil,@tv)<=0
-       {$else}
-        Posix.SysSelect.select(fEventPipeFDs[0]+1,@PipeReadSet,@PipeWriteSet,nil,@tv)<=0
-       {$endif} then begin
-     break;
-    end;
-    if not ({$if defined(Windows)}FD_ISSET(fEventPipeFDs[0],PipeReadSet)
-            {$elseif defined(fpc)}
-             fpFD_ISSET(fEventPipeFDs[0],PipeReadSet)=1
-            {$else}
-             __fd_isset(fEventPipeFDs[0],PipeReadSet)
-            {$ifend}) then begin
-     break;
-    end;
+{$ifdef fpc}
+   if (fpioctl(fEventPipeFDs[0],FIONREAD,@Count)=0) and (Count>0) then begin
+    fpread(fEventPipeFDs[0],b,SizeOf(TRNLUInt8));
    end;
+{$else}
+   if (ioctl(fEventPipeFDs[0],FIONREAD,@Count)=0) and (Count>0) then begin
+    __read(fEventPipeFDs[0],@b,SizeOf(TRNLUInt8));
+   end;
+{$endif}
   end;
  end;
 {$ifend}
@@ -12036,7 +12014,7 @@ end;
 // select() function instead on these iOS/macOS targets, to be sure that everything will work in the
 // long run.
 type TPollFDs=array[0..2] of pollfd;
-var Index,CountPollFDs,PollCount:TRNLInt32;
+var Index,CountPollFDs,PollCount,Count:TRNLInt32;
     PollFDs:TPollFDs;
     b:TRNLUInt8;
 begin
@@ -12074,11 +12052,15 @@ begin
 
  for Index:=0 to CountPollFDs-1 do begin
   if PollFDs[Index].fd=fEventPipeFDs[0] then begin
-   while fpread(fEventPipeFDs[0],b,SizeOf(TRNLUInt8))=SizeOf(TRNLUInt8) do begin
-    if fppoll(@PollFDs[Index],1,0)<=0 then begin
-     break;
-    end;
+{$ifdef fpc}
+   if (fpioctl(fEventPipeFDs[0],FIONREAD,@Count)=0) and (Count>0) then begin
+    fpread(fEventPipeFDs[0],b,SizeOf(TRNLUInt8));
    end;
+{$else}
+   if (ioctl(fEventPipeFDs[0],FIONREAD,@Count)=0) and (Count>0) then begin
+    __read(fEventPipeFDs[0],@b,SizeOf(TRNLUInt8));
+   end;
+{$endif}
   end else begin
    if (PollFDs[Index].revents and POLLIN)<>0 then begin
     Include(aConditions,RNL_SOCKET_WAIT_CONDITION_RECEIVE);
@@ -12099,7 +12081,7 @@ var Index,SelectCount:TRNLInt32;
     MaxSocket:TRNLSocket;
 {$if not defined(Windows)}
     b:TRNLUInt8;
-    PipeReadSet,PipeWriteSet:TRNLSocketSet;
+    Count:TRNLInt32;
 {$ifend}
 begin
 
@@ -12207,37 +12189,15 @@ begin
      {$else}
       __fd_isset(fEventPipeFDs[0],ReadSet)
      {$ifend} then begin
-   while {$ifdef fpc}fpread{$else}__read{$endif}(fEventPipeFDs[0],{$ifdef fpc}b{$else}@b{$endif},SizeOf(TRNLUInt8))=SizeOf(TRNLUInt8) do begin
-{$if defined(fpc)}
-    fpFD_ZERO(PipeReadSet);
-    fpFD_ZERO(PipeWriteSet);
-{$else}
-    FD_ZERO(PipeReadSet);
-    FD_ZERO(PipeWriteSet);
-{$ifend}
-{$if defined(Posix)}
-    __fd_set(fEventPipeFDs[0],PipeReadSet);
-{$elseif defined(Unix)}
-    fpFD_SET(fEventPipeFDs[0],PipeReadSet);
-{$else}
-    FD_SET(fEventPipeFDs[0],PipeReadSet);
-{$ifend}
-    if {$ifdef fpc}
-        fpselect(fEventPipeFDs[0]+1,@PipeReadSet,@PipeWriteSet,nil,@tv)<=0
-       {$else}
-        Posix.SysSelect.select(fEventPipeFDs[0]+1,@PipeReadSet,@PipeWriteSet,nil,@tv)<=0
-       {$endif} then begin
-     break;
-    end;
-    if not ({$if defined(Windows)}FD_ISSET(fEventPipeFDs[0],PipeReadSet)
-            {$elseif defined(fpc)}
-             fpFD_ISSET(fEventPipeFDs[0],PipeReadSet)=1
-            {$else}
-             __fd_isset(fEventPipeFDs[0],PipeReadSet)
-            {$ifend}) then begin
-     break;
-    end;
+{$ifdef fpc}
+   if (fpioctl(fEventPipeFDs[0],FIONREAD,@Count)=0) and (Count>0) then begin
+    fpread(fEventPipeFDs[0],b,SizeOf(TRNLUInt8));
    end;
+{$else}
+   if (ioctl(fEventPipeFDs[0],FIONREAD,@Count)=0) and (Count>0) then begin
+    __read(fEventPipeFDs[0],@b,SizeOf(TRNLUInt8));
+   end;
+{$endif}
   end;
  end;
 {$ifend}
@@ -12269,17 +12229,20 @@ end;
 
 procedure TRNLRealNetwork.InterruptWait;
 {$if not defined(Windows)}
-var b:TRNLUInt8;
+const b:TRNLUInt8=1;
+var Count:TRNLINt32;
 {$ifend}
 begin
 {$if defined(Windows)}
  fEvent.SetEvent;
-{$elseif defined(Posix)}
- b:=1;
- __write(fEventPipeFDs[1],@b,SizeOf(TRNLUInt8));
+{$elseif defined(fpc)}
+ if (fpioctl(fEventPipeFDs[0],FIONREAD,@Count)=0) and (Count=0) then begin
+  fpwrite(fEventPipeFDs[1],b,SizeOf(TRNLUInt8));
+ end;
 {$else}
- b:=1;
- fpwrite(fEventPipeFDs[1],b,SizeOf(TRNLUInt8));
+ if (ioctl(fEventPipeFDs[0],FIONREAD,@Count)=0) and (Count=0) then begin
+  __write(fEventPipeFDs[1],@b,SizeOf(TRNLUInt8));
+ end;
 {$ifend}
 end;
 
