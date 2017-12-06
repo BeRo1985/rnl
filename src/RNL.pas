@@ -471,7 +471,7 @@ uses {$if defined(Posix)}
 {    Generics.Defaults,
      Generics.Collections;}
 
-const RNL_VERSION='1.00.2017.12.06.19.50.0000';
+const RNL_VERSION='1.00.2017.12.06.20.10.0000';
 
 type PPRNLInt8=^PRNLInt8;
      PRNLInt8=^TRNLInt8;
@@ -13426,6 +13426,9 @@ begin
   end else begin
    if assigned(aEvent) then begin
     if TRNLNetworkEvent.WaitForMultipleEvents([fNewDataEvent,aEvent],TimeoutDifference)<>0 then begin
+     if RNL_SOCKET_WAIT_CONDITION_SERVICE_INTERRUPT in Conditions then begin
+      Include(aConditions,RNL_SOCKET_WAIT_CONDITION_SERVICE_INTERRUPT);
+     end;
      break;
     end;
    end else begin
