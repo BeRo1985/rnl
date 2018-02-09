@@ -471,7 +471,7 @@ uses {$if defined(Posix)}
 {    Generics.Defaults,
      Generics.Collections;}
 
-const RNL_VERSION='1.00.2017.12.06.21.35.0000';
+const RNL_VERSION='1.00.2018.02.09.15.23.0000';
 
 type PPRNLInt8=^PRNLInt8;
      PRNLInt8=^TRNLInt8;
@@ -562,8 +562,7 @@ type PPRNLInt8=^PRNLInt8;
      TRNLPtrInt=TRNLInt64;
 {$else}
      TRNLPtrUInt=TRNLUInt32;
-     TRNLPtrI
-     nt=TRNLInt32;
+     TRNLPtrInt=TRNLInt32;
 {$endif}
 {$endif}
 
@@ -1512,9 +1511,11 @@ type PRNLVersion=^TRNLVersion;
        Host:TRNLHostAddress;
        ScopeID:{$ifdef Unix}TRNLUInt32{$else}TRNLInt64{$endif};
        Port:TRNLUInt16;
+       constructor CreateFromString(const aString:TRNLString);
        function GetAddressFamily:TRNLAddressFamily; inline;
        function SetAddress(const aSIN:TRNLPointer):TRNLAddressFamily;
        function SetSIN(const aSIN:TRNLPointer;const aFamily:TRNLAddressFamily):boolean;
+       function ToString:TRNLString;
      end;
 
      PRNLSocketWaitCondition=^TRNLSocketWaitCondition;
@@ -8714,6 +8715,384 @@ begin
   FillChar(fItems[OldCount],(fCount-OldCount)*TRNLSizeUInt(SizeOf(T)),#0);
  end;
  fItems[aID]:=aItem;
+end;
+
+constructor TRNLAddress.CreateFromString(const aString:TRNLString);
+ function ParseIP(const aInputString:TRNLRawByteString;out aAddress:TRNLAddress):boolean;
+ var Index,Part,StringLength,Value,Base,
+     FirstColonPosition,
+     FirstDotPosition,
+     FirstOpenBracketPosition,
+     FirstCloseBracketPosition,
+     ZeroCompressionLocation:TRNLSizeInt;
+     IsLocalIPv6:boolean;
+ begin
+
+  result:=false;
+
+  StringLength:=length(aInputString);
+
+  FirstColonPosition:=0;
+  FirstDotPosition:=0;
+  FirstOpenBracketPosition:=0;
+  FirstCloseBracketPosition:=0;
+
+  for Index:=1 to StringLength do begin
+   case aInputString[Index] of
+    ':':begin
+     if FirstColonPosition=0 then begin
+      FirstColonPosition:=Index;
+     end;
+    end;
+    '.':begin
+     if FirstDotPosition=0 then begin
+      FirstDotPosition:=Index;
+     end;
+    end;
+    '[':begin
+     if FirstOpenBracketPosition=0 then begin
+      FirstOpenBracketPosition:=Index;
+     end;
+    end;
+    ']':begin
+     if FirstCloseBracketPosition=0 then begin
+      FirstCloseBracketPosition:=Index;
+     end;
+    end;
+   end;
+  end;
+
+  IsLocalIPv6:=(FirstOpenBracketPosition>0) or
+               (FirstDotPosition=0) or
+               ((FirstColonPosition>0) and
+                ((FirstDotPosition=0) or
+                 (FirstColonPosition<FirstDotPosition)));
+
+  if IsLocalIPv6 then begin
+
+   if (FirstOpenBracketPosition>0) and
+      ((FirstCloseBracketPosition=0) or
+       (FirstOpenBracketPosition>FirstCloseBracketPosition)) then begin
+    exit;
+   end;
+
+   ZeroCompressionLocation:=-1;
+
+   Index:=FirstOpenBracketPosition+1;
+
+   Part:=0;
+   while Part<16 do begin
+
+    Value:=0;
+
+    if (Index<=StringLength) and (aInputString[Index] in ['0'..'9','a'..'f','A'..'F']) then begin
+
+     Base:=Index;
+
+     while Index<=StringLength do begin
+      case aInputString[Index] of
+       '0'..'9':begin
+        Value:=(Value shl 4) or (ord(aInputString[Index])-ord('0'));
+       end;
+       'a'..'f':begin
+        Value:=(Value shl 4) or ((ord(aInputString[Index])-ord('a'))+$a);
+       end;
+       'A'..'F':begin
+        Value:=(Value shl 4) or ((ord(aInputString[Index])-ord('A'))+$a);
+       end;
+       else begin
+        break;
+       end;
+      end;
+      inc(Index);
+     end;
+
+     if (Index<=StringLength) and (aInputString[Index]='.') then begin
+
+      Index:=Base;
+
+      Base:=Part;
+
+      for Part:=0 to 3 do begin
+
+       if not ((Index<=StringLength) and (aInputString[Index] in ['0'..'9'])) then begin
+        exit;
+       end;
+
+       Value:=0;
+       while (Index<=StringLength) and (aInputString[Index] in ['0'..'9']) do begin
+        Value:=(Value*10)+(ord(aInputString[Index])-ord('0'));
+        inc(Index);
+       end;
+
+       aAddress.Host.Addr[Base+Part]:=Value;
+
+       if Part<>3 then begin
+        if (Index<=StringLength) and (aInputString[Index]='.') then begin
+         inc(Index);
+        end else begin
+         exit;
+        end;
+       end;
+
+      end;
+
+      Part:=Base+4;
+
+      break;
+
+     end else begin
+
+      if Part<14 then begin
+       if (Index<=StringLength) and (aInputString[Index]=':') then begin
+        inc(Index);
+       end else begin
+        exit;
+       end;
+      end;
+
+      aAddress.Host.Addr[Part+0]:=Value shr 8;
+      aAddress.Host.Addr[Part+1]:=Value and $ff;
+
+     end;
+
+    end else begin
+
+     if ZeroCompressionLocation>=0 then begin
+      if Index=(FirstOpenBracketPosition+1) then begin
+       dec(Part);
+       break;
+      end else begin
+       exit;
+      end;
+     end;
+
+     if (Index<=StringLength) and (aInputString[Index]=':') then begin
+      if Part=0 then begin
+       inc(Index);
+       if (not (Index<=StringLength) and (aInputString[Index]=':')) then begin
+        exit;
+       end;
+      end;
+      inc(Index);
+      ZeroCompressionLocation:=Part;
+     end else begin
+      exit;
+     end;
+
+    end;
+
+    inc(Part,2);
+
+   end;
+
+   if FirstCloseBracketPosition>0 then begin
+    Index:=FirstCloseBracketPosition+1;
+   end;
+
+   if ZeroCompressionLocation>=0 then begin
+    System.Move(aAddress.Host.Addr[ZeroCompressionLocation],
+                aAddress.Host.Addr[16-(Part-ZeroCompressionLocation)],
+                Part-ZeroCompressionLocation);
+    FillChar(aAddress.Host.Addr[ZeroCompressionLocation],(16-(Part-ZeroCompressionLocation))-ZeroCompressionLocation,#0);
+   end;
+
+  end else begin
+
+   if (FirstDotPosition=0) or
+      (FirstColonPosition>FirstDotPosition) or
+      (FirstOpenBracketPosition>0) or
+      (FirstCloseBracketPosition>0) then begin
+    exit;
+   end;
+
+   aAddress.Host:=RNL_IPV4MAPPED_PREFIX;
+
+   Index:=1;
+
+   for Part:=0 to 3 do begin
+
+    if not ((Index<=StringLength) and (aInputString[Index] in ['0'..'9'])) then begin
+     exit;
+    end;
+
+    Value:=0;
+    while (Index<=StringLength) and (aInputString[Index] in ['0'..'9']) do begin
+     Value:=(Value*10)+(ord(aInputString[Index])-ord('0'));
+     inc(Index);
+    end;
+
+    aAddress.Host.Addr[RNL_IPV4MAPPED_PREFIX_LEN+Part]:=Value;
+
+    if Part<>3 then begin
+     if (Index<=StringLength) and (aInputString[Index]='.') then begin
+      inc(Index);
+     end else begin
+      exit;
+     end;
+    end;
+
+   end;
+
+  end;
+
+  if (Index<=StringLength) and (aInputString[Index]=':') then begin
+
+   inc(Index);
+
+   if not ((Index<=StringLength) and (aInputString[Index] in ['0'..'9'])) then begin
+    exit;
+   end;
+
+   Value:=0;
+   while (Index<=StringLength) and (aInputString[Index] in ['0'..'9']) do begin
+    Value:=(Value*10)+(ord(aInputString[Index])-ord('0'));
+    inc(Index);
+   end;
+
+   aAddress.Port:=Value;
+
+  end;
+
+ end;
+begin
+ FillChar(self,SizeOf(TRNLAddress),#0);
+ ParseIP(aString,self);
+end;
+
+function TRNLAddress.ToString:TRNLString;
+const HexChars:array[0..15] of TRNLChar=('0','1','2','3','4','5','6','7','8','9','a','b','c','d','e','f');
+var Index,BestIndex,BestLength,CurrentIndex,CurrentLength,Value:Int32;
+    HasDigits:boolean;
+begin
+ case GetAddressFamily of
+  RNL_IPV4:begin
+   result:=IntToStr(Host.Addr[12])+'.'+
+           IntToStr(Host.Addr[13])+'.'+
+           IntToStr(Host.Addr[14])+'.'+
+           IntToStr(Host.Addr[15])+':'+
+           IntToStr(Port);
+  end;
+  RNL_IPV6:begin
+   if PRNLUInt64Array(@Host.Addr)^[0]=0 then begin
+    if PRNLUInt16Array(@Host.Addr)^[4]=0 then begin
+     case PRNLUInt16Array(@Host.Addr)^[5] of
+      0:begin
+       if PRNLUInt32Array(@Host.Addr)^[3]=0 then begin
+        result:='::';
+        exit;
+       end else begin
+        result:='[::'+
+                IntToStr(Host.Addr[12])+'.'+
+                IntToStr(Host.Addr[13])+'.'+
+                IntToStr(Host.Addr[14])+'.'+
+                IntToStr(Host.Addr[15])+']:'+
+                IntToStr(Port);
+        exit;
+       end;
+      end;
+      $ffff:begin
+       result:='[::ffff:'+
+               IntToStr(Host.Addr[12])+'.'+
+               IntToStr(Host.Addr[13])+'.'+
+               IntToStr(Host.Addr[14])+'.'+
+               IntToStr(Host.Addr[15])+']:'+
+               IntToStr(Port);
+       exit;
+      end;
+     end;
+    end;
+   end;
+   begin
+    result:='[';
+    BestIndex:=-1;
+    BestLength:=0;
+    CurrentIndex:=-1;
+    CurrentLength:=0;
+    for Index:=0 to 7 do begin
+     if PRNLUInt16Array(@Host.Addr)^[Index]=0 then begin
+      if CurrentIndex<0 then begin
+       CurrentIndex:=Index;
+       CurrentLength:=1;
+      end else begin
+       inc(CurrentLength);
+      end;
+     end else begin
+      if CurrentIndex>=0 then begin
+       if (BestLength<0) or (BestLength<CurrentLength) then begin
+        BestIndex:=CurrentIndex;
+        BestLength:=CurrentLength;
+       end;
+       CurrentIndex:=-1;
+      end;
+     end;
+    end;
+    if (CurrentIndex>=0) and ((BestLength<0) or (BestLength<CurrentLength)) then begin
+     BestIndex:=CurrentIndex;
+     BestLength:=CurrentLength;
+    end;
+    if (BestIndex>=0) and (BestLength<2) then begin
+     BestIndex:=-1;
+    end;
+    for Index:=0 to 7 do begin
+     if (BestIndex>=0) and (Index>=BestIndex) and (Index<(BestIndex+BestLength)) then begin
+      if Index=BestIndex then begin
+       result:=result+':';
+      end;
+     end else begin
+      if Index<>0 then begin
+       result:=result+':';
+      end;
+      if (Index=6) and
+         (BestIndex=0) and
+         ((BestLength=5) and
+          (PRNLUInt64Array(@Host.Addr)^[0]=0) and
+          (PRNLUInt16Array(@Host.Addr)^[4]=0) and
+          (PRNLUInt16Array(@Host.Addr)^[5]=$ffff)) or
+         ((BestLength=6) and
+          (PRNLUInt64Array(@Host.Addr)^[0]=0) and
+          (PRNLUInt32Array(@Host.Addr)^[2]=0)) then begin
+       result:=result+
+               IntToStr(Host.Addr[12])+'.'+
+               IntToStr(Host.Addr[13])+'.'+
+               IntToStr(Host.Addr[14])+'.'+
+               IntToStr(Host.Addr[15]);
+       break;
+      end else begin
+       HasDigits:=false;
+       Value:=(Host.Addr[(Index shl 1) or 0] shr 4) and $f;
+       if Value<>0 then begin
+        result:=result+HexChars[Value and $f];
+        HasDigits:=true;
+       end;
+       Value:=(Host.Addr[(Index shl 1) or 0] shr 0) and $f;
+       if HasDigits or (Value<>0) then begin
+        result:=result+HexChars[Value and $f];
+        HasDigits:=true;
+       end;
+       Value:=(Host.Addr[(Index shl 1) or 1] shr 4) and $f;
+       if HasDigits or (Value<>0) then begin
+        result:=result+HexChars[Value and $f];
+        HasDigits:=true;
+       end;
+       Value:=(Host.Addr[(Index shl 1) or 1] shr 0) and $f;
+       if HasDigits or (Value<>0) then begin
+        result:=result+HexChars[Value and $f];
+       end;
+      end;
+     end;
+    end;
+    if (BestIndex>=0) and ((BestIndex+BestLength)=8) then begin
+     result:=result+':';
+    end;
+   end;
+   result:=result+']:'+
+                  IntToStr(Port);
+  end;
+  else begin
+   result:='';
+  end;
+ end;
 end;
 
 {$ifdef Windows}
