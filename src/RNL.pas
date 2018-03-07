@@ -471,7 +471,7 @@ uses {$if defined(Posix)}
 {    Generics.Defaults,
      Generics.Collections;}
 
-const RNL_VERSION='1.00.2018.02.09.15.23.0000';
+const RNL_VERSION='1.00.2018.03.07.12.59.0000';
 
 type PPRNLInt8=^PRNLInt8;
      PRNLInt8=^TRNLInt8;
@@ -1692,7 +1692,7 @@ type PRNLVersion=^TRNLVersion;
       public
        procedure AcceptConnectionToken;
        procedure RejectConnectionToken;
-       procedure AcceptAuthenticationToken;
+       function AcceptAuthenticationToken:TRNLPeer;
        procedure RejectAuthenticationToken;
        property Address:TRNLAddress read fAddress;
        property ConnectionToken:TRNLConnectionToken read GetConnectionToken;
@@ -3620,7 +3620,7 @@ type PRNLVersion=^TRNLVersion;
 
        procedure DispatchReceivedHandshakePacketConnectionAuthenticationRequest(const aIncomingPacket:PRNLProtocolHandshakePacketConnectionAuthenticationRequest);
 
-       procedure AcceptHandshakePacketConnectionAuthenticationResponse(const aConnectionCandidate:PRNLConnectionCandidate);
+       function AcceptHandshakePacketConnectionAuthenticationResponse(const aConnectionCandidate:PRNLConnectionCandidate):TRNLPeer;
 
        procedure RejectHandshakePacketConnectionAuthenticationResponse(const aConnectionCandidate:PRNLConnectionCandidate;const aDenialReason:TRNLConnectionDenialReason);
 
@@ -10865,10 +10865,12 @@ begin
  end;
 end;
 
-procedure TRNLConnectionCandidate.AcceptAuthenticationToken;
+function TRNLConnectionCandidate.AcceptAuthenticationToken:TRNLPeer;
 begin
  if assigned(fData) and assigned(fData^.fHost) then begin
-  fData^.fHost.AcceptHandshakePacketConnectionAuthenticationResponse(@self);
+  result:=fData^.fHost.AcceptHandshakePacketConnectionAuthenticationResponse(@self);
+ end else begin
+  result:=nil;
  end;
 end;
 
@@ -20781,11 +20783,13 @@ begin
 
 end;
 
-procedure TRNLHost.AcceptHandshakePacketConnectionAuthenticationResponse(const aConnectionCandidate:PRNLConnectionCandidate);
+function TRNLHost.AcceptHandshakePacketConnectionAuthenticationResponse(const aConnectionCandidate:PRNLConnectionCandidate):TRNLPeer;
 var ConnectionSalt:TRNLUInt64;
     Peer:TRNLPeer;
     Nonce:TRNLCipherNonce;
 begin
+
+ result:=nil;
 
  if not assigned(aConnectionCandidate^.fData) then begin
   exit;
@@ -20873,6 +20877,8 @@ begin
  Peer.UpdateOutgoingBandwidthRateLimiter;
 
  aConnectionCandidate^.fState:=RNL_CONNECTION_STATE_APPROVING;
+
+ result:=Peer;
 
 end;
 
