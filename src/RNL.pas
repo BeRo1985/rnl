@@ -471,7 +471,7 @@ uses {$if defined(Posix)}
 {    Generics.Defaults,
      Generics.Collections;}
 
-const RNL_VERSION='1.00.2018.03.07.12.59.0000';
+const RNL_VERSION='1.00.2018.07.01.06.07.0000';
 
 type PPRNLInt8=^PRNLInt8;
      PRNLInt8=^TRNLInt8;
@@ -2443,6 +2443,8 @@ type PRNLVersion=^TRNLVersion;
 
      TRNLHostSockets=array[0..1] of TRNLSocket;
 
+     TRNLHostSocketFamilies=array[0..1] of TRNLAddressFamily;
+
      TRNLHostOnPeerCheckConnectionToken=function(const aHost:TRNLHost;const aAddress:TRNLAddress;const aConnectionToken:TRNLConnectionToken):boolean of object;
 
      TRNLHostOnPeerCheckAuthenticationToken=function(const aHost:TRNLHost;const aAddress:TRNLAddress;const aAuthenticationToken:TRNLAuthenticationToken):boolean of object;
@@ -3376,6 +3378,16 @@ type PRNLVersion=^TRNLVersion;
        property OutgoingBandwidthRate:TRNLUInt32 read GetOutgoingBandwidthRate;
      end;
 
+     PRNLHostAddressFamilyWorkMode=^TRNLHostAddressFamilyWorkMode;
+     TRNLHostAddressFamilyWorkMode=
+      (
+       RNL_HOST_ADDRESS_FAMILY_WORK_MODE_AUTOMATIC=0,
+       RNL_HOST_ADDRESS_FAMILY_WORK_MODE_IPV4_ONLY=1,
+       RNL_HOST_ADDRESS_FAMILY_WORK_MODE_IPV6_ONLY=2,
+       RNL_HOST_ADDRESS_FAMILY_WORK_MODE_IPV4_ON_IPV6=3,
+       RNL_HOST_ADDRESS_FAMILY_WORK_MODE_IPV4_AND_IPV6=4
+      );
+
      TRNLHost=class
       private
        const HostSocketFamilies:array[0..1] of TRNLInt32=
@@ -3519,6 +3531,8 @@ type PRNLVersion=^TRNLVersion;
 
        fSockets:TRNLHostSockets;
 
+       fSocketFamilies:TRNLHostSocketFamilies;
+
        fTime:TRNLTime;
 
        fNextPeerEventTime:TRNLTime;
@@ -3647,7 +3661,7 @@ type PRNLVersion=^TRNLVersion;
       public
        constructor Create(const aInstance:TRNLInstance;const aNetwork:TRNLNetwork); reintroduce;
        destructor Destroy; override;
-       procedure Start;
+       procedure Start(const aAddressFamilyWorkMode:TRNLHostAddressFamilyWorkMode=RNL_HOST_ADDRESS_FAMILY_WORK_MODE_IPV4_AND_IPV6);
        function Connect(const aAddress:TRNLAddress;
                         const aCountChannels:TRNLUInt32=1;
                         const aData:TRNLUInt64=0;
@@ -19885,7 +19899,8 @@ end;
 procedure TRNLHost.SetMTU(const aMTU:TRNLSizeUInt);
 begin
  if aMTU=0 then begin
-  fMTU:=1500;
+  fMTU:=900; // was 1500, but it is now lowered to 900 because some ISPs seem to drop
+             // larger UDP packets (mainly RTSP DESCRIBE response packets)
  end else begin
   fMTU:=Min(Max(aMTU,RNL_MINIMUM_MTU),RNL_MAXIMUM_MTU);
  end;
@@ -19947,14 +19962,19 @@ begin
 end;
 
 function TRNLHost.SendPacket(const aAddress:TRNLAddress;const aData;const aDataLength:TRNLSizeUInt):TRNLNetworkSendResult;
-var Family:TRNLInt64;
+var Index:TRNLInt32;
     Socket:TRNLSocket;
+    Family:TRNLInt64;
 begin
+ Socket:=RNL_SOCKET_NULL;
  Family:=aAddress.GetAddressFamily;
- if Family=RNL_IPV4 then begin
-  Socket:=fSockets[0];
- end else begin
-  Socket:=fSockets[1];
+ for Index:=Low(TRNLHostSockets) to High(TRNLHostSockets) do begin
+  if (fSockets[Index]<>RNL_SOCKET_NULL) and
+     ((fSocketFamilies[Index] and Family)<>0) then begin
+   Socket:=fSockets[Index];
+   Family:=HostSocketFamilies[Index];
+   break;
+  end;
  end;
  if Socket=RNL_SOCKET_NULL then begin
   result:=RNL_NETWORK_SEND_RESULT_ERROR;
@@ -20039,48 +20059,149 @@ begin
 
 end;
 
-procedure TRNLHost.Start;
+procedure TRNLHost.Start(const aAddressFamilyWorkMode:TRNLHostAddressFamilyWorkMode=RNL_HOST_ADDRESS_FAMILY_WORK_MODE_IPV4_AND_IPV6);
+ function CreateSocket(const aFamily:TRNLInt32;const aIPv4OnIPv6:boolean):TRNLSocket;
+ begin
+  result:=fNetwork.SocketCreate(RNL_SOCKET_TYPE_DATAGRAM,aFamily);
+  if result<>RNL_SOCKET_NULL then begin
+   case aFamily of
+    RNL_IPV4:begin
+     fNetwork.SocketSetOption(result,RNL_SOCKET_OPTION_DONTFRAGMENT,ord(not fMTUDoFragment) and 1);
+    end;
+    RNL_IPV6:begin
+     if aIPv4OnIPv6 then begin
+      fNetwork.SocketSetOption(result,RNL_SOCKET_OPTION_IPV6_V6ONLY,0);
+     end else begin
+      fNetwork.SocketSetOption(result,RNL_SOCKET_OPTION_IPV6_V6ONLY,1);
+     end;
+    end;
+   end;
+   if fNetwork.SocketBind(result,@fAddress,aFamily) then begin
+    fNetwork.SocketSetOption(result,RNL_SOCKET_OPTION_NONBLOCK,1);
+    fNetwork.SocketSetOption(result,RNL_SOCKET_OPTION_BROADCAST,1);
+    fNetwork.SocketSetOption(result,RNL_SOCKET_OPTION_REUSEADDR,1);
+    fNetwork.SocketSetOption(result,RNL_SOCKET_OPTION_RCVBUF,fReceiveBufferSize);
+    fNetwork.SocketSetOption(result,RNL_SOCKET_OPTION_SNDBUF,fSendBufferSize);
+    if aFamily=RNL_IPV4 then begin
+     fNetwork.SocketSetOption(result,RNL_SOCKET_OPTION_DONTFRAGMENT,ord(not fMTUDoFragment) and 1);
+    end;
+   end else begin
+    fNetwork.SocketDestroy(result);
+    result:=RNL_SOCKET_NULL;
+   end;
+  end;
+ end;
 var Index,Families,Family:TRNLInt32;
     TemporaryAddress:TRNLAddress;
     Socket:TRNLSocket;
+    IPv6OnIPv4:boolean;
 begin
 
- if fAddress.Host.Equals(RNL_HOST_ANY) then begin
-  Families:=RNL_IPV4 or RNL_IPV6;
- end else begin
-  Families:=fAddress.GetAddressFamily;
+ case aAddressFamilyWorkMode of
+  RNL_HOST_ADDRESS_FAMILY_WORK_MODE_IPV4_ONLY:begin
+   Families:=RNL_IPV4;
+  end;
+  RNL_HOST_ADDRESS_FAMILY_WORK_MODE_IPV6_ONLY:begin
+   Families:=RNL_IPV6;
+  end;
+  else {RNL_HOST_ADDRESS_FAMILY_WORK_MODE_IPV4_ON_IPV6,
+        RNL_HOST_ADDRESS_FAMILY_WORK_MODE_IPV4_AND_IPV6,
+        RNL_HOST_ADDRESS_FAMILY_WORK_MODE_AUTOMATIC:}begin
+   Families:=RNL_IPV4 or RNL_IPV6;
+  end;
  end;
 
- for Index:=Low(TRNLHostSockets) to High(TRNLHostSockets) do begin
-  Family:=HostSocketFamilies[Index];
-  if (Families and Family)<>0 then begin
-   Socket:=fNetwork.SocketCreate(RNL_SOCKET_TYPE_DATAGRAM,Family);
-   if Socket<>RNL_SOCKET_NULL then begin
-    case Family of
-     RNL_IPV4:begin
-      fNetwork.SocketSetOption(Socket,RNL_SOCKET_OPTION_DONTFRAGMENT,ord(not fMTUDoFragment) and 1);
-     end;
-     RNL_IPV6:begin
-      fNetwork.SocketSetOption(Socket,RNL_SOCKET_OPTION_IPV6_V6ONLY,1);
-     end;
-    end;
-    if fNetwork.SocketBind(Socket,@fAddress,Family) then begin
-     fNetwork.SocketSetOption(Socket,RNL_SOCKET_OPTION_NONBLOCK,1);
-     fNetwork.SocketSetOption(Socket,RNL_SOCKET_OPTION_BROADCAST,1);
-     fNetwork.SocketSetOption(Socket,RNL_SOCKET_OPTION_REUSEADDR,1);
-     fNetwork.SocketSetOption(Socket,RNL_SOCKET_OPTION_RCVBUF,fReceiveBufferSize);
-     fNetwork.SocketSetOption(Socket,RNL_SOCKET_OPTION_SNDBUF,fSendBufferSize);
-     if Family=RNL_IPV4 then begin
-      fNetwork.SocketSetOption(Socket,RNL_SOCKET_OPTION_DONTFRAGMENT,ord(not fMTUDoFragment) and 1);
+ if not fAddress.Host.Equals(RNL_HOST_ANY) then begin
+  Families:=Families and fAddress.GetAddressFamily;
+ end;
+
+ case aAddressFamilyWorkMode of
+  RNL_HOST_ADDRESS_FAMILY_WORK_MODE_IPV4_ONLY,
+  RNL_HOST_ADDRESS_FAMILY_WORK_MODE_IPV6_ONLY,
+  RNL_HOST_ADDRESS_FAMILY_WORK_MODE_IPV4_AND_IPV6:begin
+   for Index:=Low(TRNLHostSockets) to High(TRNLHostSockets) do begin
+    Family:=HostSocketFamilies[Index];
+    if (Families and Family)<>0 then begin
+     IPv6OnIPv4:=(Family=RNL_IPV6) and
+                 ((Families and RNL_IPV4)<>0) and
+                 (aAddressFamilyWorkMode=RNL_HOST_ADDRESS_FAMILY_WORK_MODE_IPV4_AND_IPV6) and
+                 (fSockets[0]=RNL_SOCKET_NULL);
+     fSockets[Index]:=CreateSocket(Family,IPv6OnIPv4);
+     if IPv6OnIPv4 then begin
+      fSocketFamilies[Index]:=RNL_IPV4 or RNL_IPV6;
+     end else begin
+      fSocketFamilies[Index]:=Family;
      end;
     end else begin
-     fNetwork.SocketDestroy(Socket);
-     Socket:=RNL_SOCKET_NULL;
+     fSockets[Index]:=RNL_SOCKET_NULL;
+     fSocketFamilies[Index]:=0;
     end;
    end;
-   fSockets[Index]:=Socket;
-  end else begin
-   fSockets[Index]:=RNL_SOCKET_NULL;
+  end;
+  RNL_HOST_ADDRESS_FAMILY_WORK_MODE_IPV4_ON_IPV6:begin
+   fSockets[0]:=RNL_SOCKET_NULL;
+   fSocketFamilies[0]:=0;
+   if (Families and RNL_IPV6)<>0 then begin
+    fSockets[1]:=CreateSocket(RNL_IPV6,(Families and RNL_IPV4)<>0);
+    if fSockets[1]<>RNL_SOCKET_NULL then begin
+     if (Families and RNL_IPV4)<>0 then begin
+      fSocketFamilies[1]:=RNL_IPV4 or RNL_IPV6;
+     end else begin
+      fSocketFamilies[1]:=RNL_IPV6;
+     end;
+    end else begin
+     fSocketFamilies[1]:=0;
+    end;
+   end else begin
+    fSockets[1]:=RNL_SOCKET_NULL;
+    fSocketFamilies[1]:=0;
+   end;
+  end;
+  else {RNL_HOST_ADDRESS_FAMILY_WORK_MODE_AUTOMATIC:}begin
+   if (Families and RNL_IPV6)<>0 then begin
+    fSockets[1]:=CreateSocket(RNL_IPV6,(Families and RNL_IPV4)<>0);
+    if fSockets[1]<>RNL_SOCKET_NULL then begin
+     fSockets[0]:=RNL_SOCKET_NULL;
+     fSocketFamilies[0]:=0;
+     if (Families and RNL_IPV4)<>0 then begin
+      fSocketFamilies[1]:=RNL_IPV4 or RNL_IPV6;
+     end else begin
+      fSocketFamilies[1]:=RNL_IPV6;
+     end;
+    end else begin
+     if (Families and RNL_IPV4)<>0 then begin
+      fSockets[0]:=CreateSocket(RNL_IPV4,false);
+      if fSockets[0]<>RNL_SOCKET_NULL then begin
+       fSocketFamilies[0]:=RNL_IPV4;
+      end else begin
+       fSocketFamilies[0]:=0;
+      end;
+     end else begin
+      fSockets[0]:=RNL_SOCKET_NULL;
+      fSocketFamilies[0]:=0;
+     end;
+     fSockets[1]:=CreateSocket(RNL_IPV6,false);
+     if fSockets[1]<>RNL_SOCKET_NULL then begin
+      fSocketFamilies[1]:=RNL_IPV6;
+     end else begin
+      fSocketFamilies[1]:=0;
+     end;
+    end;
+   end else begin
+    fSockets[1]:=RNL_SOCKET_NULL;
+    fSocketFamilies[1]:=0;
+    if (Families and RNL_IPV4)<>0 then begin
+     fSockets[0]:=CreateSocket(RNL_IPV4,false);
+     if fSockets[0]<>RNL_SOCKET_NULL then begin
+      fSocketFamilies[0]:=RNL_IPV4;
+     end else begin
+      fSocketFamilies[0]:=0;
+     end;
+    end else begin
+     fSockets[0]:=RNL_SOCKET_NULL;
+     fSocketFamilies[0]:=0;
+    end;
+   end;
   end;
  end;
 
