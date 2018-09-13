@@ -433,7 +433,7 @@ begin
       try
        ConsoleOutputThread:=TConsoleOutputThread.Create(false);
        try
-        if s='Server' then begin
+        if s='server' then begin
          Server:=TServer.Create(false);
          try
           readln;
@@ -443,7 +443,7 @@ begin
           LogThreadException('Server',Server.FatalException);
           Server.Free;
          end;
-        end else if s='Client' then begin
+        end else if s='client' then begin
          Client:=TClient.Create(false);
          try
           readln;
