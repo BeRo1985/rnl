@@ -366,6 +366,18 @@ unit RNL;
    {$ifend}
    {$define Delphi10BerlinAndUp}
   {$ifend}
+  {$if CompilerVersion>=32.0}
+   {$if CompilerVersion=32.0}
+    {$define Delphi10Tokyo}
+   {$ifend}
+   {$define Delphi10TokyoAndUp}
+  {$ifend}
+  {$if CompilerVersion>=33.0}
+   {$if CompilerVersion=33.0}
+    {$define Delphi10Rio}
+   {$ifend}
+   {$define Delphi10RioAndUp}
+  {$ifend}
  {$endif}
  {$ifndef Delphi4or5}
   {$ifndef BCB}
@@ -448,6 +460,9 @@ uses {$if defined(Posix)}
       {$ifdef Linux}
        Linuxapi.KernelIoctl,
       {$endif}
+      {$if defined(Android) and defined(RNL_DEBUG)}
+       FMX.Types,
+      {$ifend}
      {$elseif defined(Unix)}
       // FreePascal: Unix, Linux, Android, Darwin (MacOS, iOS)
       ctypes,
@@ -471,7 +486,7 @@ uses {$if defined(Posix)}
 {    Generics.Defaults,
      Generics.Collections;}
 
-const RNL_VERSION='1.00.2018.07.01.06.07.0000';
+const RNL_VERSION='1.00.2018.12.17.02.18.0000';
 
 type PPRNLInt8=^PRNLInt8;
      PRNLInt8=^TRNLInt8;
@@ -516,6 +531,10 @@ type PPRNLInt8=^PRNLInt8;
         Value:TRNLUInt64;
        );
      end;
+
+     PPRNLDouble=^PRNLDouble;
+     PRNLDouble=^TRNLDouble;
+     TRNLDouble=Double;
 
 {$if defined(NEXTGEN)}
      PPRNLChar=^PChar;
@@ -3742,6 +3761,50 @@ type PRNLVersion=^TRNLVersion;
        property OnPeerReceive:TRNLHostOnPeerReceive read fOnPeerReceive write fOnPeerReceive;
      end;
 
+{$ifdef RNLWorkInProgress}
+     TRNLTCPToUDPBridge=class;
+
+     TRNLTCPToUDPBridgeClient=class(TThread)
+      private
+       fBridge:TRNLTCPToUDPBridge;
+       fClientSocket:TRNLSocket;
+       fEvent:TRNLNetworkEvent;
+      protected
+       procedure Execute; override;
+      public
+       constructor Create(const aBridge:TRNLTCPToUDPBridge;const aClientSocket:TRNLSocket); reintroduce;
+       destructor Destroy; override;
+     end;
+
+     TRNLTCPToUDPBridge=class(TThread)
+      private
+       fInstance:TRNLInstance;
+       fNetwork:TRNLRealNetwork;
+       fAddress:TRNLAddress;
+       fPointerToAddress:PRNLAddress;
+       fAddressFamilies:TRNLAddressFamily;
+       fTargetAddress:TRNLAddress;
+       fPointerToTargetAddress:PRNLAddress;
+       fBackLog:TRNLInt32;
+       fStarted:boolean;
+       fEvent:TRNLNetworkEvent;
+       fSockets:TRNLHostSockets;
+       fClients:TThreadList;
+      protected
+       procedure Execute; override;
+      public
+       constructor Create; reintroduce;
+       destructor Destroy; override;
+       procedure Start; reintroduce;
+       procedure Stop; reintroduce;
+      public
+       property Address:PRNLAddress read fPointerToAddress;
+       property AddressFamilies:TRNLAddressFamily read fAddressFamilies write fAddressFamilies;
+       property TargetAddress:PRNLAddress read fPointerToTargetAddress;
+       property BackLog:TRNLInt32 read fBackLog write fBackLog;
+     end;
+{$endif}
+
 const RNL_HOST_ANY_INIT:TRNLHostAddress=(Addr:(0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0));
       RNL_HOST_ANY:TRNLHostAddress=(Addr:(0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0));
       RNL_HOST_IPV4_LOCALHOST:TRNLHostAddress=(Addr:(0,0,0,0,0,0,0,0,0,0,255,255,127,0,0,1));
@@ -3849,6 +3912,33 @@ const RNLProtocolHandshakePacketHeaderSignature:TRNLProtocolHandshakePacketHeade
                                                               3,3,1,2,2,2,2,0,
                                                               3,1,2,0,1,0,1,1);
 {$endif}
+
+{$if defined(RNL_DEBUG)}
+function RNLDebugFormatFloat(const aValue:TRNLDouble;const aWidth,aWidth2:TRNLInt32):string;
+var TemporaryString:ShortString;
+begin
+ Str(aValue:aWidth:aWidth2,TemporaryString);
+ result:=TemporaryString;
+end;
+
+procedure RNLDebugOutputString(const aMessage:string);
+{$if defined(Posix) and defined(Android)}
+begin
+ FMX.Types.Log.d(aMessage);
+end;
+{$elseif defined(Windows) or defined(Win32) or defined(Win64)}
+var TemporaryString:WideString;
+begin
+ TemporaryString:=aMessage;
+ OutputDebugStringW(PWideChar(TemporaryString));
+end;
+{$else)}
+begin
+ WriteLn(aMessage);
+end;
+{$ifend}
+
+{$ifend}
 
 class function TRNLMath.RoundUpToPowerOfTwo32(Value:TRNLUInt32):TRNLUInt32;
 begin
@@ -18151,17 +18241,17 @@ begin
 {$if defined(RNL_DEBUG)}
   fHost.fInstance.fDebugLock.Acquire;
   try
-   writeln('Peer ',fLocalPeerID,': ', //' [',TypInfo.GetEnumName(TypeInfo(TRNLPeerState),TRNLInt32(fState)),']: ',
-           fCountPacketLoss,' Packets lost at last measured time frame, ',
-           fPacketLoss*OneDiv32Bit:1:8,'+-',
-           fPacketLossVariance*OneDiv32Bit:1:8,
-           ' Packet loss, ',
-           fRoundTripTime*OneDiv32Bit:1:2,'+-',fRoundTripTimeVariance*OneDiv32Bit:1:2,
-           ' ms round trip time, ',
-           fIncomingBandwidthRateTracker.UnitsPerSecond/1024.0:1:3,
-           ' incoming kbps, ',
-           fOutgoingBandwidthRateTracker.UnitsPerSecond/1024.0:1:3,
-           ' outgoing kbps');
+   RNLDebugOutputString('Peer '+IntToStr(fLocalPeerID)+': '+ //' [',TypInfo.GetEnumName(TypeInfo(TRNLPeerState),TRNLInt32(fState)),']: ',
+                        IntToStr(fCountPacketLoss)+' Packets lost at last measured time frame, '+
+                        RNLDebugFormatFloat(fPacketLoss*OneDiv32Bit,1,8)+'+-'+
+                        RNLDebugFormatFloat(fPacketLossVariance*OneDiv32Bit,1,8)+
+                        ' Packet loss, '+
+                        RNLDebugFormatFloat(fRoundTripTime*OneDiv32Bit,1,2)+'+-'+RNLDebugFormatFloat(fRoundTripTimeVariance*OneDiv32Bit,1,2)+
+                        ' ms round trip time, '+
+                        RNLDebugFormatFloat(fIncomingBandwidthRateTracker.UnitsPerSecond/1024.0,1,3)+
+                        ' incoming kbps, '+
+                        RNLDebugFormatFloat(fOutgoingBandwidthRateTracker.UnitsPerSecond/1024.0,1,3)+
+                        ' outgoing kbps');
   finally
    fHost.fInstance.fDebugLock.Release;
   end;
@@ -18185,9 +18275,9 @@ begin
 {$if defined(RNL_DEBUG) and defined(RNL_DEBUG_MTU)}
  fHost.fInstance.fDebugLock.Acquire;
  try
-  writeln('Peer ',fLocalPeerID,': ',
-          'Incoming MTU probe with phase ',aIncomingBlockPacket.fBlockPacket.MTUProbe.Phase,' ',
-          'and MTU size ',TRNLEndianness.LittleEndianToHost16(aIncomingBlockPacket.fBlockPacket.MTUProbe.Size));
+  RNLDebugOutputString('Peer '+IntToStr(fLocalPeerID)+': '+
+                       'Incoming MTU probe with phase '+IntToStr(aIncomingBlockPacket.fBlockPacket.MTUProbe.Phase)+' '+
+                       'and MTU size '+IntToStr(TRNLEndianness.LittleEndianToHost16(aIncomingBlockPacket.fBlockPacket.MTUProbe.Size)));
  finally
   fHost.fInstance.fDebugLock.Release;
  end;
@@ -18290,7 +18380,9 @@ begin
 {$if defined(RNL_DEBUG) and defined(RNL_DEBUG_PING)}
      fHost.fInstance.fDebugLock.Acquire;
      try
-      writeln('Peer ',fLocalPeerID,': Incoming ping ',IncomingBlockPacket.fBlockPacket.Ping.SequenceNumber,' => Outgoing pong ',IncomingBlockPacket.fBlockPacket.Ping.SequenceNumber);
+      RNLDebugOutputString('Peer '+IntToStr(fLocalPeerID)+': '+
+                           'Incoming ping '+IntToStr(IncomingBlockPacket.fBlockPacket.Ping.SequenceNumber)+
+                           ' => Outgoing pong '+IntToStr(IncomingBlockPacket.fBlockPacket.Ping.SequenceNumber));
      finally
       fHost.fInstance.fDebugLock.Release;
      end;
@@ -18328,7 +18420,7 @@ begin
 {$if defined(RNL_DEBUG) and defined(RNL_DEBUG_PING)}
       fHost.fInstance.fDebugLock.Acquire;
       try
-       writeln('Peer ',fLocalPeerID,': Incoming pong ',IncomingBlockPacket.fBlockPacket.Pong.SequenceNumber);
+       RNLDebugOutputString('Peer '+IntToStr(fLocalPeerID)+': Incoming pong '+IntToStr(IncomingBlockPacket.fBlockPacket.Pong.SequenceNumber));
       finally
        fHost.fInstance.fDebugLock.Release;
       end;
@@ -18339,7 +18431,7 @@ begin
 {$if defined(RNL_DEBUG) and defined(RNL_DEBUG_PING)}
       fHost.fInstance.fDebugLock.Acquire;
       try
-       writeln('Peer ',fLocalPeerID,': Incoming ignored pong ',IncomingBlockPacket.fBlockPacket.Pong.SequenceNumber);
+       RNLDebugOutputString('Peer '+IntToStr(fLocalPeerID)+': Incoming ignored pong '+IntToStr(IncomingBlockPacket.fBlockPacket.Pong.SequenceNumber));
       finally
        fHost.fInstance.fDebugLock.Release;
       end;
@@ -18898,7 +18990,7 @@ begin
 {$if defined(RNL_DEBUG) and defined(RNL_DEBUG_PING)}
    fHost.fInstance.fDebugLock.Acquire;
    try
-    writeln('Peer ',fLocalPeerID,': Outgoing ping ',fOutgoingPingSequenceNumber);
+    RNLDebugOutputString('Peer '+IntToStr(fLocalPeerID)+': Outgoing ping '+IntToStr(fOutgoingPingSequenceNumber));
    finally
     fHost.fInstance.fDebugLock.Release;
    end;
@@ -18942,7 +19034,7 @@ begin
 {$if defined(RNL_DEBUG) and defined(RNL_DEBUG_PING)}
     fHost.fInstance.fDebugLock.Acquire;
     try
-     writeln('Peer ',fLocalPeerID,': Outgoing lost resend ping ',KeepAliveWindowItem^.SequenceNumber);
+     RNLDebugOutputString('Peer '+IntToStr(fLocalPeerID)+': Outgoing lost resend ping '+IntToStr(KeepAliveWindowItem^.SequenceNumber));
     finally
      fHost.fInstance.fDebugLock.Release;
     end;
@@ -19210,9 +19302,9 @@ begin
      fInstance.fDebugLock.Acquire;
      try
       if assigned(Peer) then begin
-       writeln('DP: ',Peer.fSharedSecretKey.ui32[0],' ',Peer.fSharedSecretKey.ui32[1],' ',Peer.fSharedSecretKey.ui32[2],' ',Peer.fSharedSecretKey.ui32[3],' ',TRNLUInt32(fReceivedDataLength)-ReceivedDataOffset);
+       RNLDebugOutputString('DP: '+IntToStr(Peer.fSharedSecretKey.ui32[0])+' '+IntToStr(Peer.fSharedSecretKey.ui32[1])+' '+IntToStr(Peer.fSharedSecretKey.ui32[2])+' '+IntToStr(Peer.fSharedSecretKey.ui32[3])+' '+IntToStr(TRNLUInt32(fReceivedDataLength)-ReceivedDataOffset));
       end else begin
-       writeln('DH: ',Peer.fSharedSecretKey.ui32[0],' ',Peer.fSharedSecretKey.ui32[1],' ',Peer.fSharedSecretKey.ui32[2],' ',Peer.fSharedSecretKey.ui32[3],' ',TRNLUInt32(fReceivedDataLength)-ReceivedDataOffset);
+       RNLDebugOutputString('DH: '+IntToStr(Peer.fSharedSecretKey.ui32[0])+' '+IntToStr(Peer.fSharedSecretKey.ui32[1])+' '+IntToStr(Peer.fSharedSecretKey.ui32[2])+' '+IntToStr(Peer.fSharedSecretKey.ui32[3])+' '+IntToStr(TRNLUInt32(fReceivedDataLength)-ReceivedDataOffset));
       end;
      finally
       fInstance.fDebugLock.Release;
@@ -19224,7 +19316,7 @@ begin
 {$if defined(RNL_DEBUG) and false}
     fInstance.fDebugLock.Acquire;
     try
-     writeln(Peer.fIncomingEncryptedPacketSequenceNumber,' ',EncryptedPacketSequenceNumber);
+     RNLDebugOutputString(IntToStr(Peer.fIncomingEncryptedPacketSequenceNumber)+' '+IntToStr(EncryptedPacketSequenceNumber));
     finally
      fInstance.fDebugLock.Release;
     end;
@@ -19295,9 +19387,9 @@ begin
 {$if defined(RNL_DEBUG) and defined(RNL_DEBUG_COMPRESS)}
      fHost.fInstance.fDebugLock.Acquire;
      try
-      writeln('Peer ',fLocalPeerID,': ',
-              'compressed ',PayloadDataLength-SizeOf(TRNLUInt16),' => uncompressed ',DecompressedDataLength,' ',
-              '(',((PayloadDataLength-SizeOf(TRNLUInt16))*100.0)/DecompressedDataLength:1:1,'%)');
+      RNLDebugOutputString('Peer '+IntToStr(fLocalPeerID)+': '+
+                           'compressed '+IntToStr(PayloadDataLength-SizeOf(TRNLUInt16))+' => uncompressed '+IntToStr(DecompressedDataLength)+' '+
+                           '('+RNLDebugFormatFloat(((PayloadDataLength-SizeOf(TRNLUInt16))*100.0)/DecompressedDataLength,1,1)+'%)');
      finally
       fHost.fInstance.fDebugLock.Release;
      end;
@@ -19387,9 +19479,9 @@ begin
 {$if defined(RNL_DEBUG) and defined(RNL_DEBUG_COMPRESS)}
      fHost.fInstance.fDebugLock.Acquire;
      try
-      writeln('Peer ',fLocalPeerID,': ',
-              'uncompressed ',OutgoingPayloadDataLength,' => compressed ',CompressedDataLength,' ',
-              '(',(CompressedDataLength*100.0)/OutgoingPayloadDataLength:1:1,'%)');
+      RNLDebugOutputString('Peer '+IntToStr(fLocalPeerID)+': ',
+                           'uncompressed '+IntToStr(OutgoingPayloadDataLength)+' => compressed '+IntToStr(CompressedDataLength)+' '+
+                           '('+RNLDebugFormatFloat((CompressedDataLength*100.0)/OutgoingPayloadDataLength,1,1)+'%)');
      finally
       fHost.fInstance.fDebugLock.Release;
      end;
@@ -20436,7 +20528,7 @@ begin
 {$if defined(RNL_DEBUG) and defined(RNL_DEBUG_SECURITY)}
  fInstance.fDebugLock.Acquire;
  try
-  writeln('DispatchReceivedHandshakePacketConnectionRequest');
+  RNLDebugOutputString('DispatchReceivedHandshakePacketConnectionRequest');
  finally
   fInstance.fDebugLock.Release;
  end;
@@ -20543,7 +20635,7 @@ begin
 {$if defined(RNL_DEBUG) and defined(RNL_DEBUG_SECURITY)}
  fInstance.fDebugLock.Acquire;
  try
-  writeln('DispatchReceivedHandshakePacketConnectionChallengeRequest');
+  RNLDebugOutputString('DispatchReceivedHandshakePacketConnectionChallengeRequest');
  finally
   fInstance.fDebugLock.Release;
  end;
@@ -20625,7 +20717,7 @@ begin
 {$if defined(RNL_DEBUG) and defined(RNL_DEBUG_SECURITY)}
  fInstance.fDebugLock.Acquire;
  try
-  writeln('DispatchReceivedHandshakePacketConnectionChallengeResponse');
+  RNLDebugOutputString('DispatchReceivedHandshakePacketConnectionChallengeResponse');
  finally
   fInstance.fDebugLock.Release;
  end;
@@ -20698,7 +20790,7 @@ begin
  {$if defined(RNL_DEBUG) and defined(RNL_DEBUG_SECURITY_EXTENDED)}
   fInstance.fDebugLock.Acquire;
   try
-   writeln('HandleConnectionRequest SharedSecretKey: ',ConnectionCandidate^.Data^.SharedSecretKey.ui32[0],' ',ConnectionCandidate^.Data^.SharedSecretKey.ui32[1],' ',ConnectionCandidate^.Data^.SharedSecretKey.ui32[2],' ',ConnectionCandidate^.Data^.SharedSecretKey.ui32[3]);
+   RNLDebugOutputString('HandleConnectionRequest SharedSecretKey: '+IntToStr(ConnectionCandidate^.Data^.SharedSecretKey.ui32[0])+' '+IntToStr(ConnectionCandidate^.Data^.SharedSecretKey.ui32[1])+' '+IntToStr(ConnectionCandidate^.Data^.SharedSecretKey.ui32[2])+' '+IntToStr(ConnectionCandidate^.Data^.SharedSecretKey.ui32[3]));
   finally
    fInstance.fDebugLock.Release;
   end;
@@ -20775,7 +20867,7 @@ begin
 {$if defined(RNL_DEBUG) and defined(RNL_DEBUG_SECURITY)}
  fInstance.fDebugLock.Acquire;
  try
-  writeln('DispatchReceivedHandshakePacketConnectionAuthenticationRequest');
+  RNLDebugOutputString('DispatchReceivedHandshakePacketConnectionAuthenticationRequest');
  finally
   fInstance.fDebugLock.Release;
  end;
@@ -20803,10 +20895,10 @@ begin
 {$if defined(RNL_DEBUG) and defined(RNL_DEBUG_SECURITY_EXTENDED)}
  fInstance.fDebugLock.Acquire;
  try
-  writeln('HandleConnectionAuthenticationRequest SharedSecretKey: ',Peer.fSharedSecretKey.ui32[0],' ',
-                                                                    Peer.fSharedSecretKey.ui32[1],' ',
-                                                                    Peer.fSharedSecretKey.ui32[2],' ',
-                                                                    Peer.fSharedSecretKey.ui32[3]);
+  RNLDebugOutputString('HandleConnectionAuthenticationRequest SharedSecretKey: '+IntToStr(Peer.fSharedSecretKey.ui32[0])+' '+
+                                                                                 IntToStr(Peer.fSharedSecretKey.ui32[1])+' '+
+                                                                                 IntToStr(Peer.fSharedSecretKey.ui32[2])+' '+
+                                                                                 IntToStr(Peer.fSharedSecretKey.ui32[3]));
  finally
   fInstance.fDebugLock.Release;
  end;
@@ -21073,7 +21165,7 @@ begin
 {$if defined(RNL_DEBUG) and defined(RNL_DEBUG_SECURITY)}
  fInstance.fDebugLock.Acquire;
  try
-  writeln('DispatchReceivedHandshakePacketConnectionAuthenticationResponse');
+  RNLDebugOutputString('DispatchReceivedHandshakePacketConnectionAuthenticationResponse');
  finally
   fInstance.fDebugLock.Release;
  end;
@@ -21219,7 +21311,7 @@ begin
 {$if defined(RNL_DEBUG) and defined(RNL_DEBUG_SECURITY)}
  fInstance.fDebugLock.Acquire;
  try
-  writeln('DispatchReceivedHandshakePacketConnectionApprovalResponse');
+  RNLDebugOutputString('DispatchReceivedHandshakePacketConnectionApprovalResponse');
  finally
   fInstance.fDebugLock.Release;
  end;
@@ -21304,7 +21396,7 @@ begin
 {$if defined(RNL_DEBUG) and defined(RNL_DEBUG_SECURITY)}
  fInstance.fDebugLock.Acquire;
  try
-  writeln('DispatchReceivedHandshakePacketConnectionDenialResponse');
+  RNLDebugOutputString('DispatchReceivedHandshakePacketConnectionDenialResponse');
  finally
   fInstance.fDebugLock.Release;
  end;
@@ -21369,7 +21461,7 @@ begin
 {$if defined(RNL_DEBUG) and defined(RNL_DEBUG_SECURITY)}
  fInstance.fDebugLock.Acquire;
  try
-  writeln('DispatchReceivedHandshakePacketConnectionApprovalAcknowledge');
+  RNLDebugOutputString('DispatchReceivedHandshakePacketConnectionApprovalAcknowledge');
  finally
   fInstance.fDebugLock.Release;
  end;
@@ -21766,7 +21858,7 @@ begin
 {$if defined(RNL_DEBUG) and defined(RNL_DEBUG_EXTENDED)}
   fInstance.fDebugLock.Acquire;
   try
-   writeln('Blup');
+   RNLDebugOutputString('Blup');
   finally
    fInstance.fDebugLock.Release;
   end;
@@ -21884,6 +21976,185 @@ begin
   fNetworkEvent.SetEvent;
  end;
 end;
+
+{$ifdef RNLWorkInProgress}
+constructor TRNLTCPToUDPBridgeClient.Create(const aBridge:TRNLTCPToUDPBridge;const aClientSocket:TRNLSocket);
+begin
+ fBridge:=aBridge;
+ fBridge.fClients.Add(self);
+ fClientSocket:=aClientSocket;
+ fEvent:=TRNLNetworkEvent.Create;
+ FreeOnTerminate:=true;
+ inherited Create(false);
+end;
+
+destructor TRNLTCPToUDPBridgeClient.Destroy;
+begin
+ fBridge.fNetwork.SocketShutdown(fClientSocket);
+ fBridge.fNetwork.SocketDestroy(fClientSocket);
+ fBridge.fClients.Remove(self);
+ FreeAndNil(fEvent);
+ inherited Destroy;
+end;
+
+procedure TRNLTCPToUDPBridgeClient.Execute;
+begin
+ // TODO
+end;
+
+constructor TRNLTCPToUDPBridge.Create;
+begin
+ fInstance:=TRNLInstance.Create;
+ fNetwork:=TRNLRealNetwork.Create(fInstance);
+ fAddress.Host:=RNL_HOST_ANY;
+ fAddress.Port:=2048;
+ fAddressFamilies:=RNL_IPV4 or RNL_IPV6;
+ fPointerToAddress:=@fAddress;
+ fTargetAddress:=TRNLAddress.CreateFromString('127.0.0.1:1');
+ fPointerToTargetAddress:=@fTargetAddress;
+ fStarted:=false;
+ fBackLog:=-1;
+ fEvent:=TRNLNetworkEvent.Create;
+ fClients:=TThreadList.Create;
+ inherited Create(true);
+end;
+
+destructor TRNLTCPToUDPBridge.Destroy;
+begin
+ Stop;
+ FreeAndNil(fEvent);
+ FreeAndNil(fNetwork);
+ FreeAndNil(fInstance);
+ FreeAndNil(fClients);
+ inherited Destroy;
+end;
+
+procedure TRNLTCPToUDPBridge.Start;
+ function CreateSocket(const aFamily:TRNLInt32):TRNLSocket;
+ begin
+  result:=fNetwork.SocketCreate(RNL_SOCKET_TYPE_STREAM,aFamily);
+  if result<>RNL_SOCKET_NULL then begin
+   fNetwork.SocketSetOption(result,RNL_SOCKET_OPTION_REUSEADDR,1);
+   fNetwork.SocketSetOption(result,RNL_SOCKET_OPTION_NONBLOCK,1);
+   if aFamily=RNL_IPV6 then begin
+    if fSockets[0]=RNL_SOCKET_NULL then begin
+     fNetwork.SocketSetOption(result,RNL_SOCKET_OPTION_IPV6_V6ONLY,0);
+    end else begin
+     fNetwork.SocketSetOption(result,RNL_SOCKET_OPTION_IPV6_V6ONLY,1);
+    end;
+   end;
+   if fNetwork.SocketBind(result,fPointerToAddress,aFamily) then begin
+    if fNetwork.SocketListen(result,fBackLog) then begin
+     // ok
+    end else begin
+     fNetwork.SocketDestroy(result);
+     result:=RNL_SOCKET_NULL;
+    end;
+   end else begin
+    fNetwork.SocketDestroy(result);
+    result:=RNL_SOCKET_NULL;
+   end;
+  end;
+ end;
+var Index,Family:TRNLInt32;
+begin
+ if not fAddress.Host.Equals(RNL_HOST_ANY) then begin
+  fAddressFamilies:=fAddressFamilies and fAddressFamilies.GetAddressFamily;
+ end;
+ for Index:=Low(TRNLHostSockets) to High(TRNLHostSockets) do begin
+  Family:=TRNLHost.HostSocketFamilies[Index];
+  if (fAddressFamilies and Family)<>0 then begin
+   fSockets[Index]:=CreateSocket(Family);
+  end else begin
+   fSockets[Index]:=RNL_SOCKET_NULL;
+  end;
+ end;
+ fStarted:=true;
+ inherited Start;
+end;
+
+procedure TRNLTCPToUDPBridge.Stop;
+var Index:TRNLInt32;
+    List:TList;
+    OK:boolean;
+    Client:TRNLTCPToUDPBridgeClient;
+begin
+ if fStarted and not Terminated then begin
+  Terminate;
+  fEvent.SetEvent;
+  WaitFor;
+ end;
+ for Index:=Low(TRNLHostSockets) to High(TRNLHostSockets) do begin
+  if fSockets[Index]<>RNL_SOCKET_NULL then begin
+   fNetwork.SocketShutdown(fSockets[Index]);
+   fNetwork.SocketDestroy(fSockets[Index]);
+   fSockets[Index]:=RNL_SOCKET_NULL;
+  end;
+ end;
+ repeat
+  OK:=true;
+  List:=fClients.LockList;
+  try
+   if List.Count>0 then begin
+    OK:=false;
+    for Index:=0 to List.Count-1 do begin
+     try
+      Client:=TRNLTCPToUDPBridgeClient(List[Index]);
+      if not Client.Terminated then begin
+       Client.Terminate;
+       Client.fEvent.SetEvent;
+      end;
+     except
+     end;
+    end;
+   end;
+  finally
+   fClients.UnlockList;
+  end;
+ until OK;
+end;
+
+procedure TRNLTCPToUDPBridge.Execute;
+var Index,MaxSocket:TRNLInt32;
+    ReadSet,WriteSet:TRNLSocketSet;
+    AcceptAddress:TRNLAddress;
+    AcceptSocket:TRNLSocket;
+begin
+ try
+  while fStarted and not Terminated do begin
+   MaxSocket:=0;
+   ReadSet:=TRNLSocketSet.Empty;
+   WriteSet:=TRNLSocketSet.Empty;
+   for Index:=Low(TRNLHostSockets) to High(TRNLHostSockets) do begin
+    if fSockets[Index]<>RNL_SOCKET_NULL then begin
+     ReadSet.Add(fSockets[Index]);
+     if MaxSocket<fSockets[Index] then begin
+      MaxSocket:=fSockets[Index];
+     end;
+    end;
+   end;
+   if fNetwork.SocketSelect(MaxSocket+1,ReadSet,WriteSet,1000,fEvent)>0 then begin
+    for Index:=Low(TRNLHostSockets) to High(TRNLHostSockets) do begin
+     if ReadSet.Check(fSockets[Index]) then begin
+      repeat
+       AcceptAddress.Host:=RNL_HOST_ANY_INIT;
+       AcceptAddress.Port:=0;
+       AcceptAddress.ScopeID:=0;
+       AcceptSocket:=fNetwork.SocketAccept(fSockets[Index],@AcceptAddress,TRNLHost.HostSocketFamilies[Index]);
+       if AcceptSocket<>RNL_SOCKET_NULL then begin
+        TRNLTCPToUDPBridgeClient.Create(self,AcceptSocket);
+       end else begin
+        break;
+       end;
+      until false;
+     end;
+    end;
+   end;
+  end;
+ finally
+ end;
+end;
+{$endif}
 
 initialization
  InitializeCRC32C;
