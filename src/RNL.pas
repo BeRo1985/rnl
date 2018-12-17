@@ -486,7 +486,7 @@ uses {$if defined(Posix)}
 {    Generics.Defaults,
      Generics.Collections;}
 
-const RNL_VERSION='1.00.2018.12.17.02.18.0000';
+const RNL_VERSION='1.00.2018.12.17.02.23.0000';
 
 type PPRNLInt8=^PRNLInt8;
      PRNLInt8=^TRNLInt8;
@@ -3915,11 +3915,17 @@ const RNLProtocolHandshakePacketHeaderSignature:TRNLProtocolHandshakePacketHeade
 
 {$if defined(RNL_DEBUG)}
 function RNLDebugFormatFloat(const aValue:TRNLDouble;const aWidth,aWidth2:TRNLInt32):string;
+{$ifdef NextGen}
+begin
+ Str(aValue:aWidth:aWidth2,result);
+end;
+{$else}
 var TemporaryString:ShortString;
 begin
  Str(aValue:aWidth:aWidth2,TemporaryString);
  result:=TemporaryString;
 end;
+{$endif}
 
 procedure RNLDebugOutputString(const aMessage:string);
 {$if defined(Posix) and defined(Android)}
