@@ -461,7 +461,7 @@ uses {$if defined(Posix)}
        Linuxapi.KernelIoctl,
       {$endif}
       {$if defined(Android) and defined(RNL_DEBUG)}
-       FMX.Types,
+       Androidapi.Log,
       {$ifend}
      {$elseif defined(Unix)}
       // FreePascal: Unix, Linux, Android, Darwin (MacOS, iOS)
@@ -486,7 +486,7 @@ uses {$if defined(Posix)}
 {    Generics.Defaults,
      Generics.Collections;}
 
-const RNL_VERSION='1.00.2018.12.17.02.23.0000';
+const RNL_VERSION='1.00.2018.12.17.02.42.0000';
 
 type PPRNLInt8=^PRNLInt8;
      PRNLInt8=^TRNLInt8;
@@ -3929,8 +3929,10 @@ end;
 
 procedure RNLDebugOutputString(const aMessage:string);
 {$if defined(Posix) and defined(Android)}
+var TemporaryString:TRNLRawByteString;
 begin
- FMX.Types.Log.d(aMessage);
+ TemporaryString:=aMessage;
+ Androidapi.Log.LOGI({$ifdef NextGen}MarshaledAString{$else}PAnsiChar{$endif}(TemporaryString));
 end;
 {$elseif defined(Windows) or defined(Win32) or defined(Win64)}
 var TemporaryString:WideString;
