@@ -6,7 +6,7 @@
  *                                zlib license                                *
  *============================================================================*
  *                                                                            *
- * Copyright (C) 2016-2017, Benjamin Rosseaux (benjamin@rosseaux.de)          *
+ * Copyright (C) 2016-2019, Benjamin Rosseaux (benjamin@rosseaux.de)          *
  *                                                                            *
  * This software is provided 'as-is', without any express or implied          *
  * warranty. In no event will the authors be held liable for any damages      *
@@ -486,7 +486,7 @@ uses {$if defined(Posix)}
 {    Generics.Defaults,
      Generics.Collections;}
 
-const RNL_VERSION='1.00.2018.12.17.02.42.0000';
+const RNL_VERSION='1.00.2019.04.28.18.07.0000';
 
 type PPRNLInt8=^PRNLInt8;
      PRNLInt8=^TRNLInt8;
@@ -10072,7 +10072,7 @@ var Index:TRNLSizeUInt;
 begin
  fChaCha20Context.Process(fBuffer,fBuffer,SizeOf(TRNLRandomGeneratorBuffer));
  if aDataLength>0 then begin
-  for Index:=1 to Min(aDataLength,SizeOf(TRNLRandomGeneratorSeed)) do begin
+  for Index:=1 to Min(TRNLSizeUInt(aDataLength),TRNLSizeUInt(SizeOf(TRNLRandomGeneratorSeed))) do begin
    fBuffer[Index]:=fBuffer[Index] xor PRNLUInt8Array(TRNLPointer(@aData))^[Index];
   end;
  end;
