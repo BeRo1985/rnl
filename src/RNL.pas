@@ -486,7 +486,7 @@ uses {$if defined(Posix)}
 {    Generics.Defaults,
      Generics.Collections;}
 
-const RNL_VERSION='1.00.2019.04.28.18.07.0000';
+const RNL_VERSION='1.00.2019.07.06.16.58.0000';
 
 type PPRNLInt8=^PRNLInt8;
      PRNLInt8=^TRNLInt8;
@@ -1305,6 +1305,7 @@ type PRNLVersion=^TRNLVersion;
        function Head:TRNLCircularDoublyLinkedListNode<T>; inline;
        function Tail:TRNLCircularDoublyLinkedListNode<T>; inline;
        function IsEmpty:boolean; inline;
+       function IsNotEmpty:boolean; inline;
        function Front:TRNLCircularDoublyLinkedListNode<T>; inline;
        function Back:TRNLCircularDoublyLinkedListNode<T>; inline;
        function Insert(const aData:TRNLCircularDoublyLinkedListNode<T>):TRNLCircularDoublyLinkedListNode<T>; inline;
@@ -1338,6 +1339,7 @@ type PRNLVersion=^TRNLVersion;
        destructor Destroy; override;
        procedure Clear;
        function IsEmpty:boolean; inline;
+       function IsNotEmpty:boolean; inline;
        procedure EnqueueAtFront(const aItem:T);
        procedure Enqueue(const aItem:T);
        function Dequeue(out aItem:T):boolean; overload;
@@ -1361,6 +1363,7 @@ type PRNLVersion=^TRNLVersion;
        destructor Destroy; override;
        procedure Clear;
        function IsEmpty:boolean; inline;
+       function IsNotEmpty:boolean; inline;
        procedure Push(const aItem:T);
        function Pop(out aItem:T):boolean;
        function Peek(out aItem:T):boolean;
@@ -8265,6 +8268,11 @@ begin
  result:=fNext=self;
 end;
 
+function TRNLCircularDoublyLinkedListNode<T>.IsNotEmpty:boolean;
+begin
+ result:=fNext<>self;
+end;
+
 function TRNLCircularDoublyLinkedListNode<T>.Front:TRNLCircularDoublyLinkedListNode<T>;
 begin
  result:=fNext;
@@ -8398,6 +8406,11 @@ begin
  result:=fCount=0;
 end;
 
+function TRNLQueue<T>.IsNotEmpty:boolean;
+begin
+ result:=fCount>0;
+end;
+
 procedure TRNLQueue<T>.GrowResize(const aSize:TRNLSizeInt);
 var Index,OtherIndex:TRNLSizeInt;
     NewItems:TRNLQueueItems;
@@ -8522,6 +8535,11 @@ end;
 function TRNLStack<T>.IsEmpty:boolean;
 begin
  result:=fCount=0;
+end;
+
+function TRNLStack<T>.IsNotEmpty:boolean;
+begin
+ result:=fCount>0;
 end;
 
 procedure TRNLStack<T>.Push(const aItem:T);
@@ -21876,7 +21894,7 @@ begin
 
    ClearPeerToFreeList;
 
-   if assigned(aEvent) and fEventQueue.Dequeue(aEvent^) then begin
+   if assigned(aEvent) and fEventQueue.IsNotEmpty and fEventQueue.Dequeue(aEvent^) then begin
     result:=RNL_HOST_SERVICE_STATUS_EVENT;
     exit;
    end;
