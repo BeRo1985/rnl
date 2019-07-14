@@ -486,7 +486,7 @@ uses {$if defined(Posix)}
 {    Generics.Defaults,
      Generics.Collections;}
 
-const RNL_VERSION='1.00.2019.07.06.16.58.0000';
+const RNL_VERSION='1.00.2019.07.14.13.09.0000';
 
 type PPRNLInt8=^PRNLInt8;
      PRNLInt8=^TRNLInt8;
@@ -10086,11 +10086,16 @@ begin
 end;
 
 procedure TRNLRandomGenerator.Rekey(const aData;const aDataLength:TRNLSizeUInt);
-var Index:TRNLSizeUInt;
+var Index,Len:TRNLSizeUInt;
 begin
  fChaCha20Context.Process(fBuffer,fBuffer,SizeOf(TRNLRandomGeneratorBuffer));
  if aDataLength>0 then begin
-  for Index:=1 to Min(TRNLSizeUInt(aDataLength),TRNLSizeUInt(SizeOf(TRNLRandomGeneratorSeed))) do begin
+  if TRNLSizeUInt(aDataLength)<TRNLSizeUInt(SizeOf(TRNLRandomGeneratorSeed)) then begin
+   Len:=TRNLSizeUInt(aDataLength);
+  end else begin
+   Len:=TRNLSizeUInt(SizeOf(TRNLRandomGeneratorSeed));
+  end;
+  for Index:=1 to Len do begin
    fBuffer[Index]:=fBuffer[Index] xor PRNLUInt8Array(TRNLPointer(@aData))^[Index];
   end;
  end;
