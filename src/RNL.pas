@@ -486,7 +486,7 @@ uses {$if defined(Posix)}
 {    Generics.Defaults,
      Generics.Collections;}
 
-const RNL_VERSION='1.00.2019.07.14.13.09.0000';
+const RNL_VERSION='1.00.2019.08.11.22.21.0000';
 
 type PPRNLInt8=^PRNLInt8;
      PRNLInt8=^TRNLInt8;
@@ -2126,7 +2126,8 @@ type PRNLVersion=^TRNLVersion;
      TRNLMessageFlag=
       (
        RNL_MESSAGE_FLAG_NO_ALLOCATE,
-       RNL_MESSAGE_FLAG_NO_FREE
+       RNL_MESSAGE_FLAG_NO_FREE,
+       RNL_MESSAGE_FLAG_UNRELIABLE_ORDERED_CHANNEL_PREVIOUS_LOST
       );
 
      PRNLMessageFlags=^TRNLMessageFlags;
@@ -3079,6 +3080,8 @@ type PRNLVersion=^TRNLVersion;
        fIncomingReceivedMessageDataLength:TRNLUInt32;
 
        fIncomingMessageReceiveBufferData:TRNLPointer;
+
+       fIncomingSawLost:longbool;
 
        fOutgoingSequenceNumber:TRNLSequenceNumber;
 
@@ -16109,7 +16112,7 @@ var Message:TRNLMessage;
     HostEvent:TRNLHostEvent;
 begin
  while fIncomingMessageQueue.Dequeue(Message) do begin
-  if assigned(fHost.fOnPeerMTU) then begin
+  if assigned(fHost.fOnPeerReceive) then begin
    try
     fHost.fOnPeerReceive(fHost,fPeer,fChannelNumber,Message);
    finally
@@ -17304,6 +17307,7 @@ begin
  fIncomingMessageNumber:=$ffff;
  fIncomingMessageLength:=0;
  fIncomingMessageReceiveBufferData:=nil;
+ fIncomingSawLost:=false;
  fOutgoingSequenceNumber:=0;
  fOutgoingMessageNumber:=0;
 end;
@@ -17443,11 +17447,14 @@ var ChannelCommandType:TRNLPeerUnreliableOrderedChannelCommandType;
     BlockSequenceNumber,LastSequenceNumber:TRNLSequenceNumber;
     ShortMessagePacketHeader:PRNLPeerUnreliableOrderedChannelShortMessagePacketHeader;
     LongMessagePacketHeader:PRNLPeerUnreliableOrderedChannelLongMessagePacketHeader;
+    MessageFlags:TRNLMessageFlags;
 begin
 
  BlockPacketDataPosition:=0;
 
  ChannelCommandType:=TRNLPeerUnreliableOrderedChannelCommandType(TRNLInt32(aBlockPacket.fBlockPacket.Channel.Header.TypeAndSubtype shr 4));
+
+ MessageFlags:=[];
 
  case ChannelCommandType of
 
@@ -17460,6 +17467,7 @@ begin
    end;
 
    if (BlockPacketDataPosition+(SizeOf(TRNLPeerUnreliableOrderedChannelShortMessagePacketHeader)-1))>=aBlockPacket.fBlockPacketDataLength then begin
+    fIncomingSawLost:=true;
     exit;
    end;
 
@@ -17469,6 +17477,7 @@ begin
 
    if fIncomingSequenceNumber>=BlockSequenceNumber then begin
     // Reject, it is anyway on an unreliable channel
+    fIncomingSawLost:=true;
     exit;
    end;
 
@@ -17481,15 +17490,21 @@ begin
     exit;
    end;
 
+   if fIncomingSawLost then begin
+    fIncomingSawLost:=false;
+    Include(MessageFlags,RNL_MESSAGE_FLAG_UNRELIABLE_ORDERED_CHANNEL_PREVIOUS_LOST);
+   end;
+
    fIncomingMessageQueue.Enqueue(TRNLMessage.CreateFromMemory(TRNLPointer(@aBlockPacket.fBlockPacketData[BlockPacketDataPosition]),
                                                               BlockDataLength,
-                                                              []));
+                                                              MessageFlags));
 
   end;
 
   RNL_PEER_UNRELIABLE_ORDERED_CHANNEL_COMMAND_TYPE_LONG_MESSAGE:begin
 
    if (BlockPacketDataPosition+(SizeOf(TRNLPeerUnreliableOrderedChannelLongMessagePacketHeader)-1))>=aBlockPacket.fBlockPacketDataLength then begin
+    fIncomingSawLost:=true;
     fIncomingMessageLength:=0;
     if assigned(fIncomingMessageReceiveBufferData) then begin
      FreeMem(fIncomingMessageReceiveBufferData);
@@ -17506,6 +17521,7 @@ begin
 
    if LastSequenceNumber>=BlockSequenceNumber then begin
     // Reject, it is anyway on an unreliable channel
+    fIncomingSawLost:=true;
     fIncomingMessageLength:=0;
     if assigned(fIncomingMessageReceiveBufferData) then begin
      FreeMem(fIncomingMessageReceiveBufferData);
@@ -17542,6 +17558,7 @@ begin
        (fIncomingMessageLength<>LongMessagePacketHeader^.Length) or
        ((BlockSequenceNumber-LastSequenceNumber).fValue>=2) then begin
      // Reject, it is anyway on an unreliable channel
+     fIncomingSawLost:=true;
      fIncomingMessageLength:=0;
      if assigned(fIncomingMessageReceiveBufferData) then begin
       FreeMem(fIncomingMessageReceiveBufferData);
@@ -17586,9 +17603,13 @@ begin
    inc(fIncomingReceivedMessageDataLength,BlockDataLength);
 
    if fIncomingReceivedMessageDataLength=fIncomingMessageLength then begin
+    if fIncomingSawLost then begin
+     fIncomingSawLost:=false;
+     Include(MessageFlags,RNL_MESSAGE_FLAG_UNRELIABLE_ORDERED_CHANNEL_PREVIOUS_LOST);
+    end;
     fIncomingMessageQueue.Enqueue(TRNLMessage.CreateFromMemory(fIncomingMessageReceiveBufferData,
                                                                fIncomingMessageLength,
-                                                               [RNL_MESSAGE_FLAG_NO_ALLOCATE]));
+                                                               MessageFlags+[RNL_MESSAGE_FLAG_NO_ALLOCATE]));
     fIncomingMessageLength:=0;
     fIncomingMessageReceiveBufferData:=nil;
    end;
