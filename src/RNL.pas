@@ -486,7 +486,7 @@ uses {$if defined(Posix)}
 {    Generics.Defaults,
      Generics.Collections;}
 
-const RNL_VERSION='1.00.2019.08.11.22.21.0000';
+const RNL_VERSION='1.00.2019.08.11.22.49.0000';
 
 type PPRNLInt8=^PRNLInt8;
      PRNLInt8=^TRNLInt8;
@@ -17475,6 +17475,8 @@ begin
 
    BlockSequenceNumber:=TRNLEndianness.LittleEndianToHost16(ShortMessagePacketHeader^.SequenceNumber);
 
+   fIncomingSawLost:=fIncomingSawLost or ((BlockSequenceNumber-fIncomingSequenceNumber).fValue>1);
+
    if fIncomingSequenceNumber>=BlockSequenceNumber then begin
     // Reject, it is anyway on an unreliable channel
     fIncomingSawLost:=true;
@@ -17516,6 +17518,8 @@ begin
    LongMessagePacketHeader:=TRNLPointer(@aBlockPacket.fBlockPacketData[BlockPacketDataPosition]);
 
    BlockSequenceNumber:=TRNLEndianness.LittleEndianToHost16(LongMessagePacketHeader^.SequenceNumber);
+
+   fIncomingSawLost:=fIncomingSawLost or ((BlockSequenceNumber-fIncomingSequenceNumber).fValue>1);
 
    LastSequenceNumber:=fIncomingSequenceNumber;
 
