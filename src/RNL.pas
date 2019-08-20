@@ -472,6 +472,9 @@ uses {$if defined(Posix)}
       Sockets,
       cnetdb,
       termio,
+      {$if defined(linux) or defined(android)}
+       linux,
+      {$ifend}
      {$else}
       // Delphi and FreePascal: Win32, Win64
       Windows,
@@ -486,7 +489,7 @@ uses {$if defined(Posix)}
 {    Generics.Defaults,
      Generics.Collections;}
 
-const RNL_VERSION='1.00.2019.08.11.22.49.0000';
+const RNL_VERSION='1.00.2019.08.21.00.34.0000';
 
 type PPRNLInt8=^PRNLInt8;
      PRNLInt8=^TRNLInt8;
@@ -9415,10 +9418,28 @@ end;
 
 function TRNLInstance.GetTime:TRNLTime;
 {$if defined(fpc)}
+{$if defined(linux) or defined(android)}
+var NowTimeSpec:TimeSpec;
+    ia,ib:TRNLInt64;
+begin
+ clock_gettime(CLOCK_MONOTONIC,@NowTimeSpec);
+ ia:=TRNLInt64(NowTimeSpec.tv_sec)*TRNLInt64(1000);
+ ib:=NowTimeSpec.tv_nsec div TRNLInt64(1000000);
+ result:=(ia+ib)-fTimeBase;
+end;
+{$else}
 var tv:TTimeVal;
 begin
  fpgettimeofday(@tv,nil);
  result:=((TRNLUInt64(tv.tv_sec)*1000)+(TRNLUInt64(tv.tv_usec) div 1000))-fTimeBase;
+end;
+{$ifend}
+{$else}
+{$if defined(linux) or defined(android)}
+var NowTimeSpec:TimeSpec;
+begin
+ clock_gettime(CLOCK_MONOTONIC,@NowTimeSpec);
+ result:=((NowTimeSpec.tv_sec*TRNLInt64(1000))+(NowTimeSpec.tv_nsec div 1000000))-fTimeBase;
 end;
 {$else}
 var tv:TimeVal;
@@ -9426,6 +9447,7 @@ begin
  gettimeofday(tv,nil);
  result:=((TRNLUInt64(tv.tv_sec)*1000)+(TRNLUInt64(tv.tv_usec) div 1000))-fTimeBase;
 end;
+{$ifend}
 {$ifend}
 
 procedure TRNLInstance.SetTime(const aTimeBase:TRNLTime);
