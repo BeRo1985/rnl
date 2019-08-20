@@ -456,6 +456,7 @@ uses {$if defined(Posix)}
       Posix.Errno,
       Posix.Fcntl,
       Posix.Unistd,
+      Posix.Time,
       System.Net.Socket,
       {$ifdef Linux}
        Linuxapi.KernelIoctl,
@@ -489,7 +490,7 @@ uses {$if defined(Posix)}
 {    Generics.Defaults,
      Generics.Collections;}
 
-const RNL_VERSION='1.00.2019.08.21.00.34.0000';
+const RNL_VERSION='1.00.2019.08.21.00.40.0000';
 
 type PPRNLInt8=^PRNLInt8;
      PRNLInt8=^TRNLInt8;
