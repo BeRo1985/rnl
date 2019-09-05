@@ -490,7 +490,7 @@ uses {$if defined(Posix)}
 {    Generics.Defaults,
      Generics.Collections;}
 
-const RNL_VERSION='1.00.2019.08.21.00.40.0000';
+const RNL_VERSION='1.00.2019.09.05.06.10.0000';
 
 type PPRNLInt8=^PRNLInt8;
      PRNLInt8=^TRNLInt8;
@@ -18595,7 +18595,8 @@ begin
 
     RNL_PROTOCOL_BLOCK_PACKET_TYPE_CHANNEL:begin
 
-     if IncomingBlockPacket.fBlockPacket.Channel.ChannelNumber<fCountChannels then begin
+     if (fState=RNL_PEER_STATE_CONNECTED) and
+        (IncomingBlockPacket.fBlockPacket.Channel.ChannelNumber<fCountChannels) then begin
 
       fChannels[IncomingBlockPacket.fBlockPacket.Channel.ChannelNumber].DispatchIncomingBlockPacket(IncomingBlockPacket);
 
