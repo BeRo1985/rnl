@@ -6,7 +6,7 @@
  *                                zlib license                                *
  *============================================================================*
  *                                                                            *
- * Copyright (C) 2016-2019, Benjamin Rosseaux (benjamin@rosseaux.de)          *
+ * Copyright (C) 2016-2020, Benjamin Rosseaux (benjamin@rosseaux.de)          *
  *                                                                            *
  * This software is provided 'as-is', without any express or implied          *
  * warranty. In no event will the authors be held liable for any damages      *
@@ -490,7 +490,7 @@ uses {$if defined(Posix)}
 {    Generics.Defaults,
      Generics.Collections;}
 
-const RNL_VERSION='1.00.2019.09.05.06.10.0000';
+const RNL_VERSION='1.00.2020.02.19.01.19.0000';
 
 type PPRNLInt8=^PRNLInt8;
      PRNLInt8=^TRNLInt8;
@@ -1041,28 +1041,28 @@ type PRNLVersion=^TRNLVersion;
      TRNLValue25519=record
       public
        constructor Create(const aValue:TRNLInt32);
-       class operator Implicit(const a:TRNLInt32):TRNLValue25519; inline;
-       class operator Explicit(const a:TRNLInt32):TRNLValue25519; inline;
-       class operator Add(const a,b:TRNLValue25519):TRNLValue25519; inline;
-       class operator Subtract(const a,b:TRNLValue25519):TRNLValue25519; inline;
-       class operator Multiply(const a,b:TRNLValue25519):TRNLValue25519; {$if not (defined(CPUX64) and not defined(fpc))}inline;{$ifend}
-       class operator Negative(const a:TRNLValue25519):TRNLValue25519; inline;
-       class operator Positive(const a:TRNLValue25519):TRNLValue25519; inline;
-       class operator Equal(const a,b:TRNLValue25519):boolean; inline;
-       class operator NotEqual(const a,b:TRNLValue25519):boolean; inline;
-       function Square:TRNLValue25519; overload; {$if not (defined(CPUX64) and not defined(fpc))}inline;{$ifend}
+       class operator Implicit(const a:TRNLInt32):TRNLValue25519; //inline;
+       class operator Explicit(const a:TRNLInt32):TRNLValue25519; //inline;
+       class operator Add(const a,b:TRNLValue25519):TRNLValue25519; //inline;
+       class operator Subtract(const a,b:TRNLValue25519):TRNLValue25519; //inline;
+       class operator Multiply(const a,b:TRNLValue25519):TRNLValue25519; //{$if not (defined(CPUX64) and not defined(fpc))}inline;{$ifend}
+       class operator Negative(const a:TRNLValue25519):TRNLValue25519; //inline;
+       class operator Positive(const a:TRNLValue25519):TRNLValue25519; //inline;
+       class operator Equal(const a,b:TRNLValue25519):boolean; //inline;
+       class operator NotEqual(const a,b:TRNLValue25519):boolean; //inline;
+       function Square:TRNLValue25519; overload; //{$if not (defined(CPUX64) and not defined(fpc))}inline;{$ifend}
        function Square(const aCount:TRNLInt32):TRNLValue25519; overload;
        class procedure ConditionalSwap(var a,b:TRNLValue25519;const aSelect:TRNLInt32); static;
-       function Carry:TRNLValue25519; inline;
-       class function Carry64(const aValue:TRNLValue2551964):TRNLValue25519; static; inline;
-       class function CreateRandom(const aRandomGenerator:TRNLRandomGenerator):TRNLValue25519; static; inline;
+       function Carry:TRNLValue25519; //inline;
+       class function Carry64(const aValue:TRNLValue2551964):TRNLValue25519; static; //{$if not (defined(CPUX64) and not defined(fpc))}inline;{$ifend}
+       class function CreateRandom(const aRandomGenerator:TRNLRandomGenerator):TRNLValue25519; static; //{$if not (defined(CPUX64) and not defined(fpc))}inline;{$ifend}
        class function LoadFromMemory(const aLocation):TRNLValue25519; static;
        procedure SaveToMemory(out aLocation);
-       class operator Multiply(const a:TRNLValue25519;const b:TRNLInt32):TRNLValue25519; inline;
-       function Mul121666:TRNLValue25519; inline;
-       function Mul973324:TRNLValue25519; inline;
-       function Invert:TRNLValue25519; inline;
-       function Pow22523:TRNLValue25519; inline;
+       class operator Multiply(const a:TRNLValue25519;const b:TRNLInt32):TRNLValue25519; //{$if not (defined(CPUX64) and not defined(fpc))}inline;{$ifend}
+       function Mul121666:TRNLValue25519; //{$if not (defined(CPUX64) and not defined(fpc))}inline;{$ifend}
+       function Mul973324:TRNLValue25519; //{$if not (defined(CPUX64) and not defined(fpc))}inline;{$ifend}
+       function Invert:TRNLValue25519; //{$if not (defined(CPUX64) and not defined(fpc))}inline;{$ifend}
+       function Pow22523:TRNLValue25519; //{$if not (defined(CPUX64) and not defined(fpc))}inline;{$ifend}
        function IsNegative:boolean; inline;
        function IsNonZero:boolean; inline;
        function IsZero:boolean; inline;
@@ -12785,6 +12785,12 @@ begin
 {$ifend}
 {$if defined(fpc)}
   result:=fpselect(Max(aEvent.fEventPipeFDs[0],aMaxSocket)+1,@ReadSet,@WriteSet,nil,t);
+{$elseif defined(nextgen)}
+  if aEvent.fEventPipeFDs[0]<aMaxSocket then begin
+   result:=Posix.SysSelect.select(aMaxSocket+1,@ReadSet,@WriteSet,nil,t);
+  end else begin
+   result:=Posix.SysSelect.select(aEvent.fEventPipeFDs[0]+1,@ReadSet,@WriteSet,nil,t);
+  end;
 {$else}
   result:=Posix.SysSelect.select(Max(aEvent.fEventPipeFDs[0],aMaxSocket)+1,@ReadSet,@WriteSet,nil,t);
 {$ifend}
@@ -13310,11 +13316,19 @@ var SIN:TSockaddrStorage;
 begin
  SINLength:=aFamily.GetSockAddrSize;
  RecvLength:=0;
+{$if defined(nextgen) and not defined(fpc)}
+ if assigned(aAddress) then begin
+  RecvLength:=Posix.SysSocket.RecvFrom(aSocket,aData,aDataLength,MSG_NOSIGNAL,sockaddr(TRNLPointer(@SIN)^),Cardinal(TRNLPointer(@SINLength)^));
+ end else begin
+  RecvLength:=Posix.SysSocket.RecvFrom(aSocket,aData,aDataLength,MSG_NOSIGNAL,sockaddr(TRNLPointer(nil)^),Cardinal(TRNLPointer(@SIN)^));
+ end;
+{$else}
  if assigned(aAddress) then begin
   RecvLength:=Posix.SysSocket.RecvFrom(aSocket,aData,aDataLength,MSG_NOSIGNAL,sockaddr(TRNLPointer(@SIN)^),TRNLUInt32(SINLength));
  end else begin
   RecvLength:=Posix.SysSocket.RecvFrom(aSocket,aData,aDataLength,MSG_NOSIGNAL,sockaddr(TRNLPointer(nil)^),TRNLUInt32(TRNLPointer(@SIN)^));
  end;
+{$ifend}
  if RecvLength<>SOCKET_ERROR then begin
   if assigned(aAddress) then begin
    aAddress^.SetAddress(@SIN);
