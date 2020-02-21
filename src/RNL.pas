@@ -490,7 +490,7 @@ uses {$if defined(Posix)}
 {    Generics.Defaults,
      Generics.Collections;}
 
-const RNL_VERSION='1.00.2020.02.19.01.19.0000';
+const RNL_VERSION='1.00.2020.02.21.15.52.0000';
 
 type PPRNLInt8=^PRNLInt8;
      PRNLInt8=^TRNLInt8;
@@ -16419,7 +16419,8 @@ begin
  DoNeedSort:=false;
 
  CountAcknowledgements:=0;
- while fOutgoingAcknowledgementQueue.Dequeue(BlockPacketSequenceNumber) do begin
+ while fOutgoingAcknowledgementQueue.Dequeue(BlockPacketSequenceNumber) and
+       (CountAcknowledgements<length(fOutgoingAcknowledgementArray)) do begin
   DoNeedSort:=DoNeedSort or
               ((CountAcknowledgements>0) and
                (fOutgoingAcknowledgementArray[CountAcknowledgements-1]>BlockPacketSequenceNumber));
