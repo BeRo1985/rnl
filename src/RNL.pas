@@ -490,7 +490,7 @@ uses {$if defined(Posix)}
 {    Generics.Defaults,
      Generics.Collections;}
 
-const RNL_VERSION='1.00.2020.02.21.15.52.0000';
+const RNL_VERSION='1.00.2020.07.11.16.19.0000';
 
 type PPRNLInt8=^PRNLInt8;
      PRNLInt8=^TRNLInt8;
@@ -19337,7 +19337,7 @@ var NormalPacketHeader:PRNLProtocolNormalPacketHeader;
     EncryptedPacketSequenceNumber:TRNLUInt64;
     Index:TRNLInt32;
     PacketDataLength,PayloadDataLength,
-    OriginalDecompressedDataLength,DecompressedDataLength:TRNLSizeint;
+    OriginalDecompressedDataLength,DecompressedDataLength:TRNLSizeInt;
     PayloadData:TRNLPointer;
     PayloadMAC:TRNLCipherMAC;
     CipherNonce:TRNLCipherNonce;
@@ -19355,6 +19355,11 @@ begin
     PacketDataLength:=length(PacketData);
 
     NormalPacketHeader:=@PacketData[0];
+
+    if PacketDataLength<SizeOf(TRNLProtocolNormalPacketHeader) then begin
+     // Too small packet, drop it!
+     continue;
+    end;
 
     if NormalPacketHeader^.Not255=$ff then begin
      // 255? Ups, there's probably something went wrong then :-)
@@ -19374,6 +19379,7 @@ begin
     PayloadDataLength:=PacketDataLength-SizeOf(TRNLProtocolNormalPacketHeader);
 
     if PayloadDataLength=0 then begin
+     // No payload? Then skip it!
      continue;
     end;
 
