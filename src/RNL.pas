@@ -6,7 +6,7 @@
  *                                zlib license                                *
  *============================================================================*
  *                                                                            *
- * Copyright (C) 2016-2020, Benjamin Rosseaux (benjamin@rosseaux.de)          *
+ * Copyright (C) 2016-2021, Benjamin Rosseaux (benjamin@rosseaux.de)          *
  *                                                                            *
  * This software is provided 'as-is', without any express or implied          *
  * warranty. In no event will the authors be held liable for any damages      *
@@ -490,7 +490,7 @@ uses {$if defined(Posix)}
 {    Generics.Defaults,
      Generics.Collections;}
 
-const RNL_VERSION='1.00.2020.07.11.16.19.0000';
+const RNL_VERSION='1.00.2021.04.23.01.53.0000';
 
 type PPRNLInt8=^PRNLInt8;
      PRNLInt8=^TRNLInt8;
@@ -9857,14 +9857,12 @@ type TInAddr=record
       iErrorCode:array[0..FD_MAX_EVENTS-1] of TRNLInt32;
      end;
 
-     TGetTickCount64=function:TRNLUInt64; stdcall;
 
      TQueryUnbiasedInterruptTime=function(var lpUnbiasedInterruptTime:TRNLUInt64):bool; stdcall;
 
 const GetAddrInfo:TGetAddrInfo=nil;
       FreeAddrInfo:TFreeAddrInfo=nil;
       GetNameInfo:TGetNameInfo=nil;
-      GetTickCount64:TGetTickCount64=nil;
       QueryUnbiasedInterruptTime:TQueryUnbiasedInterruptTime=nil;
 
       WinSock2LibHandle:THandle=0;
@@ -9872,6 +9870,8 @@ const GetAddrInfo:TGetAddrInfo=nil;
 
       QueryPerformanceFrequencyBase:TRNLUInt64=0;
       QueryPerformanceFrequencyShift:TRNLInt32=0;
+
+function GetTickCount64:TRNLUInt64; stdcall; external 'kernel32.dll' name 'GetTickCount64';
 
 function WSAStartup(wVersionRequired:TRNLUInt16;var WSData:TWSAData):TRNLInt32; stdcall; external 'ws2_32.dll' name 'WSAStartup';
 function WSACleanup:TRNLInt32; stdcall; external 'ws2_32.dll' name 'WSACleanup';
@@ -9924,7 +9924,6 @@ begin
   WSACleanup;
   raise ERNLInstance.Create('Incompatible system version');
  end;
- GetTickCount64:=GetProcAddress(Kernel32LibHandle,PAnsiChar(AnsiString('GetTickCount64')));
  QueryUnbiasedInterruptTime:=GetProcAddress(Kernel32LibHandle,PAnsiChar(AnsiString('QueryUnbiasedInterruptTime')));
  if QueryPerformanceFrequency(QueryPerformanceFrequencyBase) then begin
   if QueryPerformanceFrequencyBase=1000 then begin
@@ -9954,10 +9953,9 @@ begin
   result:=result div 10000;
  end else if (QueryPerformanceFrequencyBase<>0) and QueryPerformanceCounter(TRNLUInt64(result.fValue)) then begin
   result:=(((result.fValue shr QueryPerformanceFrequencyShift)*1000) div QueryPerformanceFrequencyBase)-fTimeBase;
- end else if assigned(GetTickCount64) then begin
-  result:=GetTickCount64-fTimeBase;
  end else begin
-  result:=timeGetTime-fTimeBase;
+  result:=GetTickCount64-fTimeBase;
+//result:=timeGetTime-fTimeBase;
  end;
 end;
 
