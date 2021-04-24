@@ -490,7 +490,7 @@ uses {$if defined(Posix)}
 {    Generics.Defaults,
      Generics.Collections;}
 
-const RNL_VERSION='1.00.2021.04.23.23.23.0000';
+const RNL_VERSION='1.00.2021.05.24.03.20.0000';
 
 type PPRNLInt8=^PRNLInt8;
      PRNLInt8=^TRNLInt8;
@@ -1012,6 +1012,8 @@ type PRNLVersion=^TRNLVersion;
        class operator Equal(const a,b:TRNLKey):boolean;
        class operator NotEqual(const a,b:TRNLKey):boolean;
        function ClampForCurve25519:TRNLKey; inline;
+       function ConvertFromED25519ToX25519PrivateKey:TRNLKey;
+       function ConvertFromED25519ToX25519PublicKey:TRNLKey;
        class function CreateRandom(const aRandomGenerator:TRNLRandomGenerator):TRNLKey; static;
        case TRNLUInt8 of
         0:(
@@ -6158,6 +6160,21 @@ begin
  result:=self;
  result.ui8[0]:=ui8[0] and $f8;
  result.ui8[31]:=(ui8[31] and $7f) or $40;
+end;
+
+function TRNLKey.ConvertFromED25519ToX25519PrivateKey:TRNLKey;
+var Temporary:array[0..63] of TRNLUInt8;
+begin
+ TRNLED25519Hash.Process(Temporary,self,SizeOf(TRNLKey));
+ PRNLKey(Pointer(@result))^:=PRNLKey(Pointer(@Temporary))^.ClampForCurve25519;
+end;
+
+function TRNLKey.ConvertFromED25519ToX25519PublicKey:TRNLKey;
+var t,o:TRNLValue25519;
+begin
+ t.LoadFromMemory(self);
+ o:=TRNLValue25519(1);
+ (TRNLValue25519(o+t)*(TRNLValue25519(o-t).Invert)).SaveToMemory(result);
 end;
 
 class function TRNLKey.CreateRandom(const aRandomGenerator:TRNLRandomGenerator):TRNLKey;
