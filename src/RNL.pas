@@ -490,7 +490,7 @@ uses {$if defined(Posix)}
 {    Generics.Defaults,
      Generics.Collections;}
 
-const RNL_VERSION='1.00.2021.05.24.03.20.0000';
+const RNL_VERSION='1.00.2021.05.25.21.39.0000';
 
 type PPRNLInt8=^PRNLInt8;
      PRNLInt8=^TRNLInt8;
@@ -12456,6 +12456,7 @@ begin
 end;
 
 procedure TRNLObjectList<T>.Insert(const pIndex:TRNLSizeInt;const pItem:T);
+var a,b:pointer;
 begin
  if pIndex>=0 then begin
   if pIndex<fCount then begin
@@ -12464,7 +12465,9 @@ begin
     fAllocated:=fCount shl 1;
     SetLength(fItems,fAllocated);
    end;
-   Move(fItems[pIndex],fItems[pIndex+1],(fCount-(pIndex+1))*SizeOf(T));
+   a:=@fItems[pIndex];
+   b:=@fItems[pIndex+1];
+   Move(a^,b^,(fCount-(pIndex+1))*SizeOf(T));
    FillChar(fItems[pIndex],SizeOf(T),#0);
   end else begin
    fCount:=pIndex+1;
@@ -12478,6 +12481,7 @@ begin
 end;
 
 procedure TRNLObjectList<T>.Delete(const pIndex:TRNLSizeInt);
+var a,b:pointer;
 begin
  if (pIndex<0) or (pIndex>=fCount) then begin
   raise ERangeError.Create('Out of index range');
@@ -12486,7 +12490,9 @@ begin
   FreeAndNil(fItems[pIndex]);
  end;
  pointer(fItems[pIndex]):=nil;
- Move(fItems[pIndex+1],fItems[pIndex],(fCount-pIndex)*SizeOf(T));
+ a:=@fItems[pIndex+1];
+ b:=@fItems[pIndex];
+ Move(a^,b^,(fCount-pIndex)*SizeOf(T));
  dec(fCount);
  FillChar(fItems[fCount],SizeOf(T),#0);
  if fCount<(fAllocated shr 1) then begin
