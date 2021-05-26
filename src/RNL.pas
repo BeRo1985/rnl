@@ -6,7 +6,7 @@
  *                                zlib license                                *
  *============================================================================*
  *                                                                            *
- * Copyright (C) 2016-2020, Benjamin Rosseaux (benjamin@rosseaux.de)          *
+ * Copyright (C) 2016-2021, Benjamin Rosseaux (benjamin@rosseaux.de)          *
  *                                                                            *
  * This software is provided 'as-is', without any express or implied          *
  * warranty. In no event will the authors be held liable for any damages      *
@@ -490,7 +490,7 @@ uses {$if defined(Posix)}
 {    Generics.Defaults,
      Generics.Collections;}
 
-const RNL_VERSION='1.00.2020.07.11.16.19.0000';
+const RNL_VERSION='1.00.2021.05.25.21.39.0000';
 
 type PPRNLInt8=^PRNLInt8;
      PRNLInt8=^TRNLInt8;
@@ -1012,6 +1012,8 @@ type PRNLVersion=^TRNLVersion;
        class operator Equal(const a,b:TRNLKey):boolean;
        class operator NotEqual(const a,b:TRNLKey):boolean;
        function ClampForCurve25519:TRNLKey; inline;
+       function ConvertFromED25519ToX25519PrivateKey:TRNLKey;
+       function ConvertFromED25519ToX25519PublicKey:TRNLKey;
        class function CreateRandom(const aRandomGenerator:TRNLRandomGenerator):TRNLKey; static;
        case TRNLUInt8 of
         0:(
@@ -1223,11 +1225,81 @@ type PRNLVersion=^TRNLVersion;
        class procedure SelfTest; static;
      end;
 
+     PRNLBLAKE2BHash=^TRNLBLAKE2BHash;
+     TRNLBLAKE2BHash=array[0..63] of TRNLUInt8;
+
+     PRNLBLAKE2BKey=^TRNLBLAKE2BKey;
+     TRNLBLAKE2BKey=array[0..63] of TRNLUInt8;
+
+     PRNLBLAKE2BOut=^TRNLBLAKE2BOut;
+     TRNLBLAKE2BOut=array[0..63] of TRNLUInt8;
+
+     PRNLBLAKE2BBlock=^TRNLBLAKE2BBlock;
+     TRNLBLAKE2BBlock=array[0..127] of TRNLUInt8;
+
+{$define RNLUseBLAKE2BManualExpanded}
+
+     PRNLBLAKE2BContext=^TRNLBLAKE2BContext;
+     TRNLBLAKE2BContext=record
+      public
+       const BLAKE2B_BLOCKBYTES=128;
+             BLAKE2B_OUTBYTES=64;
+             BLAKE2B_KEYBYTES=64;
+      private
+       type TVectors=array[0..7] of TRNLUInt64;
+            TWorkVectors=array[0..15] of TRNLUInt64;
+       const InitializationVectors:TVectors=
+              (
+               TRNLUInt64($6a09e667f3bcc908),TRNLUInt64($bb67ae8584caa73b),
+               TRNLUInt64($3c6ef372fe94f82b),TRNLUInt64($a54ff53a5f1d36f1),
+               TRNLUInt64($510e527fade682d1),TRNLUInt64($9b05688c2b3e6c1f),
+               TRNLUInt64($1f83d9abfb41bd6b),TRNLUInt64($5be0cd19137e2179)
+              );
+             Sigma:array[0..11,0..15] of TRNLUInt8=
+              (
+               (0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15),
+               (14,10,4,8,9,15,13,6,1,12,0,2,11,7,5,3),
+               (11,8,12,0,5,2,15,13,10,14,3,6,7,1,9,4),
+               (7,9,3,1,13,12,11,14,2,6,5,10,4,0,15,8),
+               (9,0,5,7,2,4,10,15,14,1,11,12,6,8,3,13),
+               (2,12,6,10,0,11,8,3,4,13,7,5,15,14,1,9),
+               (12,5,1,15,14,13,4,10,0,7,6,3,9,2,8,11),
+               (13,11,7,14,12,1,3,9,5,0,15,4,8,6,2,10),
+               (6,15,14,9,11,3,0,8,12,2,13,7,1,4,10,5),
+               (10,2,8,4,7,6,1,5,15,11,9,14,3,12,13,0),
+               (0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15),
+               (14,10,4,8,9,15,13,6,1,12,0,2,11,7,5,3)
+              );
+      private
+       fBuffer:TRNLBLAKE2BBlock;
+       fH:TVectors;
+       fT:array[0..1] of TRNLUInt64;
+       fBufferLen:TRNLSizeUInt;
+       fOutLen:TRNLSizeUInt;
+       class function RotateRight64(const aValue:TRNLUInt64;const aBits:TRNLUInt32):TRNLUInt64; static; inline;
+{$if not defined(RNLUseBLAKE2BManualExpanded)}
+       procedure G(const r,i:TRNLUInt64;var a,b,c,d:TRNLUInt64;var M:TWorkVectors); inline;
+       procedure Round_(const r:TRNLUInt64;var V,M:TWorkVectors); inline;
+{$ifend}
+       procedure Compress(const aLast:boolean);
+      public
+       function Initialize(const aOutLen:TRNLSizeInt=BLAKE2B_OUTBYTES;const aKey:Pointer=nil;const aKeyLen:TRNLSizeInt=TRNLBLAKE2BContext.BLAKE2B_KEYBYTES):boolean;
+       procedure Update(const aMessage;const aMessageSize:TRNLSizeUInt);
+       procedure Finalize(out aHash);
+     end;
+
+     PRNLBLAKE2B=^TRNLBLAKE2B;
+     TRNLBLAKE2B=record
+      public
+       class function Process(out aHash;const aMessage;const aMessageSize:TRNLSizeUInt;const aOutLen:TRNLSizeInt=TRNLBLAKE2BContext.BLAKE2B_OUTBYTES;const aKey:Pointer=nil;const aKeyLen:TRNLSizeInt=TRNLBLAKE2BContext.BLAKE2B_KEYBYTES):boolean; static;
+       class procedure SelfTest; static;
+     end;
+
      PRNLED25519HashContext=^TRNLED25519HashContext;
-     TRNLED25519HashContext=TRNLSHA512Context;
+     TRNLED25519HashContext={$ifdef RNLUseBLAKE2B}TRNLBLAKE2BContext{$else}TRNLSHA512Context{$endif};
 
      PRNLED25519Hash=^TRNLED25519Hash;
-     TRNLED25519Hash=TRNLSHA512;
+     TRNLED25519Hash={$ifdef RNLUseBLAKE2B}TRNLBLAKE2B{$else}TRNLSHA512{$endif};
 
      PRNLED25519Signature=^TRNLED25519Signature;
      TRNLED25519Signature=array[0..63] of TRNLUInt8;
@@ -1557,7 +1629,7 @@ type PRNLVersion=^TRNLVersion;
      TRNLSocketWaitConditions=set of TRNLSocketWaitCondition;
 
      PRNLConnectionChallenge=^TRNLConnectionChallenge;
-     TRNLConnectionChallenge=TRNLSHA512Hash;
+     TRNLConnectionChallenge={$ifdef RNLUseBLAKE2B}TRNLBLAKE2BHash{$else}TRNLSHA512Hash{$endif};
 
      PRNLConnectionChallengePair=^TRNLConnectionChallengePair;
      TRNLConnectionChallengePair=array[0..1] of TRNLConnectionChallenge;
@@ -6090,6 +6162,21 @@ begin
  result.ui8[31]:=(ui8[31] and $7f) or $40;
 end;
 
+function TRNLKey.ConvertFromED25519ToX25519PrivateKey:TRNLKey;
+var Temporary:array[0..63] of TRNLUInt8;
+begin
+ TRNLED25519Hash.Process(Temporary,self,SizeOf(TRNLKey));
+ PRNLKey(Pointer(@result))^:=PRNLKey(Pointer(@Temporary))^.ClampForCurve25519;
+end;
+
+function TRNLKey.ConvertFromED25519ToX25519PublicKey:TRNLKey;
+var t,o:TRNLValue25519;
+begin
+ t.LoadFromMemory(self);
+ o:=TRNLValue25519(1);
+ (TRNLValue25519(o+t)*(TRNLValue25519(o-t).Invert)).SaveToMemory(result);
+end;
+
 class function TRNLKey.CreateRandom(const aRandomGenerator:TRNLRandomGenerator):TRNLKey;
 var Index:TRNLInt32;
 begin
@@ -7535,6 +7622,3699 @@ begin
 
 end;
 
+class function TRNLBLAKE2BContext.RotateRight64(const aValue:TRNLUInt64;const aBits:TRNLUInt32):TRNLUInt64;
+begin
+{$ifdef fpc}
+ result:=RORQWord(aValue,aBits);
+{$else}
+ result:=(aValue shl (64-aBits)) or (aValue shr aBits);
+{$endif}
+end;
+
+{$if not defined(RNLUseBLAKE2BManualExpanded)}
+procedure TRNLBLAKE2BContext.G(const r,i:TRNLUInt64;var a,b,c,d:TRNLUInt64;var M:TWorkVectors);
+begin
+ a:=a+b+M[Sigma[r,(i shl 1) or 0]];
+ d:=RotateRight64(d xor a,32);
+ c:=c+d;
+ b:=RotateRight64(b xor c,24);
+ a:=a+b+M[Sigma[r,(i shl 1) or 1]];
+ d:=RotateRight64(d xor a,16);
+ c:=c+d;
+ b:=RotateRight64(b xor c,63);
+end;
+
+procedure TRNLBLAKE2BContext.Round_(const r:TRNLUInt64;var V,M:TWorkVectors);
+begin
+ G(r,0,V[0],V[4],V[8],V[12],M);
+ G(r,1,V[1],V[5],V[9],V[13],M);
+ G(r,2,V[2],V[6],V[10],V[14],M);
+ G(r,3,V[3],V[7],V[11],V[15],M);
+ G(r,4,V[0],V[5],V[10],V[15],M);
+ G(r,5,V[1],V[6],V[11],V[12],M);
+ G(r,6,V[2],V[7],V[8],V[13],M);
+ G(r,7,V[3],V[4],V[9],V[14],M);
+end;
+{$ifend}
+
+procedure TRNLBLAKE2BContext.Compress(const aLast:boolean);
+var V,M:TWorkVectors;
+begin
+ M[0]:=TRNLMemoryAccess.LoadLittleEndianUInt64(PRNLUInt64Array(Pointer(@fBuffer))^[0]);
+ M[1]:=TRNLMemoryAccess.LoadLittleEndianUInt64(PRNLUInt64Array(Pointer(@fBuffer))^[1]);
+ M[2]:=TRNLMemoryAccess.LoadLittleEndianUInt64(PRNLUInt64Array(Pointer(@fBuffer))^[2]);
+ M[3]:=TRNLMemoryAccess.LoadLittleEndianUInt64(PRNLUInt64Array(Pointer(@fBuffer))^[3]);
+ M[4]:=TRNLMemoryAccess.LoadLittleEndianUInt64(PRNLUInt64Array(Pointer(@fBuffer))^[4]);
+ M[5]:=TRNLMemoryAccess.LoadLittleEndianUInt64(PRNLUInt64Array(Pointer(@fBuffer))^[5]);
+ M[6]:=TRNLMemoryAccess.LoadLittleEndianUInt64(PRNLUInt64Array(Pointer(@fBuffer))^[6]);
+ M[7]:=TRNLMemoryAccess.LoadLittleEndianUInt64(PRNLUInt64Array(Pointer(@fBuffer))^[7]);
+ M[8]:=TRNLMemoryAccess.LoadLittleEndianUInt64(PRNLUInt64Array(Pointer(@fBuffer))^[8]);
+ M[9]:=TRNLMemoryAccess.LoadLittleEndianUInt64(PRNLUInt64Array(Pointer(@fBuffer))^[9]);
+ M[10]:=TRNLMemoryAccess.LoadLittleEndianUInt64(PRNLUInt64Array(Pointer(@fBuffer))^[10]);
+ M[11]:=TRNLMemoryAccess.LoadLittleEndianUInt64(PRNLUInt64Array(Pointer(@fBuffer))^[11]);
+ M[12]:=TRNLMemoryAccess.LoadLittleEndianUInt64(PRNLUInt64Array(Pointer(@fBuffer))^[12]);
+ M[13]:=TRNLMemoryAccess.LoadLittleEndianUInt64(PRNLUInt64Array(Pointer(@fBuffer))^[13]);
+ M[14]:=TRNLMemoryAccess.LoadLittleEndianUInt64(PRNLUInt64Array(Pointer(@fBuffer))^[14]);
+ M[15]:=TRNLMemoryAccess.LoadLittleEndianUInt64(PRNLUInt64Array(Pointer(@fBuffer))^[15]);
+ V[0]:=fH[0];
+ V[1]:=fH[1];
+ V[2]:=fH[2];
+ V[3]:=fH[3];
+ V[4]:=fH[4];
+ V[5]:=fH[5];
+ V[6]:=fH[6];
+ V[7]:=fH[7];
+ V[8]:=InitializationVectors[0];
+ V[9]:=InitializationVectors[1];
+ V[10]:=InitializationVectors[2];
+ V[11]:=InitializationVectors[3];
+ V[12]:=InitializationVectors[4] xor fT[0];
+ V[13]:=InitializationVectors[5] xor fT[1];
+ if aLast then begin
+  V[14]:=not InitializationVectors[6];
+ end else begin
+  V[14]:=InitializationVectors[6];
+ end;
+ V[15]:=InitializationVectors[7];
+{$if defined(RNLUseBLAKE2BManualExpanded)}
+ inc(v[0],v[4]+M[Sigma[0,(0 shl 1) or 0]]);
+ v[12]:=RotateRight64(v[12] xor v[0],32);
+ inc(v[8],v[12]);
+ v[4]:=RotateRight64(v[4] xor v[8],24);
+ inc(v[0],v[4]+M[Sigma[0,(0 shl 1) or 1]]);
+ v[12]:=RotateRight64(v[12] xor v[0],16);
+ inc(v[8],v[12]);
+ v[4]:=RotateRight64(v[4] xor v[8],63);
+ inc(v[1],v[5]+M[Sigma[0,(1 shl 1) or 0]]);
+ v[13]:=RotateRight64(v[13] xor v[1],32);
+ inc(v[9],v[13]);
+ v[5]:=RotateRight64(v[5] xor v[9],24);
+ inc(v[1],v[5]+M[Sigma[0,(1 shl 1) or 1]]);
+ v[13]:=RotateRight64(v[13] xor v[1],16);
+ inc(v[9],v[13]);
+ v[5]:=RotateRight64(v[5] xor v[9],63);
+ inc(v[2],v[6]+M[Sigma[0,(2 shl 1) or 0]]);
+ v[14]:=RotateRight64(v[14] xor v[2],32);
+ inc(v[10],v[14]);
+ v[6]:=RotateRight64(v[6] xor v[10],24);
+ inc(v[2],v[6]+M[Sigma[0,(2 shl 1) or 1]]);
+ v[14]:=RotateRight64(v[14] xor v[2],16);
+ inc(v[10],v[14]);
+ v[6]:=RotateRight64(v[6] xor v[10],63);
+ inc(v[3],v[7]+M[Sigma[0,(3 shl 1) or 0]]);
+ v[15]:=RotateRight64(v[15] xor v[3],32);
+ inc(v[11],v[15]);
+ v[7]:=RotateRight64(v[7] xor v[11],24);
+ inc(v[3],v[7]+M[Sigma[0,(3 shl 1) or 1]]);
+ v[15]:=RotateRight64(v[15] xor v[3],16);
+ inc(v[11],v[15]);
+ v[7]:=RotateRight64(v[7] xor v[11],63);
+ inc(v[0],v[5]+M[Sigma[0,(4 shl 1) or 0]]);
+ v[15]:=RotateRight64(v[15] xor v[0],32);
+ inc(v[10],v[15]);
+ v[5]:=RotateRight64(v[5] xor v[10],24);
+ inc(v[0],v[5]+M[Sigma[0,(4 shl 1) or 1]]);
+ v[15]:=RotateRight64(v[15] xor v[0],16);
+ inc(v[10],v[15]);
+ v[5]:=RotateRight64(v[5] xor v[10],63);
+ inc(v[1],v[6]+M[Sigma[0,(5 shl 1) or 0]]);
+ v[12]:=RotateRight64(v[12] xor v[1],32);
+ inc(v[11],v[12]);
+ v[6]:=RotateRight64(v[6] xor v[11],24);
+ inc(v[1],v[6]+M[Sigma[0,(5 shl 1) or 1]]);
+ v[12]:=RotateRight64(v[12] xor v[1],16);
+ inc(v[11],v[12]);
+ v[6]:=RotateRight64(v[6] xor v[11],63);
+ inc(v[2],v[7]+M[Sigma[0,(6 shl 1) or 0]]);
+ v[13]:=RotateRight64(v[13] xor v[2],32);
+ inc(v[8],v[13]);
+ v[7]:=RotateRight64(v[7] xor v[8],24);
+ inc(v[2],v[7]+M[Sigma[0,(6 shl 1) or 1]]);
+ v[13]:=RotateRight64(v[13] xor v[2],16);
+ inc(v[8],v[13]);
+ v[7]:=RotateRight64(v[7] xor v[8],63);
+ inc(v[3],v[4]+M[Sigma[0,(7 shl 1) or 0]]);
+ v[14]:=RotateRight64(v[14] xor v[3],32);
+ inc(v[9],v[14]);
+ v[4]:=RotateRight64(v[4] xor v[9],24);
+ inc(v[3],v[4]+M[Sigma[0,(7 shl 1) or 1]]);
+ v[14]:=RotateRight64(v[14] xor v[3],16);
+ inc(v[9],v[14]);
+ v[4]:=RotateRight64(v[4] xor v[9],63);
+ inc(v[0],v[4]+M[Sigma[1,(0 shl 1) or 0]]);
+ v[12]:=RotateRight64(v[12] xor v[0],32);
+ inc(v[8],v[12]);
+ v[4]:=RotateRight64(v[4] xor v[8],24);
+ inc(v[0],v[4]+M[Sigma[1,(0 shl 1) or 1]]);
+ v[12]:=RotateRight64(v[12] xor v[0],16);
+ inc(v[8],v[12]);
+ v[4]:=RotateRight64(v[4] xor v[8],63);
+ inc(v[1],v[5]+M[Sigma[1,(1 shl 1) or 0]]);
+ v[13]:=RotateRight64(v[13] xor v[1],32);
+ inc(v[9],v[13]);
+ v[5]:=RotateRight64(v[5] xor v[9],24);
+ inc(v[1],v[5]+M[Sigma[1,(1 shl 1) or 1]]);
+ v[13]:=RotateRight64(v[13] xor v[1],16);
+ inc(v[9],v[13]);
+ v[5]:=RotateRight64(v[5] xor v[9],63);
+ inc(v[2],v[6]+M[Sigma[1,(2 shl 1) or 0]]);
+ v[14]:=RotateRight64(v[14] xor v[2],32);
+ inc(v[10],v[14]);
+ v[6]:=RotateRight64(v[6] xor v[10],24);
+ inc(v[2],v[6]+M[Sigma[1,(2 shl 1) or 1]]);
+ v[14]:=RotateRight64(v[14] xor v[2],16);
+ inc(v[10],v[14]);
+ v[6]:=RotateRight64(v[6] xor v[10],63);
+ inc(v[3],v[7]+M[Sigma[1,(3 shl 1) or 0]]);
+ v[15]:=RotateRight64(v[15] xor v[3],32);
+ inc(v[11],v[15]);
+ v[7]:=RotateRight64(v[7] xor v[11],24);
+ inc(v[3],v[7]+M[Sigma[1,(3 shl 1) or 1]]);
+ v[15]:=RotateRight64(v[15] xor v[3],16);
+ inc(v[11],v[15]);
+ v[7]:=RotateRight64(v[7] xor v[11],63);
+ inc(v[0],v[5]+M[Sigma[1,(4 shl 1) or 0]]);
+ v[15]:=RotateRight64(v[15] xor v[0],32);
+ inc(v[10],v[15]);
+ v[5]:=RotateRight64(v[5] xor v[10],24);
+ inc(v[0],v[5]+M[Sigma[1,(4 shl 1) or 1]]);
+ v[15]:=RotateRight64(v[15] xor v[0],16);
+ inc(v[10],v[15]);
+ v[5]:=RotateRight64(v[5] xor v[10],63);
+ inc(v[1],v[6]+M[Sigma[1,(5 shl 1) or 0]]);
+ v[12]:=RotateRight64(v[12] xor v[1],32);
+ inc(v[11],v[12]);
+ v[6]:=RotateRight64(v[6] xor v[11],24);
+ inc(v[1],v[6]+M[Sigma[1,(5 shl 1) or 1]]);
+ v[12]:=RotateRight64(v[12] xor v[1],16);
+ inc(v[11],v[12]);
+ v[6]:=RotateRight64(v[6] xor v[11],63);
+ inc(v[2],v[7]+M[Sigma[1,(6 shl 1) or 0]]);
+ v[13]:=RotateRight64(v[13] xor v[2],32);
+ inc(v[8],v[13]);
+ v[7]:=RotateRight64(v[7] xor v[8],24);
+ inc(v[2],v[7]+M[Sigma[1,(6 shl 1) or 1]]);
+ v[13]:=RotateRight64(v[13] xor v[2],16);
+ inc(v[8],v[13]);
+ v[7]:=RotateRight64(v[7] xor v[8],63);
+ inc(v[3],v[4]+M[Sigma[1,(7 shl 1) or 0]]);
+ v[14]:=RotateRight64(v[14] xor v[3],32);
+ inc(v[9],v[14]);
+ v[4]:=RotateRight64(v[4] xor v[9],24);
+ inc(v[3],v[4]+M[Sigma[1,(7 shl 1) or 1]]);
+ v[14]:=RotateRight64(v[14] xor v[3],16);
+ inc(v[9],v[14]);
+ v[4]:=RotateRight64(v[4] xor v[9],63);
+ inc(v[0],v[4]+M[Sigma[2,(0 shl 1) or 0]]);
+ v[12]:=RotateRight64(v[12] xor v[0],32);
+ inc(v[8],v[12]);
+ v[4]:=RotateRight64(v[4] xor v[8],24);
+ inc(v[0],v[4]+M[Sigma[2,(0 shl 1) or 1]]);
+ v[12]:=RotateRight64(v[12] xor v[0],16);
+ inc(v[8],v[12]);
+ v[4]:=RotateRight64(v[4] xor v[8],63);
+ inc(v[1],v[5]+M[Sigma[2,(1 shl 1) or 0]]);
+ v[13]:=RotateRight64(v[13] xor v[1],32);
+ inc(v[9],v[13]);
+ v[5]:=RotateRight64(v[5] xor v[9],24);
+ inc(v[1],v[5]+M[Sigma[2,(1 shl 1) or 1]]);
+ v[13]:=RotateRight64(v[13] xor v[1],16);
+ inc(v[9],v[13]);
+ v[5]:=RotateRight64(v[5] xor v[9],63);
+ inc(v[2],v[6]+M[Sigma[2,(2 shl 1) or 0]]);
+ v[14]:=RotateRight64(v[14] xor v[2],32);
+ inc(v[10],v[14]);
+ v[6]:=RotateRight64(v[6] xor v[10],24);
+ inc(v[2],v[6]+M[Sigma[2,(2 shl 1) or 1]]);
+ v[14]:=RotateRight64(v[14] xor v[2],16);
+ inc(v[10],v[14]);
+ v[6]:=RotateRight64(v[6] xor v[10],63);
+ inc(v[3],v[7]+M[Sigma[2,(3 shl 1) or 0]]);
+ v[15]:=RotateRight64(v[15] xor v[3],32);
+ inc(v[11],v[15]);
+ v[7]:=RotateRight64(v[7] xor v[11],24);
+ inc(v[3],v[7]+M[Sigma[2,(3 shl 1) or 1]]);
+ v[15]:=RotateRight64(v[15] xor v[3],16);
+ inc(v[11],v[15]);
+ v[7]:=RotateRight64(v[7] xor v[11],63);
+ inc(v[0],v[5]+M[Sigma[2,(4 shl 1) or 0]]);
+ v[15]:=RotateRight64(v[15] xor v[0],32);
+ inc(v[10],v[15]);
+ v[5]:=RotateRight64(v[5] xor v[10],24);
+ inc(v[0],v[5]+M[Sigma[2,(4 shl 1) or 1]]);
+ v[15]:=RotateRight64(v[15] xor v[0],16);
+ inc(v[10],v[15]);
+ v[5]:=RotateRight64(v[5] xor v[10],63);
+ inc(v[1],v[6]+M[Sigma[2,(5 shl 1) or 0]]);
+ v[12]:=RotateRight64(v[12] xor v[1],32);
+ inc(v[11],v[12]);
+ v[6]:=RotateRight64(v[6] xor v[11],24);
+ inc(v[1],v[6]+M[Sigma[2,(5 shl 1) or 1]]);
+ v[12]:=RotateRight64(v[12] xor v[1],16);
+ inc(v[11],v[12]);
+ v[6]:=RotateRight64(v[6] xor v[11],63);
+ inc(v[2],v[7]+M[Sigma[2,(6 shl 1) or 0]]);
+ v[13]:=RotateRight64(v[13] xor v[2],32);
+ inc(v[8],v[13]);
+ v[7]:=RotateRight64(v[7] xor v[8],24);
+ inc(v[2],v[7]+M[Sigma[2,(6 shl 1) or 1]]);
+ v[13]:=RotateRight64(v[13] xor v[2],16);
+ inc(v[8],v[13]);
+ v[7]:=RotateRight64(v[7] xor v[8],63);
+ inc(v[3],v[4]+M[Sigma[2,(7 shl 1) or 0]]);
+ v[14]:=RotateRight64(v[14] xor v[3],32);
+ inc(v[9],v[14]);
+ v[4]:=RotateRight64(v[4] xor v[9],24);
+ inc(v[3],v[4]+M[Sigma[2,(7 shl 1) or 1]]);
+ v[14]:=RotateRight64(v[14] xor v[3],16);
+ inc(v[9],v[14]);
+ v[4]:=RotateRight64(v[4] xor v[9],63);
+ inc(v[0],v[4]+M[Sigma[3,(0 shl 1) or 0]]);
+ v[12]:=RotateRight64(v[12] xor v[0],32);
+ inc(v[8],v[12]);
+ v[4]:=RotateRight64(v[4] xor v[8],24);
+ inc(v[0],v[4]+M[Sigma[3,(0 shl 1) or 1]]);
+ v[12]:=RotateRight64(v[12] xor v[0],16);
+ inc(v[8],v[12]);
+ v[4]:=RotateRight64(v[4] xor v[8],63);
+ inc(v[1],v[5]+M[Sigma[3,(1 shl 1) or 0]]);
+ v[13]:=RotateRight64(v[13] xor v[1],32);
+ inc(v[9],v[13]);
+ v[5]:=RotateRight64(v[5] xor v[9],24);
+ inc(v[1],v[5]+M[Sigma[3,(1 shl 1) or 1]]);
+ v[13]:=RotateRight64(v[13] xor v[1],16);
+ inc(v[9],v[13]);
+ v[5]:=RotateRight64(v[5] xor v[9],63);
+ inc(v[2],v[6]+M[Sigma[3,(2 shl 1) or 0]]);
+ v[14]:=RotateRight64(v[14] xor v[2],32);
+ inc(v[10],v[14]);
+ v[6]:=RotateRight64(v[6] xor v[10],24);
+ inc(v[2],v[6]+M[Sigma[3,(2 shl 1) or 1]]);
+ v[14]:=RotateRight64(v[14] xor v[2],16);
+ inc(v[10],v[14]);
+ v[6]:=RotateRight64(v[6] xor v[10],63);
+ inc(v[3],v[7]+M[Sigma[3,(3 shl 1) or 0]]);
+ v[15]:=RotateRight64(v[15] xor v[3],32);
+ inc(v[11],v[15]);
+ v[7]:=RotateRight64(v[7] xor v[11],24);
+ inc(v[3],v[7]+M[Sigma[3,(3 shl 1) or 1]]);
+ v[15]:=RotateRight64(v[15] xor v[3],16);
+ inc(v[11],v[15]);
+ v[7]:=RotateRight64(v[7] xor v[11],63);
+ inc(v[0],v[5]+M[Sigma[3,(4 shl 1) or 0]]);
+ v[15]:=RotateRight64(v[15] xor v[0],32);
+ inc(v[10],v[15]);
+ v[5]:=RotateRight64(v[5] xor v[10],24);
+ inc(v[0],v[5]+M[Sigma[3,(4 shl 1) or 1]]);
+ v[15]:=RotateRight64(v[15] xor v[0],16);
+ inc(v[10],v[15]);
+ v[5]:=RotateRight64(v[5] xor v[10],63);
+ inc(v[1],v[6]+M[Sigma[3,(5 shl 1) or 0]]);
+ v[12]:=RotateRight64(v[12] xor v[1],32);
+ inc(v[11],v[12]);
+ v[6]:=RotateRight64(v[6] xor v[11],24);
+ inc(v[1],v[6]+M[Sigma[3,(5 shl 1) or 1]]);
+ v[12]:=RotateRight64(v[12] xor v[1],16);
+ inc(v[11],v[12]);
+ v[6]:=RotateRight64(v[6] xor v[11],63);
+ inc(v[2],v[7]+M[Sigma[3,(6 shl 1) or 0]]);
+ v[13]:=RotateRight64(v[13] xor v[2],32);
+ inc(v[8],v[13]);
+ v[7]:=RotateRight64(v[7] xor v[8],24);
+ inc(v[2],v[7]+M[Sigma[3,(6 shl 1) or 1]]);
+ v[13]:=RotateRight64(v[13] xor v[2],16);
+ inc(v[8],v[13]);
+ v[7]:=RotateRight64(v[7] xor v[8],63);
+ inc(v[3],v[4]+M[Sigma[3,(7 shl 1) or 0]]);
+ v[14]:=RotateRight64(v[14] xor v[3],32);
+ inc(v[9],v[14]);
+ v[4]:=RotateRight64(v[4] xor v[9],24);
+ inc(v[3],v[4]+M[Sigma[3,(7 shl 1) or 1]]);
+ v[14]:=RotateRight64(v[14] xor v[3],16);
+ inc(v[9],v[14]);
+ v[4]:=RotateRight64(v[4] xor v[9],63);
+ inc(v[0],v[4]+M[Sigma[4,(0 shl 1) or 0]]);
+ v[12]:=RotateRight64(v[12] xor v[0],32);
+ inc(v[8],v[12]);
+ v[4]:=RotateRight64(v[4] xor v[8],24);
+ inc(v[0],v[4]+M[Sigma[4,(0 shl 1) or 1]]);
+ v[12]:=RotateRight64(v[12] xor v[0],16);
+ inc(v[8],v[12]);
+ v[4]:=RotateRight64(v[4] xor v[8],63);
+ inc(v[1],v[5]+M[Sigma[4,(1 shl 1) or 0]]);
+ v[13]:=RotateRight64(v[13] xor v[1],32);
+ inc(v[9],v[13]);
+ v[5]:=RotateRight64(v[5] xor v[9],24);
+ inc(v[1],v[5]+M[Sigma[4,(1 shl 1) or 1]]);
+ v[13]:=RotateRight64(v[13] xor v[1],16);
+ inc(v[9],v[13]);
+ v[5]:=RotateRight64(v[5] xor v[9],63);
+ inc(v[2],v[6]+M[Sigma[4,(2 shl 1) or 0]]);
+ v[14]:=RotateRight64(v[14] xor v[2],32);
+ inc(v[10],v[14]);
+ v[6]:=RotateRight64(v[6] xor v[10],24);
+ inc(v[2],v[6]+M[Sigma[4,(2 shl 1) or 1]]);
+ v[14]:=RotateRight64(v[14] xor v[2],16);
+ inc(v[10],v[14]);
+ v[6]:=RotateRight64(v[6] xor v[10],63);
+ inc(v[3],v[7]+M[Sigma[4,(3 shl 1) or 0]]);
+ v[15]:=RotateRight64(v[15] xor v[3],32);
+ inc(v[11],v[15]);
+ v[7]:=RotateRight64(v[7] xor v[11],24);
+ inc(v[3],v[7]+M[Sigma[4,(3 shl 1) or 1]]);
+ v[15]:=RotateRight64(v[15] xor v[3],16);
+ inc(v[11],v[15]);
+ v[7]:=RotateRight64(v[7] xor v[11],63);
+ inc(v[0],v[5]+M[Sigma[4,(4 shl 1) or 0]]);
+ v[15]:=RotateRight64(v[15] xor v[0],32);
+ inc(v[10],v[15]);
+ v[5]:=RotateRight64(v[5] xor v[10],24);
+ inc(v[0],v[5]+M[Sigma[4,(4 shl 1) or 1]]);
+ v[15]:=RotateRight64(v[15] xor v[0],16);
+ inc(v[10],v[15]);
+ v[5]:=RotateRight64(v[5] xor v[10],63);
+ inc(v[1],v[6]+M[Sigma[4,(5 shl 1) or 0]]);
+ v[12]:=RotateRight64(v[12] xor v[1],32);
+ inc(v[11],v[12]);
+ v[6]:=RotateRight64(v[6] xor v[11],24);
+ inc(v[1],v[6]+M[Sigma[4,(5 shl 1) or 1]]);
+ v[12]:=RotateRight64(v[12] xor v[1],16);
+ inc(v[11],v[12]);
+ v[6]:=RotateRight64(v[6] xor v[11],63);
+ inc(v[2],v[7]+M[Sigma[4,(6 shl 1) or 0]]);
+ v[13]:=RotateRight64(v[13] xor v[2],32);
+ inc(v[8],v[13]);
+ v[7]:=RotateRight64(v[7] xor v[8],24);
+ inc(v[2],v[7]+M[Sigma[4,(6 shl 1) or 1]]);
+ v[13]:=RotateRight64(v[13] xor v[2],16);
+ inc(v[8],v[13]);
+ v[7]:=RotateRight64(v[7] xor v[8],63);
+ inc(v[3],v[4]+M[Sigma[4,(7 shl 1) or 0]]);
+ v[14]:=RotateRight64(v[14] xor v[3],32);
+ inc(v[9],v[14]);
+ v[4]:=RotateRight64(v[4] xor v[9],24);
+ inc(v[3],v[4]+M[Sigma[4,(7 shl 1) or 1]]);
+ v[14]:=RotateRight64(v[14] xor v[3],16);
+ inc(v[9],v[14]);
+ v[4]:=RotateRight64(v[4] xor v[9],63);
+ inc(v[0],v[4]+M[Sigma[5,(0 shl 1) or 0]]);
+ v[12]:=RotateRight64(v[12] xor v[0],32);
+ inc(v[8],v[12]);
+ v[4]:=RotateRight64(v[4] xor v[8],24);
+ inc(v[0],v[4]+M[Sigma[5,(0 shl 1) or 1]]);
+ v[12]:=RotateRight64(v[12] xor v[0],16);
+ inc(v[8],v[12]);
+ v[4]:=RotateRight64(v[4] xor v[8],63);
+ inc(v[1],v[5]+M[Sigma[5,(1 shl 1) or 0]]);
+ v[13]:=RotateRight64(v[13] xor v[1],32);
+ inc(v[9],v[13]);
+ v[5]:=RotateRight64(v[5] xor v[9],24);
+ inc(v[1],v[5]+M[Sigma[5,(1 shl 1) or 1]]);
+ v[13]:=RotateRight64(v[13] xor v[1],16);
+ inc(v[9],v[13]);
+ v[5]:=RotateRight64(v[5] xor v[9],63);
+ inc(v[2],v[6]+M[Sigma[5,(2 shl 1) or 0]]);
+ v[14]:=RotateRight64(v[14] xor v[2],32);
+ inc(v[10],v[14]);
+ v[6]:=RotateRight64(v[6] xor v[10],24);
+ inc(v[2],v[6]+M[Sigma[5,(2 shl 1) or 1]]);
+ v[14]:=RotateRight64(v[14] xor v[2],16);
+ inc(v[10],v[14]);
+ v[6]:=RotateRight64(v[6] xor v[10],63);
+ inc(v[3],v[7]+M[Sigma[5,(3 shl 1) or 0]]);
+ v[15]:=RotateRight64(v[15] xor v[3],32);
+ inc(v[11],v[15]);
+ v[7]:=RotateRight64(v[7] xor v[11],24);
+ inc(v[3],v[7]+M[Sigma[5,(3 shl 1) or 1]]);
+ v[15]:=RotateRight64(v[15] xor v[3],16);
+ inc(v[11],v[15]);
+ v[7]:=RotateRight64(v[7] xor v[11],63);
+ inc(v[0],v[5]+M[Sigma[5,(4 shl 1) or 0]]);
+ v[15]:=RotateRight64(v[15] xor v[0],32);
+ inc(v[10],v[15]);
+ v[5]:=RotateRight64(v[5] xor v[10],24);
+ inc(v[0],v[5]+M[Sigma[5,(4 shl 1) or 1]]);
+ v[15]:=RotateRight64(v[15] xor v[0],16);
+ inc(v[10],v[15]);
+ v[5]:=RotateRight64(v[5] xor v[10],63);
+ inc(v[1],v[6]+M[Sigma[5,(5 shl 1) or 0]]);
+ v[12]:=RotateRight64(v[12] xor v[1],32);
+ inc(v[11],v[12]);
+ v[6]:=RotateRight64(v[6] xor v[11],24);
+ inc(v[1],v[6]+M[Sigma[5,(5 shl 1) or 1]]);
+ v[12]:=RotateRight64(v[12] xor v[1],16);
+ inc(v[11],v[12]);
+ v[6]:=RotateRight64(v[6] xor v[11],63);
+ inc(v[2],v[7]+M[Sigma[5,(6 shl 1) or 0]]);
+ v[13]:=RotateRight64(v[13] xor v[2],32);
+ inc(v[8],v[13]);
+ v[7]:=RotateRight64(v[7] xor v[8],24);
+ inc(v[2],v[7]+M[Sigma[5,(6 shl 1) or 1]]);
+ v[13]:=RotateRight64(v[13] xor v[2],16);
+ inc(v[8],v[13]);
+ v[7]:=RotateRight64(v[7] xor v[8],63);
+ inc(v[3],v[4]+M[Sigma[5,(7 shl 1) or 0]]);
+ v[14]:=RotateRight64(v[14] xor v[3],32);
+ inc(v[9],v[14]);
+ v[4]:=RotateRight64(v[4] xor v[9],24);
+ inc(v[3],v[4]+M[Sigma[5,(7 shl 1) or 1]]);
+ v[14]:=RotateRight64(v[14] xor v[3],16);
+ inc(v[9],v[14]);
+ v[4]:=RotateRight64(v[4] xor v[9],63);
+ inc(v[0],v[4]+M[Sigma[6,(0 shl 1) or 0]]);
+ v[12]:=RotateRight64(v[12] xor v[0],32);
+ inc(v[8],v[12]);
+ v[4]:=RotateRight64(v[4] xor v[8],24);
+ inc(v[0],v[4]+M[Sigma[6,(0 shl 1) or 1]]);
+ v[12]:=RotateRight64(v[12] xor v[0],16);
+ inc(v[8],v[12]);
+ v[4]:=RotateRight64(v[4] xor v[8],63);
+ inc(v[1],v[5]+M[Sigma[6,(1 shl 1) or 0]]);
+ v[13]:=RotateRight64(v[13] xor v[1],32);
+ inc(v[9],v[13]);
+ v[5]:=RotateRight64(v[5] xor v[9],24);
+ inc(v[1],v[5]+M[Sigma[6,(1 shl 1) or 1]]);
+ v[13]:=RotateRight64(v[13] xor v[1],16);
+ inc(v[9],v[13]);
+ v[5]:=RotateRight64(v[5] xor v[9],63);
+ inc(v[2],v[6]+M[Sigma[6,(2 shl 1) or 0]]);
+ v[14]:=RotateRight64(v[14] xor v[2],32);
+ inc(v[10],v[14]);
+ v[6]:=RotateRight64(v[6] xor v[10],24);
+ inc(v[2],v[6]+M[Sigma[6,(2 shl 1) or 1]]);
+ v[14]:=RotateRight64(v[14] xor v[2],16);
+ inc(v[10],v[14]);
+ v[6]:=RotateRight64(v[6] xor v[10],63);
+ inc(v[3],v[7]+M[Sigma[6,(3 shl 1) or 0]]);
+ v[15]:=RotateRight64(v[15] xor v[3],32);
+ inc(v[11],v[15]);
+ v[7]:=RotateRight64(v[7] xor v[11],24);
+ inc(v[3],v[7]+M[Sigma[6,(3 shl 1) or 1]]);
+ v[15]:=RotateRight64(v[15] xor v[3],16);
+ inc(v[11],v[15]);
+ v[7]:=RotateRight64(v[7] xor v[11],63);
+ inc(v[0],v[5]+M[Sigma[6,(4 shl 1) or 0]]);
+ v[15]:=RotateRight64(v[15] xor v[0],32);
+ inc(v[10],v[15]);
+ v[5]:=RotateRight64(v[5] xor v[10],24);
+ inc(v[0],v[5]+M[Sigma[6,(4 shl 1) or 1]]);
+ v[15]:=RotateRight64(v[15] xor v[0],16);
+ inc(v[10],v[15]);
+ v[5]:=RotateRight64(v[5] xor v[10],63);
+ inc(v[1],v[6]+M[Sigma[6,(5 shl 1) or 0]]);
+ v[12]:=RotateRight64(v[12] xor v[1],32);
+ inc(v[11],v[12]);
+ v[6]:=RotateRight64(v[6] xor v[11],24);
+ inc(v[1],v[6]+M[Sigma[6,(5 shl 1) or 1]]);
+ v[12]:=RotateRight64(v[12] xor v[1],16);
+ inc(v[11],v[12]);
+ v[6]:=RotateRight64(v[6] xor v[11],63);
+ inc(v[2],v[7]+M[Sigma[6,(6 shl 1) or 0]]);
+ v[13]:=RotateRight64(v[13] xor v[2],32);
+ inc(v[8],v[13]);
+ v[7]:=RotateRight64(v[7] xor v[8],24);
+ inc(v[2],v[7]+M[Sigma[6,(6 shl 1) or 1]]);
+ v[13]:=RotateRight64(v[13] xor v[2],16);
+ inc(v[8],v[13]);
+ v[7]:=RotateRight64(v[7] xor v[8],63);
+ inc(v[3],v[4]+M[Sigma[6,(7 shl 1) or 0]]);
+ v[14]:=RotateRight64(v[14] xor v[3],32);
+ inc(v[9],v[14]);
+ v[4]:=RotateRight64(v[4] xor v[9],24);
+ inc(v[3],v[4]+M[Sigma[6,(7 shl 1) or 1]]);
+ v[14]:=RotateRight64(v[14] xor v[3],16);
+ inc(v[9],v[14]);
+ v[4]:=RotateRight64(v[4] xor v[9],63);
+ inc(v[0],v[4]+M[Sigma[7,(0 shl 1) or 0]]);
+ v[12]:=RotateRight64(v[12] xor v[0],32);
+ inc(v[8],v[12]);
+ v[4]:=RotateRight64(v[4] xor v[8],24);
+ inc(v[0],v[4]+M[Sigma[7,(0 shl 1) or 1]]);
+ v[12]:=RotateRight64(v[12] xor v[0],16);
+ inc(v[8],v[12]);
+ v[4]:=RotateRight64(v[4] xor v[8],63);
+ inc(v[1],v[5]+M[Sigma[7,(1 shl 1) or 0]]);
+ v[13]:=RotateRight64(v[13] xor v[1],32);
+ inc(v[9],v[13]);
+ v[5]:=RotateRight64(v[5] xor v[9],24);
+ inc(v[1],v[5]+M[Sigma[7,(1 shl 1) or 1]]);
+ v[13]:=RotateRight64(v[13] xor v[1],16);
+ inc(v[9],v[13]);
+ v[5]:=RotateRight64(v[5] xor v[9],63);
+ inc(v[2],v[6]+M[Sigma[7,(2 shl 1) or 0]]);
+ v[14]:=RotateRight64(v[14] xor v[2],32);
+ inc(v[10],v[14]);
+ v[6]:=RotateRight64(v[6] xor v[10],24);
+ inc(v[2],v[6]+M[Sigma[7,(2 shl 1) or 1]]);
+ v[14]:=RotateRight64(v[14] xor v[2],16);
+ inc(v[10],v[14]);
+ v[6]:=RotateRight64(v[6] xor v[10],63);
+ inc(v[3],v[7]+M[Sigma[7,(3 shl 1) or 0]]);
+ v[15]:=RotateRight64(v[15] xor v[3],32);
+ inc(v[11],v[15]);
+ v[7]:=RotateRight64(v[7] xor v[11],24);
+ inc(v[3],v[7]+M[Sigma[7,(3 shl 1) or 1]]);
+ v[15]:=RotateRight64(v[15] xor v[3],16);
+ inc(v[11],v[15]);
+ v[7]:=RotateRight64(v[7] xor v[11],63);
+ inc(v[0],v[5]+M[Sigma[7,(4 shl 1) or 0]]);
+ v[15]:=RotateRight64(v[15] xor v[0],32);
+ inc(v[10],v[15]);
+ v[5]:=RotateRight64(v[5] xor v[10],24);
+ inc(v[0],v[5]+M[Sigma[7,(4 shl 1) or 1]]);
+ v[15]:=RotateRight64(v[15] xor v[0],16);
+ inc(v[10],v[15]);
+ v[5]:=RotateRight64(v[5] xor v[10],63);
+ inc(v[1],v[6]+M[Sigma[7,(5 shl 1) or 0]]);
+ v[12]:=RotateRight64(v[12] xor v[1],32);
+ inc(v[11],v[12]);
+ v[6]:=RotateRight64(v[6] xor v[11],24);
+ inc(v[1],v[6]+M[Sigma[7,(5 shl 1) or 1]]);
+ v[12]:=RotateRight64(v[12] xor v[1],16);
+ inc(v[11],v[12]);
+ v[6]:=RotateRight64(v[6] xor v[11],63);
+ inc(v[2],v[7]+M[Sigma[7,(6 shl 1) or 0]]);
+ v[13]:=RotateRight64(v[13] xor v[2],32);
+ inc(v[8],v[13]);
+ v[7]:=RotateRight64(v[7] xor v[8],24);
+ inc(v[2],v[7]+M[Sigma[7,(6 shl 1) or 1]]);
+ v[13]:=RotateRight64(v[13] xor v[2],16);
+ inc(v[8],v[13]);
+ v[7]:=RotateRight64(v[7] xor v[8],63);
+ inc(v[3],v[4]+M[Sigma[7,(7 shl 1) or 0]]);
+ v[14]:=RotateRight64(v[14] xor v[3],32);
+ inc(v[9],v[14]);
+ v[4]:=RotateRight64(v[4] xor v[9],24);
+ inc(v[3],v[4]+M[Sigma[7,(7 shl 1) or 1]]);
+ v[14]:=RotateRight64(v[14] xor v[3],16);
+ inc(v[9],v[14]);
+ v[4]:=RotateRight64(v[4] xor v[9],63);
+ inc(v[0],v[4]+M[Sigma[8,(0 shl 1) or 0]]);
+ v[12]:=RotateRight64(v[12] xor v[0],32);
+ inc(v[8],v[12]);
+ v[4]:=RotateRight64(v[4] xor v[8],24);
+ inc(v[0],v[4]+M[Sigma[8,(0 shl 1) or 1]]);
+ v[12]:=RotateRight64(v[12] xor v[0],16);
+ inc(v[8],v[12]);
+ v[4]:=RotateRight64(v[4] xor v[8],63);
+ inc(v[1],v[5]+M[Sigma[8,(1 shl 1) or 0]]);
+ v[13]:=RotateRight64(v[13] xor v[1],32);
+ inc(v[9],v[13]);
+ v[5]:=RotateRight64(v[5] xor v[9],24);
+ inc(v[1],v[5]+M[Sigma[8,(1 shl 1) or 1]]);
+ v[13]:=RotateRight64(v[13] xor v[1],16);
+ inc(v[9],v[13]);
+ v[5]:=RotateRight64(v[5] xor v[9],63);
+ inc(v[2],v[6]+M[Sigma[8,(2 shl 1) or 0]]);
+ v[14]:=RotateRight64(v[14] xor v[2],32);
+ inc(v[10],v[14]);
+ v[6]:=RotateRight64(v[6] xor v[10],24);
+ inc(v[2],v[6]+M[Sigma[8,(2 shl 1) or 1]]);
+ v[14]:=RotateRight64(v[14] xor v[2],16);
+ inc(v[10],v[14]);
+ v[6]:=RotateRight64(v[6] xor v[10],63);
+ inc(v[3],v[7]+M[Sigma[8,(3 shl 1) or 0]]);
+ v[15]:=RotateRight64(v[15] xor v[3],32);
+ inc(v[11],v[15]);
+ v[7]:=RotateRight64(v[7] xor v[11],24);
+ inc(v[3],v[7]+M[Sigma[8,(3 shl 1) or 1]]);
+ v[15]:=RotateRight64(v[15] xor v[3],16);
+ inc(v[11],v[15]);
+ v[7]:=RotateRight64(v[7] xor v[11],63);
+ inc(v[0],v[5]+M[Sigma[8,(4 shl 1) or 0]]);
+ v[15]:=RotateRight64(v[15] xor v[0],32);
+ inc(v[10],v[15]);
+ v[5]:=RotateRight64(v[5] xor v[10],24);
+ inc(v[0],v[5]+M[Sigma[8,(4 shl 1) or 1]]);
+ v[15]:=RotateRight64(v[15] xor v[0],16);
+ inc(v[10],v[15]);
+ v[5]:=RotateRight64(v[5] xor v[10],63);
+ inc(v[1],v[6]+M[Sigma[8,(5 shl 1) or 0]]);
+ v[12]:=RotateRight64(v[12] xor v[1],32);
+ inc(v[11],v[12]);
+ v[6]:=RotateRight64(v[6] xor v[11],24);
+ inc(v[1],v[6]+M[Sigma[8,(5 shl 1) or 1]]);
+ v[12]:=RotateRight64(v[12] xor v[1],16);
+ inc(v[11],v[12]);
+ v[6]:=RotateRight64(v[6] xor v[11],63);
+ inc(v[2],v[7]+M[Sigma[8,(6 shl 1) or 0]]);
+ v[13]:=RotateRight64(v[13] xor v[2],32);
+ inc(v[8],v[13]);
+ v[7]:=RotateRight64(v[7] xor v[8],24);
+ inc(v[2],v[7]+M[Sigma[8,(6 shl 1) or 1]]);
+ v[13]:=RotateRight64(v[13] xor v[2],16);
+ inc(v[8],v[13]);
+ v[7]:=RotateRight64(v[7] xor v[8],63);
+ inc(v[3],v[4]+M[Sigma[8,(7 shl 1) or 0]]);
+ v[14]:=RotateRight64(v[14] xor v[3],32);
+ inc(v[9],v[14]);
+ v[4]:=RotateRight64(v[4] xor v[9],24);
+ inc(v[3],v[4]+M[Sigma[8,(7 shl 1) or 1]]);
+ v[14]:=RotateRight64(v[14] xor v[3],16);
+ inc(v[9],v[14]);
+ v[4]:=RotateRight64(v[4] xor v[9],63);
+ inc(v[0],v[4]+M[Sigma[9,(0 shl 1) or 0]]);
+ v[12]:=RotateRight64(v[12] xor v[0],32);
+ inc(v[8],v[12]);
+ v[4]:=RotateRight64(v[4] xor v[8],24);
+ inc(v[0],v[4]+M[Sigma[9,(0 shl 1) or 1]]);
+ v[12]:=RotateRight64(v[12] xor v[0],16);
+ inc(v[8],v[12]);
+ v[4]:=RotateRight64(v[4] xor v[8],63);
+ inc(v[1],v[5]+M[Sigma[9,(1 shl 1) or 0]]);
+ v[13]:=RotateRight64(v[13] xor v[1],32);
+ inc(v[9],v[13]);
+ v[5]:=RotateRight64(v[5] xor v[9],24);
+ inc(v[1],v[5]+M[Sigma[9,(1 shl 1) or 1]]);
+ v[13]:=RotateRight64(v[13] xor v[1],16);
+ inc(v[9],v[13]);
+ v[5]:=RotateRight64(v[5] xor v[9],63);
+ inc(v[2],v[6]+M[Sigma[9,(2 shl 1) or 0]]);
+ v[14]:=RotateRight64(v[14] xor v[2],32);
+ inc(v[10],v[14]);
+ v[6]:=RotateRight64(v[6] xor v[10],24);
+ inc(v[2],v[6]+M[Sigma[9,(2 shl 1) or 1]]);
+ v[14]:=RotateRight64(v[14] xor v[2],16);
+ inc(v[10],v[14]);
+ v[6]:=RotateRight64(v[6] xor v[10],63);
+ inc(v[3],v[7]+M[Sigma[9,(3 shl 1) or 0]]);
+ v[15]:=RotateRight64(v[15] xor v[3],32);
+ inc(v[11],v[15]);
+ v[7]:=RotateRight64(v[7] xor v[11],24);
+ inc(v[3],v[7]+M[Sigma[9,(3 shl 1) or 1]]);
+ v[15]:=RotateRight64(v[15] xor v[3],16);
+ inc(v[11],v[15]);
+ v[7]:=RotateRight64(v[7] xor v[11],63);
+ inc(v[0],v[5]+M[Sigma[9,(4 shl 1) or 0]]);
+ v[15]:=RotateRight64(v[15] xor v[0],32);
+ inc(v[10],v[15]);
+ v[5]:=RotateRight64(v[5] xor v[10],24);
+ inc(v[0],v[5]+M[Sigma[9,(4 shl 1) or 1]]);
+ v[15]:=RotateRight64(v[15] xor v[0],16);
+ inc(v[10],v[15]);
+ v[5]:=RotateRight64(v[5] xor v[10],63);
+ inc(v[1],v[6]+M[Sigma[9,(5 shl 1) or 0]]);
+ v[12]:=RotateRight64(v[12] xor v[1],32);
+ inc(v[11],v[12]);
+ v[6]:=RotateRight64(v[6] xor v[11],24);
+ inc(v[1],v[6]+M[Sigma[9,(5 shl 1) or 1]]);
+ v[12]:=RotateRight64(v[12] xor v[1],16);
+ inc(v[11],v[12]);
+ v[6]:=RotateRight64(v[6] xor v[11],63);
+ inc(v[2],v[7]+M[Sigma[9,(6 shl 1) or 0]]);
+ v[13]:=RotateRight64(v[13] xor v[2],32);
+ inc(v[8],v[13]);
+ v[7]:=RotateRight64(v[7] xor v[8],24);
+ inc(v[2],v[7]+M[Sigma[9,(6 shl 1) or 1]]);
+ v[13]:=RotateRight64(v[13] xor v[2],16);
+ inc(v[8],v[13]);
+ v[7]:=RotateRight64(v[7] xor v[8],63);
+ inc(v[3],v[4]+M[Sigma[9,(7 shl 1) or 0]]);
+ v[14]:=RotateRight64(v[14] xor v[3],32);
+ inc(v[9],v[14]);
+ v[4]:=RotateRight64(v[4] xor v[9],24);
+ inc(v[3],v[4]+M[Sigma[9,(7 shl 1) or 1]]);
+ v[14]:=RotateRight64(v[14] xor v[3],16);
+ inc(v[9],v[14]);
+ v[4]:=RotateRight64(v[4] xor v[9],63);
+ inc(v[0],v[4]+M[Sigma[10,(0 shl 1) or 0]]);
+ v[12]:=RotateRight64(v[12] xor v[0],32);
+ inc(v[8],v[12]);
+ v[4]:=RotateRight64(v[4] xor v[8],24);
+ inc(v[0],v[4]+M[Sigma[10,(0 shl 1) or 1]]);
+ v[12]:=RotateRight64(v[12] xor v[0],16);
+ inc(v[8],v[12]);
+ v[4]:=RotateRight64(v[4] xor v[8],63);
+ inc(v[1],v[5]+M[Sigma[10,(1 shl 1) or 0]]);
+ v[13]:=RotateRight64(v[13] xor v[1],32);
+ inc(v[9],v[13]);
+ v[5]:=RotateRight64(v[5] xor v[9],24);
+ inc(v[1],v[5]+M[Sigma[10,(1 shl 1) or 1]]);
+ v[13]:=RotateRight64(v[13] xor v[1],16);
+ inc(v[9],v[13]);
+ v[5]:=RotateRight64(v[5] xor v[9],63);
+ inc(v[2],v[6]+M[Sigma[10,(2 shl 1) or 0]]);
+ v[14]:=RotateRight64(v[14] xor v[2],32);
+ inc(v[10],v[14]);
+ v[6]:=RotateRight64(v[6] xor v[10],24);
+ inc(v[2],v[6]+M[Sigma[10,(2 shl 1) or 1]]);
+ v[14]:=RotateRight64(v[14] xor v[2],16);
+ inc(v[10],v[14]);
+ v[6]:=RotateRight64(v[6] xor v[10],63);
+ inc(v[3],v[7]+M[Sigma[10,(3 shl 1) or 0]]);
+ v[15]:=RotateRight64(v[15] xor v[3],32);
+ inc(v[11],v[15]);
+ v[7]:=RotateRight64(v[7] xor v[11],24);
+ inc(v[3],v[7]+M[Sigma[10,(3 shl 1) or 1]]);
+ v[15]:=RotateRight64(v[15] xor v[3],16);
+ inc(v[11],v[15]);
+ v[7]:=RotateRight64(v[7] xor v[11],63);
+ inc(v[0],v[5]+M[Sigma[10,(4 shl 1) or 0]]);
+ v[15]:=RotateRight64(v[15] xor v[0],32);
+ inc(v[10],v[15]);
+ v[5]:=RotateRight64(v[5] xor v[10],24);
+ inc(v[0],v[5]+M[Sigma[10,(4 shl 1) or 1]]);
+ v[15]:=RotateRight64(v[15] xor v[0],16);
+ inc(v[10],v[15]);
+ v[5]:=RotateRight64(v[5] xor v[10],63);
+ inc(v[1],v[6]+M[Sigma[10,(5 shl 1) or 0]]);
+ v[12]:=RotateRight64(v[12] xor v[1],32);
+ inc(v[11],v[12]);
+ v[6]:=RotateRight64(v[6] xor v[11],24);
+ inc(v[1],v[6]+M[Sigma[10,(5 shl 1) or 1]]);
+ v[12]:=RotateRight64(v[12] xor v[1],16);
+ inc(v[11],v[12]);
+ v[6]:=RotateRight64(v[6] xor v[11],63);
+ inc(v[2],v[7]+M[Sigma[10,(6 shl 1) or 0]]);
+ v[13]:=RotateRight64(v[13] xor v[2],32);
+ inc(v[8],v[13]);
+ v[7]:=RotateRight64(v[7] xor v[8],24);
+ inc(v[2],v[7]+M[Sigma[10,(6 shl 1) or 1]]);
+ v[13]:=RotateRight64(v[13] xor v[2],16);
+ inc(v[8],v[13]);
+ v[7]:=RotateRight64(v[7] xor v[8],63);
+ inc(v[3],v[4]+M[Sigma[10,(7 shl 1) or 0]]);
+ v[14]:=RotateRight64(v[14] xor v[3],32);
+ inc(v[9],v[14]);
+ v[4]:=RotateRight64(v[4] xor v[9],24);
+ inc(v[3],v[4]+M[Sigma[10,(7 shl 1) or 1]]);
+ v[14]:=RotateRight64(v[14] xor v[3],16);
+ inc(v[9],v[14]);
+ v[4]:=RotateRight64(v[4] xor v[9],63);
+ inc(v[0],v[4]+M[Sigma[11,(0 shl 1) or 0]]);
+ v[12]:=RotateRight64(v[12] xor v[0],32);
+ inc(v[8],v[12]);
+ v[4]:=RotateRight64(v[4] xor v[8],24);
+ inc(v[0],v[4]+M[Sigma[11,(0 shl 1) or 1]]);
+ v[12]:=RotateRight64(v[12] xor v[0],16);
+ inc(v[8],v[12]);
+ v[4]:=RotateRight64(v[4] xor v[8],63);
+ inc(v[1],v[5]+M[Sigma[11,(1 shl 1) or 0]]);
+ v[13]:=RotateRight64(v[13] xor v[1],32);
+ inc(v[9],v[13]);
+ v[5]:=RotateRight64(v[5] xor v[9],24);
+ inc(v[1],v[5]+M[Sigma[11,(1 shl 1) or 1]]);
+ v[13]:=RotateRight64(v[13] xor v[1],16);
+ inc(v[9],v[13]);
+ v[5]:=RotateRight64(v[5] xor v[9],63);
+ inc(v[2],v[6]+M[Sigma[11,(2 shl 1) or 0]]);
+ v[14]:=RotateRight64(v[14] xor v[2],32);
+ inc(v[10],v[14]);
+ v[6]:=RotateRight64(v[6] xor v[10],24);
+ inc(v[2],v[6]+M[Sigma[11,(2 shl 1) or 1]]);
+ v[14]:=RotateRight64(v[14] xor v[2],16);
+ inc(v[10],v[14]);
+ v[6]:=RotateRight64(v[6] xor v[10],63);
+ inc(v[3],v[7]+M[Sigma[11,(3 shl 1) or 0]]);
+ v[15]:=RotateRight64(v[15] xor v[3],32);
+ inc(v[11],v[15]);
+ v[7]:=RotateRight64(v[7] xor v[11],24);
+ inc(v[3],v[7]+M[Sigma[11,(3 shl 1) or 1]]);
+ v[15]:=RotateRight64(v[15] xor v[3],16);
+ inc(v[11],v[15]);
+ v[7]:=RotateRight64(v[7] xor v[11],63);
+ inc(v[0],v[5]+M[Sigma[11,(4 shl 1) or 0]]);
+ v[15]:=RotateRight64(v[15] xor v[0],32);
+ inc(v[10],v[15]);
+ v[5]:=RotateRight64(v[5] xor v[10],24);
+ inc(v[0],v[5]+M[Sigma[11,(4 shl 1) or 1]]);
+ v[15]:=RotateRight64(v[15] xor v[0],16);
+ inc(v[10],v[15]);
+ v[5]:=RotateRight64(v[5] xor v[10],63);
+ inc(v[1],v[6]+M[Sigma[11,(5 shl 1) or 0]]);
+ v[12]:=RotateRight64(v[12] xor v[1],32);
+ inc(v[11],v[12]);
+ v[6]:=RotateRight64(v[6] xor v[11],24);
+ inc(v[1],v[6]+M[Sigma[11,(5 shl 1) or 1]]);
+ v[12]:=RotateRight64(v[12] xor v[1],16);
+ inc(v[11],v[12]);
+ v[6]:=RotateRight64(v[6] xor v[11],63);
+ inc(v[2],v[7]+M[Sigma[11,(6 shl 1) or 0]]);
+ v[13]:=RotateRight64(v[13] xor v[2],32);
+ inc(v[8],v[13]);
+ v[7]:=RotateRight64(v[7] xor v[8],24);
+ inc(v[2],v[7]+M[Sigma[11,(6 shl 1) or 1]]);
+ v[13]:=RotateRight64(v[13] xor v[2],16);
+ inc(v[8],v[13]);
+ v[7]:=RotateRight64(v[7] xor v[8],63);
+ inc(v[3],v[4]+M[Sigma[11,(7 shl 1) or 0]]);
+ v[14]:=RotateRight64(v[14] xor v[3],32);
+ inc(v[9],v[14]);
+ v[4]:=RotateRight64(v[4] xor v[9],24);
+ inc(v[3],v[4]+M[Sigma[11,(7 shl 1) or 1]]);
+ v[14]:=RotateRight64(v[14] xor v[3],16);
+ inc(v[9],v[14]);
+ v[4]:=RotateRight64(v[4] xor v[9],63);
+{$else}
+ Round_(0,V,M);
+ Round_(1,V,M);
+ Round_(2,V,M);
+ Round_(3,V,M);
+ Round_(4,V,M);
+ Round_(5,V,M);
+ Round_(6,V,M);
+ Round_(7,V,M);
+ Round_(8,V,M);
+ Round_(9,V,M);
+ Round_(10,V,M);
+ Round_(11,V,M);
+{$ifend}
+ fH[0]:=fH[0] xor (V[0] xor V[8]);
+ fH[1]:=fH[1] xor (V[1] xor V[9]);
+ fH[2]:=fH[2] xor (V[2] xor V[10]);
+ fH[3]:=fH[3] xor (V[3] xor V[11]);
+ fH[4]:=fH[4] xor (V[4] xor V[12]);
+ fH[5]:=fH[5] xor (V[5] xor V[13]);
+ fH[6]:=fH[6] xor (V[6] xor V[14]);
+ fH[7]:=fH[7] xor (V[7] xor V[15]);
+end;
+
+function TRNLBLAKE2BContext.Initialize(const aOutLen:TRNLSizeInt;const aKey:Pointer;const aKeyLen:TRNLSizeInt):boolean;
+var Block:TRNLBLAKE2BBlock;
+    KeyLen:TRNLSizeInt;
+begin
+
+ if (aOutLen=0) or (aOutLen>BLAKE2B_OUTBYTES) then begin
+  result:=false;
+  exit;
+ end;
+
+ if assigned(aKey) then begin
+  KeyLen:=aKeyLen;
+ end else begin
+  KeyLen:=0;
+ end;
+
+ if KeyLen>BLAKE2B_KEYBYTES then begin
+  result:=false;
+  exit;
+ end;
+
+ fH[0]:=InitializationVectors[0] xor (($01010000 xor ((KeyLen and $ff) shl 8)) xor (aOutLen and $ff));
+ fH[1]:=InitializationVectors[1];
+ fH[2]:=InitializationVectors[2];
+ fH[3]:=InitializationVectors[3];
+ fH[4]:=InitializationVectors[4];
+ fH[5]:=InitializationVectors[5];
+ fH[6]:=InitializationVectors[6];
+ fH[7]:=InitializationVectors[7];
+ fT[0]:=0;
+ fT[1]:=0;
+ FillChar(fBuffer,SizeOf(TRNLBLAKE2BBlock),#0);
+ fBufferLen:=0;
+ fOutLen:=aOutLen;
+
+ FillChar(Block,SizeOf(TRNLBLAKE2BBlock),#0);
+ if KeyLen>0 then begin
+  Move(aKey^,Block,KeyLen);
+  Update(Block,SizeOf(TRNLBLAKE2BBlock));
+  FillChar(Block,SizeOf(TRNLBLAKE2BBlock),#0);
+ end;
+
+ result:=true;
+end;
+
+procedure TRNLBLAKE2BContext.Update(const aMessage;const aMessageSize:TRNLSizeUInt);
+var Position,Remaining,ToDo,Available:TRNLSizeUInt;
+begin
+ Position:=0;
+ Remaining:=aMessageSize;
+ while Remaining>0 do begin
+  if fBufferLen>=BLAKE2B_BLOCKBYTES then begin
+   inc(fT[0],fBufferLen);
+   if fT[0]<fBufferLen then begin
+    inc(fT[1]);
+   end;
+   Compress(false);
+   fBufferLen:=0;
+  end;
+  Available:=BLAKE2B_BLOCKBYTES-fBufferLen;
+  if Remaining<Available then begin
+   ToDo:=Remaining;
+  end else begin
+   ToDo:=Available;
+  end;
+  if ToDo>0 then begin
+   Move(PRNLUInt8Array(@aMessage)^[Position],fBuffer[fBufferLen],ToDo);
+   inc(fBufferLen,ToDo);
+   inc(Position,ToDo);
+   dec(Remaining,ToDo);
+  end else begin
+   break;
+  end;
+ end;
+end;
+
+procedure TRNLBLAKE2BContext.Finalize(out aHash);
+begin
+ inc(fT[0],fBufferLen);
+ if fT[0]<fBufferLen then begin
+  inc(fT[1]);
+ end;
+ if fBufferLen<BLAKE2B_BLOCKBYTES then begin
+  FillChar(fBuffer[fBufferLen],BLAKE2B_BLOCKBYTES-fBufferLen,#0);
+  fBufferLen:=BLAKE2B_BLOCKBYTES;
+ end;
+ Compress(true);
+ TRNLMemoryAccess.StoreLittleEndianUInt64(PRNLUInt64Array(@fBuffer)^[0],fH[0]);
+ TRNLMemoryAccess.StoreLittleEndianUInt64(PRNLUInt64Array(@fBuffer)^[1],fH[1]);
+ TRNLMemoryAccess.StoreLittleEndianUInt64(PRNLUInt64Array(@fBuffer)^[2],fH[2]);
+ TRNLMemoryAccess.StoreLittleEndianUInt64(PRNLUInt64Array(@fBuffer)^[3],fH[3]);
+ TRNLMemoryAccess.StoreLittleEndianUInt64(PRNLUInt64Array(@fBuffer)^[4],fH[4]);
+ TRNLMemoryAccess.StoreLittleEndianUInt64(PRNLUInt64Array(@fBuffer)^[5],fH[5]);
+ TRNLMemoryAccess.StoreLittleEndianUInt64(PRNLUInt64Array(@fBuffer)^[6],fH[6]);
+ TRNLMemoryAccess.StoreLittleEndianUInt64(PRNLUInt64Array(@fBuffer)^[7],fH[7]);
+ System.Move(fBuffer,aHash,fOutLen);
+ FillChar(fBuffer,SizeOf(TRNLBLAKE2BBlock),#0);
+end;
+
+class function TRNLBLAKE2B.Process(out aHash;const aMessage;const aMessageSize:TRNLSizeUInt;const aOutLen:TRNLSizeInt;const aKey:Pointer;const aKeyLen:TRNLSizeInt):boolean;
+var Context:TRNLBLAKE2BContext;
+begin
+ if (not assigned(Pointer(@aMessage))) and (aMessageSize>0) then begin
+  result:=false;
+  exit;
+ end;
+ if not assigned(Pointer(@aHash)) then begin
+  result:=false;
+  exit;
+ end;
+ if (aOutLen=0) or (aOutLen>TRNLBLAKE2BContext.BLAKE2B_OUTBYTES) then begin
+  result:=false;
+  exit;
+ end;
+ if assigned(aKey) and (aKeyLen>TRNLBLAKE2BContext.BLAKE2B_KEYBYTES) then begin
+  result:=false;
+  exit;
+ end;
+ result:=Context.Initialize(aOutLen,aKey,aKeyLen);
+ if result then begin
+  Context.Update(aMessage,aMessageSize);
+  Context.Finalize(aHash);
+ end;
+end;
+
+class procedure TRNLBLAKE2B.SelfTest;
+ procedure RFC7693Test;
+ const BLACK2B_RES:TRNLBLAKE2BHash=
+        (
+         $C2,$3A,$78,$00,$D9,$81,$23,$BD,
+         $10,$F5,$06,$C6,$1E,$29,$DA,$56,
+         $03,$D7,$63,$B8,$BB,$AD,$2E,$73,
+         $7F,$5E,$76,$5A,$7B,$CC,$D4,$75,
+         $00,$00,$00,$00,$00,$00,$00,$00,
+         $00,$00,$00,$00,$00,$00,$00,$00,
+         $00,$00,$00,$00,$00,$00,$00,$00,
+         $00,$00,$00,$00,$00,$00,$00,$00
+        );
+       b2b_md_len:array[0..3] of TRNLInt32=(20,32,48,64);
+       b2b_in_len:array[0..5] of TRNLInt32=(0,3,128,129,255,1024);
+  procedure SelfTestSeq(const aOut:PRNLUInt8Array;const aLen:TRNLSizeInt;const aSeed:TRNLUInt32);
+  var Index:TRNLSizeInt;
+      t,a,b:TRNLUInt32;
+  begin
+   a:=$DEAD4BAD*aSeed;
+   b:=1;
+   for Index:=0 to aLen-1 do begin
+    t:=a+b;
+    a:=b;
+    b:=t;
+    aOut^[Index]:=(t shr 24) and $ff;
+   end;
+  end;
+ var i,j,OutLen,InLen:TRNLSizeInt;
+     In_:array[0..1023] of TRNLUInt8;
+     MD:array[0..63] of TRNLUInt8;
+     Key_:array[0..63] of TRNLUInt8;
+     Context:TRNLBLAKE2BContext;
+ begin
+  write('[BLAKE2B] Testing RFC7693 test ... ');
+  Context.Initialize(32);
+  for i:=0 to 3 do begin
+   OutLen:=b2b_md_len[i];
+   for j:=0 to 5 do begin
+    InLen:=b2b_in_len[j];
+    SelfTestSeq(@In_,InLen,InLen);
+    TRNLBLAKE2B.Process(MD,In_,InLen,OutLen,nil,0);
+    Context.Update(MD,OutLen);
+    SelfTestSeq(@Key_,OutLen,OutLen);
+    TRNLBLAKE2B.Process(MD,In_,InLen,OutLen,@Key_,OutLen);
+    Context.Update(MD,OutLen);
+   end;
+  end;
+  Context.Finalize(MD);
+  if TRNLMemory.SecureIsEqual(MD,BLACK2B_RES,32) then begin
+   writeln('OK!');
+  end else begin
+   writeln('FAILED!');
+  end;
+ end;
+ procedure OfficalTest;
+ const BLAKE2_KAT_LENGTH=256;
+       BLAKB2B_KEYED_KAT:array[0..BLAKE2_KAT_LENGTH-1] of TRNLBLAKE2BHash=
+        (
+         (
+          $10,$EB,$B6,$77,$00,$B1,$86,$8E,
+          $FB,$44,$17,$98,$7A,$CF,$46,$90,
+          $AE,$9D,$97,$2F,$B7,$A5,$90,$C2,
+          $F0,$28,$71,$79,$9A,$AA,$47,$86,
+          $B5,$E9,$96,$E8,$F0,$F4,$EB,$98,
+          $1F,$C2,$14,$B0,$05,$F4,$2D,$2F,
+          $F4,$23,$34,$99,$39,$16,$53,$DF,
+          $7A,$EF,$CB,$C1,$3F,$C5,$15,$68
+         ),
+         (
+          $96,$1F,$6D,$D1,$E4,$DD,$30,$F6,
+          $39,$01,$69,$0C,$51,$2E,$78,$E4,
+          $B4,$5E,$47,$42,$ED,$19,$7C,$3C,
+          $5E,$45,$C5,$49,$FD,$25,$F2,$E4,
+          $18,$7B,$0B,$C9,$FE,$30,$49,$2B,
+          $16,$B0,$D0,$BC,$4E,$F9,$B0,$F3,
+          $4C,$70,$03,$FA,$C0,$9A,$5E,$F1,
+          $53,$2E,$69,$43,$02,$34,$CE,$BD
+         ),
+         (
+          $DA,$2C,$FB,$E2,$D8,$40,$9A,$0F,
+          $38,$02,$61,$13,$88,$4F,$84,$B5,
+          $01,$56,$37,$1A,$E3,$04,$C4,$43,
+          $01,$73,$D0,$8A,$99,$D9,$FB,$1B,
+          $98,$31,$64,$A3,$77,$07,$06,$D5,
+          $37,$F4,$9E,$0C,$91,$6D,$9F,$32,
+          $B9,$5C,$C3,$7A,$95,$B9,$9D,$85,
+          $74,$36,$F0,$23,$2C,$88,$A9,$65
+         ),
+         (
+          $33,$D0,$82,$5D,$DD,$F7,$AD,$A9,
+          $9B,$0E,$7E,$30,$71,$04,$AD,$07,
+          $CA,$9C,$FD,$96,$92,$21,$4F,$15,
+          $61,$35,$63,$15,$E7,$84,$F3,$E5,
+          $A1,$7E,$36,$4A,$E9,$DB,$B1,$4C,
+          $B2,$03,$6D,$F9,$32,$B7,$7F,$4B,
+          $29,$27,$61,$36,$5F,$B3,$28,$DE,
+          $7A,$FD,$C6,$D8,$99,$8F,$5F,$C1
+         ),
+         (
+          $BE,$AA,$5A,$3D,$08,$F3,$80,$71,
+          $43,$CF,$62,$1D,$95,$CD,$69,$05,
+          $14,$D0,$B4,$9E,$FF,$F9,$C9,$1D,
+          $24,$B5,$92,$41,$EC,$0E,$EF,$A5,
+          $F6,$01,$96,$D4,$07,$04,$8B,$BA,
+          $8D,$21,$46,$82,$8E,$BC,$B0,$48,
+          $8D,$88,$42,$FD,$56,$BB,$4F,$6D,
+          $F8,$E1,$9C,$4B,$4D,$AA,$B8,$AC
+         ),
+         (
+          $09,$80,$84,$B5,$1F,$D1,$3D,$EA,
+          $E5,$F4,$32,$0D,$E9,$4A,$68,$8E,
+          $E0,$7B,$AE,$A2,$80,$04,$86,$68,
+          $9A,$86,$36,$11,$7B,$46,$C1,$F4,
+          $C1,$F6,$AF,$7F,$74,$AE,$7C,$85,
+          $76,$00,$45,$6A,$58,$A3,$AF,$25,
+          $1D,$C4,$72,$3A,$64,$CC,$7C,$0A,
+          $5A,$B6,$D9,$CA,$C9,$1C,$20,$BB
+         ),
+         (
+          $60,$44,$54,$0D,$56,$08,$53,$EB,
+          $1C,$57,$DF,$00,$77,$DD,$38,$10,
+          $94,$78,$1C,$DB,$90,$73,$E5,$B1,
+          $B3,$D3,$F6,$C7,$82,$9E,$12,$06,
+          $6B,$BA,$CA,$96,$D9,$89,$A6,$90,
+          $DE,$72,$CA,$31,$33,$A8,$36,$52,
+          $BA,$28,$4A,$6D,$62,$94,$2B,$27,
+          $1F,$FA,$26,$20,$C9,$E7,$5B,$1F
+         ),
+         (
+          $7A,$8C,$FE,$9B,$90,$F7,$5F,$7E,
+          $CB,$3A,$CC,$05,$3A,$AE,$D6,$19,
+          $31,$12,$B6,$F6,$A4,$AE,$EB,$3F,
+          $65,$D3,$DE,$54,$19,$42,$DE,$B9,
+          $E2,$22,$81,$52,$A3,$C4,$BB,$BE,
+          $72,$FC,$3B,$12,$62,$95,$28,$CF,
+          $BB,$09,$FE,$63,$0F,$04,$74,$33,
+          $9F,$54,$AB,$F4,$53,$E2,$ED,$52
+         ),
+         (
+          $38,$0B,$EA,$F6,$EA,$7C,$C9,$36,
+          $5E,$27,$0E,$F0,$E6,$F3,$A6,$4F,
+          $B9,$02,$AC,$AE,$51,$DD,$55,$12,
+          $F8,$42,$59,$AD,$2C,$91,$F4,$BC,
+          $41,$08,$DB,$73,$19,$2A,$5B,$BF,
+          $B0,$CB,$CF,$71,$E4,$6C,$3E,$21,
+          $AE,$E1,$C5,$E8,$60,$DC,$96,$E8,
+          $EB,$0B,$7B,$84,$26,$E6,$AB,$E9
+         ),
+         (
+          $60,$FE,$3C,$45,$35,$E1,$B5,$9D,
+          $9A,$61,$EA,$85,$00,$BF,$AC,$41,
+          $A6,$9D,$FF,$B1,$CE,$AD,$D9,$AC,
+          $A3,$23,$E9,$A6,$25,$B6,$4D,$A5,
+          $76,$3B,$AD,$72,$26,$DA,$02,$B9,
+          $C8,$C4,$F1,$A5,$DE,$14,$0A,$C5,
+          $A6,$C1,$12,$4E,$4F,$71,$8C,$E0,
+          $B2,$8E,$A4,$73,$93,$AA,$66,$37
+         ),
+         (
+          $4F,$E1,$81,$F5,$4A,$D6,$3A,$29,
+          $83,$FE,$AA,$F7,$7D,$1E,$72,$35,
+          $C2,$BE,$B1,$7F,$A3,$28,$B6,$D9,
+          $50,$5B,$DA,$32,$7D,$F1,$9F,$C3,
+          $7F,$02,$C4,$B6,$F0,$36,$8C,$E2,
+          $31,$47,$31,$3A,$8E,$57,$38,$B5,
+          $FA,$2A,$95,$B2,$9D,$E1,$C7,$F8,
+          $26,$4E,$B7,$7B,$69,$F5,$85,$CD
+         ),
+         (
+          $F2,$28,$77,$3C,$E3,$F3,$A4,$2B,
+          $5F,$14,$4D,$63,$23,$7A,$72,$D9,
+          $96,$93,$AD,$B8,$83,$7D,$0E,$11,
+          $2A,$8A,$0F,$8F,$FF,$F2,$C3,$62,
+          $85,$7A,$C4,$9C,$11,$EC,$74,$0D,
+          $15,$00,$74,$9D,$AC,$9B,$1F,$45,
+          $48,$10,$8B,$F3,$15,$57,$94,$DC,
+          $C9,$E4,$08,$28,$49,$E2,$B8,$5B
+         ),
+         (
+          $96,$24,$52,$A8,$45,$5C,$C5,$6C,
+          $85,$11,$31,$7E,$3B,$1F,$3B,$2C,
+          $37,$DF,$75,$F5,$88,$E9,$43,$25,
+          $FD,$D7,$70,$70,$35,$9C,$F6,$3A,
+          $9A,$E6,$E9,$30,$93,$6F,$DF,$8E,
+          $1E,$08,$FF,$CA,$44,$0C,$FB,$72,
+          $C2,$8F,$06,$D8,$9A,$21,$51,$D1,
+          $C4,$6C,$D5,$B2,$68,$EF,$85,$63
+         ),
+         (
+          $43,$D4,$4B,$FA,$18,$76,$8C,$59,
+          $89,$6B,$F7,$ED,$17,$65,$CB,$2D,
+          $14,$AF,$8C,$26,$02,$66,$03,$90,
+          $99,$B2,$5A,$60,$3E,$4D,$DC,$50,
+          $39,$D6,$EF,$3A,$91,$84,$7D,$10,
+          $88,$D4,$01,$C0,$C7,$E8,$47,$78,
+          $1A,$8A,$59,$0D,$33,$A3,$C6,$CB,
+          $4D,$F0,$FA,$B1,$C2,$F2,$23,$55
+         ),
+         (
+          $DC,$FF,$A9,$D5,$8C,$2A,$4C,$A2,
+          $CD,$BB,$0C,$7A,$A4,$C4,$C1,$D4,
+          $51,$65,$19,$00,$89,$F4,$E9,$83,
+          $BB,$1C,$2C,$AB,$4A,$AE,$FF,$1F,
+          $A2,$B5,$EE,$51,$6F,$EC,$D7,$80,
+          $54,$02,$40,$BF,$37,$E5,$6C,$8B,
+          $CC,$A7,$FA,$B9,$80,$E1,$E6,$1C,
+          $94,$00,$D8,$A9,$A5,$B1,$4A,$C6
+         ),
+         (
+          $6F,$BF,$31,$B4,$5A,$B0,$C0,$B8,
+          $DA,$D1,$C0,$F5,$F4,$06,$13,$79,
+          $91,$2D,$DE,$5A,$A9,$22,$09,$9A,
+          $03,$0B,$72,$5C,$73,$34,$6C,$52,
+          $42,$91,$AD,$EF,$89,$D2,$F6,$FD,
+          $8D,$FC,$DA,$6D,$07,$DA,$D8,$11,
+          $A9,$31,$45,$36,$C2,$91,$5E,$D4,
+          $5D,$A3,$49,$47,$E8,$3D,$E3,$4E
+         ),
+         (
+          $A0,$C6,$5B,$DD,$DE,$8A,$DE,$F5,
+          $72,$82,$B0,$4B,$11,$E7,$BC,$8A,
+          $AB,$10,$5B,$99,$23,$1B,$75,$0C,
+          $02,$1F,$4A,$73,$5C,$B1,$BC,$FA,
+          $B8,$75,$53,$BB,$A3,$AB,$B0,$C3,
+          $E6,$4A,$0B,$69,$55,$28,$51,$85,
+          $A0,$BD,$35,$FB,$8C,$FD,$E5,$57,
+          $32,$9B,$EB,$B1,$F6,$29,$EE,$93
+         ),
+         (
+          $F9,$9D,$81,$55,$50,$55,$8E,$81,
+          $EC,$A2,$F9,$67,$18,$AE,$D1,$0D,
+          $86,$F3,$F1,$CF,$B6,$75,$CC,$E0,
+          $6B,$0E,$FF,$02,$F6,$17,$C5,$A4,
+          $2C,$5A,$A7,$60,$27,$0F,$26,$79,
+          $DA,$26,$77,$C5,$AE,$B9,$4F,$11,
+          $42,$27,$7F,$21,$C7,$F7,$9F,$3C,
+          $4F,$0C,$CE,$4E,$D8,$EE,$62,$B1
+         ),
+         (
+          $95,$39,$1D,$A8,$FC,$7B,$91,$7A,
+          $20,$44,$B3,$D6,$F5,$37,$4E,$1C,
+          $A0,$72,$B4,$14,$54,$D5,$72,$C7,
+          $35,$6C,$05,$FD,$4B,$C1,$E0,$F4,
+          $0B,$8B,$B8,$B4,$A9,$F6,$BC,$E9,
+          $BE,$2C,$46,$23,$C3,$99,$B0,$DC,
+          $A0,$DA,$B0,$5C,$B7,$28,$1B,$71,
+          $A2,$1B,$0E,$BC,$D9,$E5,$56,$70
+         ),
+         (
+          $04,$B9,$CD,$3D,$20,$D2,$21,$C0,
+          $9A,$C8,$69,$13,$D3,$DC,$63,$04,
+          $19,$89,$A9,$A1,$E6,$94,$F1,$E6,
+          $39,$A3,$BA,$7E,$45,$18,$40,$F7,
+          $50,$C2,$FC,$19,$1D,$56,$AD,$61,
+          $F2,$E7,$93,$6B,$C0,$AC,$8E,$09,
+          $4B,$60,$CA,$EE,$D8,$78,$C1,$87,
+          $99,$04,$54,$02,$D6,$1C,$EA,$F9
+         ),
+         (
+          $EC,$0E,$0E,$F7,$07,$E4,$ED,$6C,
+          $0C,$66,$F9,$E0,$89,$E4,$95,$4B,
+          $05,$80,$30,$D2,$DD,$86,$39,$8F,
+          $E8,$40,$59,$63,$1F,$9E,$E5,$91,
+          $D9,$D7,$73,$75,$35,$51,$49,$17,
+          $8C,$0C,$F8,$F8,$E7,$C4,$9E,$D2,
+          $A5,$E4,$F9,$54,$88,$A2,$24,$70,
+          $67,$C2,$08,$51,$0F,$AD,$C4,$4C
+         ),
+         (
+          $9A,$37,$CC,$E2,$73,$B7,$9C,$09,
+          $91,$36,$77,$51,$0E,$AF,$76,$88,
+          $E8,$9B,$33,$14,$D3,$53,$2F,$D2,
+          $76,$4C,$39,$DE,$02,$2A,$29,$45,
+          $B5,$71,$0D,$13,$51,$7A,$F8,$DD,
+          $C0,$31,$66,$24,$E7,$3B,$EC,$1C,
+          $E6,$7D,$F1,$52,$28,$30,$20,$36,
+          $F3,$30,$AB,$0C,$B4,$D2,$18,$DD
+         ),
+         (
+          $4C,$F9,$BB,$8F,$B3,$D4,$DE,$8B,
+          $38,$B2,$F2,$62,$D3,$C4,$0F,$46,
+          $DF,$E7,$47,$E8,$FC,$0A,$41,$4C,
+          $19,$3D,$9F,$CF,$75,$31,$06,$CE,
+          $47,$A1,$8F,$17,$2F,$12,$E8,$A2,
+          $F1,$C2,$67,$26,$54,$53,$58,$E5,
+          $EE,$28,$C9,$E2,$21,$3A,$87,$87,
+          $AA,$FB,$C5,$16,$D2,$34,$31,$52
+         ),
+         (
+          $64,$E0,$C6,$3A,$F9,$C8,$08,$FD,
+          $89,$31,$37,$12,$98,$67,$FD,$91,
+          $93,$9D,$53,$F2,$AF,$04,$BE,$4F,
+          $A2,$68,$00,$61,$00,$06,$9B,$2D,
+          $69,$DA,$A5,$C5,$D8,$ED,$7F,$DD,
+          $CB,$2A,$70,$EE,$EC,$DF,$2B,$10,
+          $5D,$D4,$6A,$1E,$3B,$73,$11,$72,
+          $8F,$63,$9A,$B4,$89,$32,$6B,$C9
+         ),
+         (
+          $5E,$9C,$93,$15,$8D,$65,$9B,$2D,
+          $EF,$06,$B0,$C3,$C7,$56,$50,$45,
+          $54,$26,$62,$D6,$EE,$E8,$A9,$6A,
+          $89,$B7,$8A,$DE,$09,$FE,$8B,$3D,
+          $CC,$09,$6D,$4F,$E4,$88,$15,$D8,
+          $8D,$8F,$82,$62,$01,$56,$60,$2A,
+          $F5,$41,$95,$5E,$1F,$6C,$A3,$0D,
+          $CE,$14,$E2,$54,$C3,$26,$B8,$8F
+         ),
+         (
+          $77,$75,$DF,$F8,$89,$45,$8D,$D1,
+          $1A,$EF,$41,$72,$76,$85,$3E,$21,
+          $33,$5E,$B8,$8E,$4D,$EC,$9C,$FB,
+          $4E,$9E,$DB,$49,$82,$00,$88,$55,
+          $1A,$2C,$A6,$03,$39,$F1,$20,$66,
+          $10,$11,$69,$F0,$DF,$E8,$4B,$09,
+          $8F,$DD,$B1,$48,$D9,$DA,$6B,$3D,
+          $61,$3D,$F2,$63,$88,$9A,$D6,$4B
+         ),
+         (
+          $F0,$D2,$80,$5A,$FB,$B9,$1F,$74,
+          $39,$51,$35,$1A,$6D,$02,$4F,$93,
+          $53,$A2,$3C,$7C,$E1,$FC,$2B,$05,
+          $1B,$3A,$8B,$96,$8C,$23,$3F,$46,
+          $F5,$0F,$80,$6E,$CB,$15,$68,$FF,
+          $AA,$0B,$60,$66,$1E,$33,$4B,$21,
+          $DD,$E0,$4F,$8F,$A1,$55,$AC,$74,
+          $0E,$EB,$42,$E2,$0B,$60,$D7,$64
+         ),
+         (
+          $86,$A2,$AF,$31,$6E,$7D,$77,$54,
+          $20,$1B,$94,$2E,$27,$53,$64,$AC,
+          $12,$EA,$89,$62,$AB,$5B,$D8,$D7,
+          $FB,$27,$6D,$C5,$FB,$FF,$C8,$F9,
+          $A2,$8C,$AE,$4E,$48,$67,$DF,$67,
+          $80,$D9,$B7,$25,$24,$16,$09,$27,
+          $C8,$55,$DA,$5B,$60,$78,$E0,$B5,
+          $54,$AA,$91,$E3,$1C,$B9,$CA,$1D
+         ),
+         (
+          $10,$BD,$F0,$CA,$A0,$80,$27,$05,
+          $E7,$06,$36,$9B,$AF,$8A,$3F,$79,
+          $D7,$2C,$0A,$03,$A8,$06,$75,$A7,
+          $BB,$B0,$0B,$E3,$A4,$5E,$51,$64,
+          $24,$D1,$EE,$88,$EF,$B5,$6F,$6D,
+          $57,$77,$54,$5A,$E6,$E2,$77,$65,
+          $C3,$A8,$F5,$E4,$93,$FC,$30,$89,
+          $15,$63,$89,$33,$A1,$DF,$EE,$55
+         ),
+         (
+          $B0,$17,$81,$09,$2B,$17,$48,$45,
+          $9E,$2E,$4E,$C1,$78,$69,$66,$27,
+          $BF,$4E,$BA,$FE,$BB,$A7,$74,$EC,
+          $F0,$18,$B7,$9A,$68,$AE,$B8,$49,
+          $17,$BF,$0B,$84,$BB,$79,$D1,$7B,
+          $74,$31,$51,$14,$4C,$D6,$6B,$7B,
+          $33,$A4,$B9,$E5,$2C,$76,$C4,$E1,
+          $12,$05,$0F,$F5,$38,$5B,$7F,$0B
+         ),
+         (
+          $C6,$DB,$C6,$1D,$EC,$6E,$AE,$AC,
+          $81,$E3,$D5,$F7,$55,$20,$3C,$8E,
+          $22,$05,$51,$53,$4A,$0B,$2F,$D1,
+          $05,$A9,$18,$89,$94,$5A,$63,$85,
+          $50,$20,$4F,$44,$09,$3D,$D9,$98,
+          $C0,$76,$20,$5D,$FF,$AD,$70,$3A,
+          $0E,$5C,$D3,$C7,$F4,$38,$A7,$E6,
+          $34,$CD,$59,$FE,$DE,$DB,$53,$9E
+         ),
+         (
+          $EB,$A5,$1A,$CF,$FB,$4C,$EA,$31,
+          $DB,$4B,$8D,$87,$E9,$BF,$7D,$D4,
+          $8F,$E9,$7B,$02,$53,$AE,$67,$AA,
+          $58,$0F,$9A,$C4,$A9,$D9,$41,$F2,
+          $BE,$A5,$18,$EE,$28,$68,$18,$CC,
+          $9F,$63,$3F,$2A,$3B,$9F,$B6,$8E,
+          $59,$4B,$48,$CD,$D6,$D5,$15,$BF,
+          $1D,$52,$BA,$6C,$85,$A2,$03,$A7
+         ),
+         (
+          $86,$22,$1F,$3A,$DA,$52,$03,$7B,
+          $72,$22,$4F,$10,$5D,$79,$99,$23,
+          $1C,$5E,$55,$34,$D0,$3D,$A9,$D9,
+          $C0,$A1,$2A,$CB,$68,$46,$0C,$D3,
+          $75,$DA,$F8,$E2,$43,$86,$28,$6F,
+          $96,$68,$F7,$23,$26,$DB,$F9,$9B,
+          $A0,$94,$39,$24,$37,$D3,$98,$E9,
+          $5B,$B8,$16,$1D,$71,$7F,$89,$91
+         ),
+         (
+          $55,$95,$E0,$5C,$13,$A7,$EC,$4D,
+          $C8,$F4,$1F,$B7,$0C,$B5,$0A,$71,
+          $BC,$E1,$7C,$02,$4F,$F6,$DE,$7A,
+          $F6,$18,$D0,$CC,$4E,$9C,$32,$D9,
+          $57,$0D,$6D,$3E,$A4,$5B,$86,$52,
+          $54,$91,$03,$0C,$0D,$8F,$2B,$18,
+          $36,$D5,$77,$8C,$1C,$E7,$35,$C1,
+          $77,$07,$DF,$36,$4D,$05,$43,$47
+         ),
+         (
+          $CE,$0F,$4F,$6A,$CA,$89,$59,$0A,
+          $37,$FE,$03,$4D,$D7,$4D,$D5,$FA,
+          $65,$EB,$1C,$BD,$0A,$41,$50,$8A,
+          $AD,$DC,$09,$35,$1A,$3C,$EA,$6D,
+          $18,$CB,$21,$89,$C5,$4B,$70,$0C,
+          $00,$9F,$4C,$BF,$05,$21,$C7,$EA,
+          $01,$BE,$61,$C5,$AE,$09,$CB,$54,
+          $F2,$7B,$C1,$B4,$4D,$65,$8C,$82
+         ),
+         (
+          $7E,$E8,$0B,$06,$A2,$15,$A3,$BC,
+          $A9,$70,$C7,$7C,$DA,$87,$61,$82,
+          $2B,$C1,$03,$D4,$4F,$A4,$B3,$3F,
+          $4D,$07,$DC,$B9,$97,$E3,$6D,$55,
+          $29,$8B,$CE,$AE,$12,$24,$1B,$3F,
+          $A0,$7F,$A6,$3B,$E5,$57,$60,$68,
+          $DA,$38,$7B,$8D,$58,$59,$AE,$AB,
+          $70,$13,$69,$84,$8B,$17,$6D,$42
+         ),
+         (
+          $94,$0A,$84,$B6,$A8,$4D,$10,$9A,
+          $AB,$20,$8C,$02,$4C,$6C,$E9,$64,
+          $76,$76,$BA,$0A,$AA,$11,$F8,$6D,
+          $BB,$70,$18,$F9,$FD,$22,$20,$A6,
+          $D9,$01,$A9,$02,$7F,$9A,$BC,$F9,
+          $35,$37,$27,$27,$CB,$F0,$9E,$BD,
+          $61,$A2,$A2,$EE,$B8,$76,$53,$E8,
+          $EC,$AD,$1B,$AB,$85,$DC,$83,$27
+         ),
+         (
+          $20,$20,$B7,$82,$64,$A8,$2D,$9F,
+          $41,$51,$14,$1A,$DB,$A8,$D4,$4B,
+          $F2,$0C,$5E,$C0,$62,$EE,$E9,$B5,
+          $95,$A1,$1F,$9E,$84,$90,$1B,$F1,
+          $48,$F2,$98,$E0,$C9,$F8,$77,$7D,
+          $CD,$BC,$7C,$C4,$67,$0A,$AC,$35,
+          $6C,$C2,$AD,$8C,$CB,$16,$29,$F1,
+          $6F,$6A,$76,$BC,$EF,$BE,$E7,$60
+         ),
+         (
+          $D1,$B8,$97,$B0,$E0,$75,$BA,$68,
+          $AB,$57,$2A,$DF,$9D,$9C,$43,$66,
+          $63,$E4,$3E,$B3,$D8,$E6,$2D,$92,
+          $FC,$49,$C9,$BE,$21,$4E,$6F,$27,
+          $87,$3F,$E2,$15,$A6,$51,$70,$E6,
+          $BE,$A9,$02,$40,$8A,$25,$B4,$95,
+          $06,$F4,$7B,$AB,$D0,$7C,$EC,$F7,
+          $11,$3E,$C1,$0C,$5D,$D3,$12,$52
+         ),
+         (
+          $B1,$4D,$0C,$62,$AB,$FA,$46,$9A,
+          $35,$71,$77,$E5,$94,$C1,$0C,$19,
+          $42,$43,$ED,$20,$25,$AB,$8A,$A5,
+          $AD,$2F,$A4,$1A,$D3,$18,$E0,$FF,
+          $48,$CD,$5E,$60,$BE,$C0,$7B,$13,
+          $63,$4A,$71,$1D,$23,$26,$E4,$88,
+          $A9,$85,$F3,$1E,$31,$15,$33,$99,
+          $E7,$30,$88,$EF,$C8,$6A,$5C,$55
+         ),
+         (
+          $41,$69,$C5,$CC,$80,$8D,$26,$97,
+          $DC,$2A,$82,$43,$0D,$C2,$3E,$3C,
+          $D3,$56,$DC,$70,$A9,$45,$66,$81,
+          $05,$02,$B8,$D6,$55,$B3,$9A,$BF,
+          $9E,$7F,$90,$2F,$E7,$17,$E0,$38,
+          $92,$19,$85,$9E,$19,$45,$DF,$1A,
+          $F6,$AD,$A4,$2E,$4C,$CD,$A5,$5A,
+          $19,$7B,$71,$00,$A3,$0C,$30,$A1
+         ),
+         (
+          $25,$8A,$4E,$DB,$11,$3D,$66,$C8,
+          $39,$C8,$B1,$C9,$1F,$15,$F3,$5A,
+          $DE,$60,$9F,$11,$CD,$7F,$86,$81,
+          $A4,$04,$5B,$9F,$EF,$7B,$0B,$24,
+          $C8,$2C,$DA,$06,$A5,$F2,$06,$7B,
+          $36,$88,$25,$E3,$91,$4E,$53,$D6,
+          $94,$8E,$DE,$92,$EF,$D6,$E8,$38,
+          $7F,$A2,$E5,$37,$23,$9B,$5B,$EE
+         ),
+         (
+          $79,$D2,$D8,$69,$6D,$30,$F3,$0F,
+          $B3,$46,$57,$76,$11,$71,$A1,$1E,
+          $6C,$3F,$1E,$64,$CB,$E7,$BE,$BE,
+          $E1,$59,$CB,$95,$BF,$AF,$81,$2B,
+          $4F,$41,$1E,$2F,$26,$D9,$C4,$21,
+          $DC,$2C,$28,$4A,$33,$42,$D8,$23,
+          $EC,$29,$38,$49,$E4,$2D,$1E,$46,
+          $B0,$A4,$AC,$1E,$3C,$86,$AB,$AA
+         ),
+         (
+          $8B,$94,$36,$01,$0D,$C5,$DE,$E9,
+          $92,$AE,$38,$AE,$A9,$7F,$2C,$D6,
+          $3B,$94,$6D,$94,$FE,$DD,$2E,$C9,
+          $67,$1D,$CD,$E3,$BD,$4C,$E9,$56,
+          $4D,$55,$5C,$66,$C1,$5B,$B2,$B9,
+          $00,$DF,$72,$ED,$B6,$B8,$91,$EB,
+          $CA,$DF,$EF,$F6,$3C,$9E,$A4,$03,
+          $6A,$99,$8B,$E7,$97,$39,$81,$E7
+         ),
+         (
+          $C8,$F6,$8E,$69,$6E,$D2,$82,$42,
+          $BF,$99,$7F,$5B,$3B,$34,$95,$95,
+          $08,$E4,$2D,$61,$38,$10,$F1,$E2,
+          $A4,$35,$C9,$6E,$D2,$FF,$56,$0C,
+          $70,$22,$F3,$61,$A9,$23,$4B,$98,
+          $37,$FE,$EE,$90,$BF,$47,$92,$2E,
+          $E0,$FD,$5F,$8D,$DF,$82,$37,$18,
+          $D8,$6D,$1E,$16,$C6,$09,$00,$71
+         ),
+         (
+          $B0,$2D,$3E,$EE,$48,$60,$D5,$86,
+          $8B,$2C,$39,$CE,$39,$BF,$E8,$10,
+          $11,$29,$05,$64,$DD,$67,$8C,$85,
+          $E8,$78,$3F,$29,$30,$2D,$FC,$13,
+          $99,$BA,$95,$B6,$B5,$3C,$D9,$EB,
+          $BF,$40,$0C,$CA,$1D,$B0,$AB,$67,
+          $E1,$9A,$32,$5F,$2D,$11,$58,$12,
+          $D2,$5D,$00,$97,$8A,$D1,$BC,$A4
+         ),
+         (
+          $76,$93,$EA,$73,$AF,$3A,$C4,$DA,
+          $D2,$1C,$A0,$D8,$DA,$85,$B3,$11,
+          $8A,$7D,$1C,$60,$24,$CF,$AF,$55,
+          $76,$99,$86,$82,$17,$BC,$0C,$2F,
+          $44,$A1,$99,$BC,$6C,$0E,$DD,$51,
+          $97,$98,$BA,$05,$BD,$5B,$1B,$44,
+          $84,$34,$6A,$47,$C2,$CA,$DF,$6B,
+          $F3,$0B,$78,$5C,$C8,$8B,$2B,$AF
+         ),
+         (
+          $A0,$E5,$C1,$C0,$03,$1C,$02,$E4,
+          $8B,$7F,$09,$A5,$E8,$96,$EE,$9A,
+          $EF,$2F,$17,$FC,$9E,$18,$E9,$97,
+          $D7,$F6,$CA,$C7,$AE,$31,$64,$22,
+          $C2,$B1,$E7,$79,$84,$E5,$F3,$A7,
+          $3C,$B4,$5D,$EE,$D5,$D3,$F8,$46,
+          $00,$10,$5E,$6E,$E3,$8F,$2D,$09,
+          $0C,$7D,$04,$42,$EA,$34,$C4,$6D
+         ),
+         (
+          $41,$DA,$A6,$AD,$CF,$DB,$69,$F1,
+          $44,$0C,$37,$B5,$96,$44,$01,$65,
+          $C1,$5A,$DA,$59,$68,$13,$E2,$E2,
+          $2F,$06,$0F,$CD,$55,$1F,$24,$DE,
+          $E8,$E0,$4B,$A6,$89,$03,$87,$88,
+          $6C,$EE,$C4,$A7,$A0,$D7,$FC,$6B,
+          $44,$50,$63,$92,$EC,$38,$22,$C0,
+          $D8,$C1,$AC,$FC,$7D,$5A,$EB,$E8
+         ),
+         (
+          $14,$D4,$D4,$0D,$59,$84,$D8,$4C,
+          $5C,$F7,$52,$3B,$77,$98,$B2,$54,
+          $E2,$75,$A3,$A8,$CC,$0A,$1B,$D0,
+          $6E,$BC,$0B,$EE,$72,$68,$56,$AC,
+          $C3,$CB,$F5,$16,$FF,$66,$7C,$DA,
+          $20,$58,$AD,$5C,$34,$12,$25,$44,
+          $60,$A8,$2C,$92,$18,$70,$41,$36,
+          $3C,$C7,$7A,$4D,$C2,$15,$E4,$87
+         ),
+         (
+          $D0,$E7,$A1,$E2,$B9,$A4,$47,$FE,
+          $E8,$3E,$22,$77,$E9,$FF,$80,$10,
+          $C2,$F3,$75,$AE,$12,$FA,$7A,$AA,
+          $8C,$A5,$A6,$31,$78,$68,$A2,$6A,
+          $36,$7A,$0B,$69,$FB,$C1,$CF,$32,
+          $A5,$5D,$34,$EB,$37,$06,$63,$01,
+          $6F,$3D,$21,$10,$23,$0E,$BA,$75,
+          $40,$28,$A5,$6F,$54,$AC,$F5,$7C
+         ),
+         (
+          $E7,$71,$AA,$8D,$B5,$A3,$E0,$43,
+          $E8,$17,$8F,$39,$A0,$85,$7B,$A0,
+          $4A,$3F,$18,$E4,$AA,$05,$74,$3C,
+          $F8,$D2,$22,$B0,$B0,$95,$82,$53,
+          $50,$BA,$42,$2F,$63,$38,$2A,$23,
+          $D9,$2E,$41,$49,$07,$4E,$81,$6A,
+          $36,$C1,$CD,$28,$28,$4D,$14,$62,
+          $67,$94,$0B,$31,$F8,$81,$8E,$A2
+         ),
+         (
+          $FE,$B4,$FD,$6F,$9E,$87,$A5,$6B,
+          $EF,$39,$8B,$32,$84,$D2,$BD,$A5,
+          $B5,$B0,$E1,$66,$58,$3A,$66,$B6,
+          $1E,$53,$84,$57,$FF,$05,$84,$87,
+          $2C,$21,$A3,$29,$62,$B9,$92,$8F,
+          $FA,$B5,$8D,$E4,$AF,$2E,$DD,$4E,
+          $15,$D8,$B3,$55,$70,$52,$32,$07,
+          $FF,$4E,$2A,$5A,$A7,$75,$4C,$AA
+         ),
+         (
+          $46,$2F,$17,$BF,$00,$5F,$B1,$C1,
+          $B9,$E6,$71,$77,$9F,$66,$52,$09,
+          $EC,$28,$73,$E3,$E4,$11,$F9,$8D,
+          $AB,$F2,$40,$A1,$D5,$EC,$3F,$95,
+          $CE,$67,$96,$B6,$FC,$23,$FE,$17,
+          $19,$03,$B5,$02,$02,$34,$67,$DE,
+          $C7,$27,$3F,$F7,$48,$79,$B9,$29,
+          $67,$A2,$A4,$3A,$5A,$18,$3D,$33
+         ),
+         (
+          $D3,$33,$81,$93,$B6,$45,$53,$DB,
+          $D3,$8D,$14,$4B,$EA,$71,$C5,$91,
+          $5B,$B1,$10,$E2,$D8,$81,$80,$DB,
+          $C5,$DB,$36,$4F,$D6,$17,$1D,$F3,
+          $17,$FC,$72,$68,$83,$1B,$5A,$EF,
+          $75,$E4,$34,$2B,$2F,$AD,$87,$97,
+          $BA,$39,$ED,$DC,$EF,$80,$E6,$EC,
+          $08,$15,$93,$50,$B1,$AD,$69,$6D
+         ),
+         (
+          $E1,$59,$0D,$58,$5A,$3D,$39,$F7,
+          $CB,$59,$9A,$BD,$47,$90,$70,$96,
+          $64,$09,$A6,$84,$6D,$43,$77,$AC,
+          $F4,$47,$1D,$06,$5D,$5D,$B9,$41,
+          $29,$CC,$9B,$E9,$25,$73,$B0,$5E,
+          $D2,$26,$BE,$1E,$9B,$7C,$B0,$CA,
+          $BE,$87,$91,$85,$89,$F8,$0D,$AD,
+          $D4,$EF,$5E,$F2,$5A,$93,$D2,$8E
+         ),
+         (
+          $F8,$F3,$72,$6A,$C5,$A2,$6C,$C8,
+          $01,$32,$49,$3A,$6F,$ED,$CB,$0E,
+          $60,$76,$0C,$09,$CF,$C8,$4C,$AD,
+          $17,$81,$75,$98,$68,$19,$66,$5E,
+          $76,$84,$2D,$7B,$9F,$ED,$F7,$6D,
+          $DD,$EB,$F5,$D3,$F5,$6F,$AA,$AD,
+          $44,$77,$58,$7A,$F2,$16,$06,$D3,
+          $96,$AE,$57,$0D,$8E,$71,$9A,$F2
+         ),
+         (
+          $30,$18,$60,$55,$C0,$79,$49,$94,
+          $81,$83,$C8,$50,$E9,$A7,$56,$CC,
+          $09,$93,$7E,$24,$7D,$9D,$92,$8E,
+          $86,$9E,$20,$BA,$FC,$3C,$D9,$72,
+          $17,$19,$D3,$4E,$04,$A0,$89,$9B,
+          $92,$C7,$36,$08,$45,$50,$18,$68,
+          $86,$EF,$BA,$2E,$79,$0D,$8B,$E6,
+          $EB,$F0,$40,$B2,$09,$C4,$39,$A4
+         ),
+         (
+          $F3,$C4,$27,$6C,$B8,$63,$63,$77,
+          $12,$C2,$41,$C4,$44,$C5,$CC,$1E,
+          $35,$54,$E0,$FD,$DB,$17,$4D,$03,
+          $58,$19,$DD,$83,$EB,$70,$0B,$4C,
+          $E8,$8D,$F3,$AB,$38,$41,$BA,$02,
+          $08,$5E,$1A,$99,$B4,$E1,$73,$10,
+          $C5,$34,$10,$75,$C0,$45,$8B,$A3,
+          $76,$C9,$5A,$68,$18,$FB,$B3,$E2
+         ),
+         (
+          $0A,$A0,$07,$C4,$DD,$9D,$58,$32,
+          $39,$30,$40,$A1,$58,$3C,$93,$0B,
+          $CA,$7D,$C5,$E7,$7E,$A5,$3A,$DD,
+          $7E,$2B,$3F,$7C,$8E,$23,$13,$68,
+          $04,$35,$20,$D4,$A3,$EF,$53,$C9,
+          $69,$B6,$BB,$FD,$02,$59,$46,$F6,
+          $32,$BD,$7F,$76,$5D,$53,$C2,$10,
+          $03,$B8,$F9,$83,$F7,$5E,$2A,$6A
+         ),
+         (
+          $08,$E9,$46,$47,$20,$53,$3B,$23,
+          $A0,$4E,$C2,$4F,$7A,$E8,$C1,$03,
+          $14,$5F,$76,$53,$87,$D7,$38,$77,
+          $7D,$3D,$34,$34,$77,$FD,$1C,$58,
+          $DB,$05,$21,$42,$CA,$B7,$54,$EA,
+          $67,$43,$78,$E1,$87,$66,$C5,$35,
+          $42,$F7,$19,$70,$17,$1C,$C4,$F8,
+          $16,$94,$24,$6B,$71,$7D,$75,$64
+         ),
+         (
+          $D3,$7F,$F7,$AD,$29,$79,$93,$E7,
+          $EC,$21,$E0,$F1,$B4,$B5,$AE,$71,
+          $9C,$DC,$83,$C5,$DB,$68,$75,$27,
+          $F2,$75,$16,$CB,$FF,$A8,$22,$88,
+          $8A,$68,$10,$EE,$5C,$1C,$A7,$BF,
+          $E3,$32,$11,$19,$BE,$1A,$B7,$BF,
+          $A0,$A5,$02,$67,$1C,$83,$29,$49,
+          $4D,$F7,$AD,$6F,$52,$2D,$44,$0F
+         ),
+         (
+          $DD,$90,$42,$F6,$E4,$64,$DC,$F8,
+          $6B,$12,$62,$F6,$AC,$CF,$AF,$BD,
+          $8C,$FD,$90,$2E,$D3,$ED,$89,$AB,
+          $F7,$8F,$FA,$48,$2D,$BD,$EE,$B6,
+          $96,$98,$42,$39,$4C,$9A,$11,$68,
+          $AE,$3D,$48,$1A,$01,$78,$42,$F6,
+          $60,$00,$2D,$42,$44,$7C,$6B,$22,
+          $F7,$B7,$2F,$21,$AA,$E0,$21,$C9
+         ),
+         (
+          $BD,$96,$5B,$F3,$1E,$87,$D7,$03,
+          $27,$53,$6F,$2A,$34,$1C,$EB,$C4,
+          $76,$8E,$CA,$27,$5F,$A0,$5E,$F9,
+          $8F,$7F,$1B,$71,$A0,$35,$12,$98,
+          $DE,$00,$6F,$BA,$73,$FE,$67,$33,
+          $ED,$01,$D7,$58,$01,$B4,$A9,$28,
+          $E5,$42,$31,$B3,$8E,$38,$C5,$62,
+          $B2,$E3,$3E,$A1,$28,$49,$92,$FA
+         ),
+         (
+          $65,$67,$6D,$80,$06,$17,$97,$2F,
+          $BD,$87,$E4,$B9,$51,$4E,$1C,$67,
+          $40,$2B,$7A,$33,$10,$96,$D3,$BF,
+          $AC,$22,$F1,$AB,$B9,$53,$74,$AB,
+          $C9,$42,$F1,$6E,$9A,$B0,$EA,$D3,
+          $3B,$87,$C9,$19,$68,$A6,$E5,$09,
+          $E1,$19,$FF,$07,$78,$7B,$3E,$F4,
+          $83,$E1,$DC,$DC,$CF,$6E,$30,$22
+         ),
+         (
+          $93,$9F,$A1,$89,$69,$9C,$5D,$2C,
+          $81,$DD,$D1,$FF,$C1,$FA,$20,$7C,
+          $97,$0B,$6A,$36,$85,$BB,$29,$CE,
+          $1D,$3E,$99,$D4,$2F,$2F,$74,$42,
+          $DA,$53,$E9,$5A,$72,$90,$73,$14,
+          $F4,$58,$83,$99,$A3,$FF,$5B,$0A,
+          $92,$BE,$B3,$F6,$BE,$26,$94,$F9,
+          $F8,$6E,$CF,$29,$52,$D5,$B4,$1C
+         ),
+         (
+          $C5,$16,$54,$17,$01,$86,$3F,$91,
+          $00,$5F,$31,$41,$08,$CE,$EC,$E3,
+          $C6,$43,$E0,$4F,$C8,$C4,$2F,$D2,
+          $FF,$55,$62,$20,$E6,$16,$AA,$A6,
+          $A4,$8A,$EB,$97,$A8,$4B,$AD,$74,
+          $78,$2E,$8D,$FF,$96,$A1,$A2,$FA,
+          $94,$93,$39,$D7,$22,$ED,$CA,$A3,
+          $2B,$57,$06,$70,$41,$DF,$88,$CC
+         ),
+         (
+          $98,$7F,$D6,$E0,$D6,$85,$7C,$55,
+          $3E,$AE,$BB,$3D,$34,$97,$0A,$2C,
+          $2F,$6E,$89,$A3,$54,$8F,$49,$25,
+          $21,$72,$2B,$80,$A1,$C2,$1A,$15,
+          $38,$92,$34,$6D,$2C,$BA,$64,$44,
+          $21,$2D,$56,$DA,$9A,$26,$E3,$24,
+          $DC,$CB,$C0,$DC,$DE,$85,$D4,$D2,
+          $EE,$43,$99,$EE,$C5,$A6,$4E,$8F
+         ),
+         (
+          $AE,$56,$DE,$B1,$C2,$32,$8D,$9C,
+          $40,$17,$70,$6B,$CE,$6E,$99,$D4,
+          $13,$49,$05,$3B,$A9,$D3,$36,$D6,
+          $77,$C4,$C2,$7D,$9F,$D5,$0A,$E6,
+          $AE,$E1,$7E,$85,$31,$54,$E1,$F4,
+          $FE,$76,$72,$34,$6D,$A2,$EA,$A3,
+          $1E,$EA,$53,$FC,$F2,$4A,$22,$80,
+          $4F,$11,$D0,$3D,$A6,$AB,$FC,$2B
+         ),
+         (
+          $49,$D6,$A6,$08,$C9,$BD,$E4,$49,
+          $18,$70,$49,$85,$72,$AC,$31,$AA,
+          $C3,$FA,$40,$93,$8B,$38,$A7,$81,
+          $8F,$72,$38,$3E,$B0,$40,$AD,$39,
+          $53,$2B,$C0,$65,$71,$E1,$3D,$76,
+          $7E,$69,$45,$AB,$77,$C0,$BD,$C3,
+          $B0,$28,$42,$53,$34,$3F,$9F,$6C,
+          $12,$44,$EB,$F2,$FF,$0D,$F8,$66
+         ),
+         (
+          $DA,$58,$2A,$D8,$C5,$37,$0B,$44,
+          $69,$AF,$86,$2A,$A6,$46,$7A,$22,
+          $93,$B2,$B2,$8B,$D8,$0A,$E0,$E9,
+          $1F,$42,$5A,$D3,$D4,$72,$49,$FD,
+          $F9,$88,$25,$CC,$86,$F1,$40,$28,
+          $C3,$30,$8C,$98,$04,$C7,$8B,$FE,
+          $EE,$EE,$46,$14,$44,$CE,$24,$36,
+          $87,$E1,$A5,$05,$22,$45,$6A,$1D
+         ),
+         (
+          $D5,$26,$6A,$A3,$33,$11,$94,$AE,
+          $F8,$52,$EE,$D8,$6D,$7B,$5B,$26,
+          $33,$A0,$AF,$1C,$73,$59,$06,$F2,
+          $E1,$32,$79,$F1,$49,$31,$A9,$FC,
+          $3B,$0E,$AC,$5C,$E9,$24,$52,$73,
+          $BD,$1A,$A9,$29,$05,$AB,$E1,$62,
+          $78,$EF,$7E,$FD,$47,$69,$47,$89,
+          $A7,$28,$3B,$77,$DA,$3C,$70,$F8
+         ),
+         (
+          $29,$62,$73,$4C,$28,$25,$21,$86,
+          $A9,$A1,$11,$1C,$73,$2A,$D4,$DE,
+          $45,$06,$D4,$B4,$48,$09,$16,$30,
+          $3E,$B7,$99,$1D,$65,$9C,$CD,$A0,
+          $7A,$99,$11,$91,$4B,$C7,$5C,$41,
+          $8A,$B7,$A4,$54,$17,$57,$AD,$05,
+          $47,$96,$E2,$67,$97,$FE,$AF,$36,
+          $E9,$F6,$AD,$43,$F1,$4B,$35,$A4
+         ),
+         (
+          $E8,$B7,$9E,$C5,$D0,$6E,$11,$1B,
+          $DF,$AF,$D7,$1E,$9F,$57,$60,$F0,
+          $0A,$C8,$AC,$5D,$8B,$F7,$68,$F9,
+          $FF,$6F,$08,$B8,$F0,$26,$09,$6B,
+          $1C,$C3,$A4,$C9,$73,$33,$30,$19,
+          $F1,$E3,$55,$3E,$77,$DA,$3F,$98,
+          $CB,$9F,$54,$2E,$0A,$90,$E5,$F8,
+          $A9,$40,$CC,$58,$E5,$98,$44,$B3
+         ),
+         (
+          $DF,$B3,$20,$C4,$4F,$9D,$41,$D1,
+          $EF,$DC,$C0,$15,$F0,$8D,$D5,$53,
+          $9E,$52,$6E,$39,$C8,$7D,$50,$9A,
+          $E6,$81,$2A,$96,$9E,$54,$31,$BF,
+          $4F,$A7,$D9,$1F,$FD,$03,$B9,$81,
+          $E0,$D5,$44,$CF,$72,$D7,$B1,$C0,
+          $37,$4F,$88,$01,$48,$2E,$6D,$EA,
+          $2E,$F9,$03,$87,$7E,$BA,$67,$5E
+         ),
+         (
+          $D8,$86,$75,$11,$8F,$DB,$55,$A5,
+          $FB,$36,$5A,$C2,$AF,$1D,$21,$7B,
+          $F5,$26,$CE,$1E,$E9,$C9,$4B,$2F,
+          $00,$90,$B2,$C5,$8A,$06,$CA,$58,
+          $18,$7D,$7F,$E5,$7C,$7B,$ED,$9D,
+          $26,$FC,$A0,$67,$B4,$11,$0E,$EF,
+          $CD,$9A,$0A,$34,$5D,$E8,$72,$AB,
+          $E2,$0D,$E3,$68,$00,$1B,$07,$45
+         ),
+         (
+          $B8,$93,$F2,$FC,$41,$F7,$B0,$DD,
+          $6E,$2F,$6A,$A2,$E0,$37,$0C,$0C,
+          $FF,$7D,$F0,$9E,$3A,$CF,$CC,$0E,
+          $92,$0B,$6E,$6F,$AD,$0E,$F7,$47,
+          $C4,$06,$68,$41,$7D,$34,$2B,$80,
+          $D2,$35,$1E,$8C,$17,$5F,$20,$89,
+          $7A,$06,$2E,$97,$65,$E6,$C6,$7B,
+          $53,$9B,$6B,$A8,$B9,$17,$05,$45
+         ),
+         (
+          $6C,$67,$EC,$56,$97,$AC,$CD,$23,
+          $5C,$59,$B4,$86,$D7,$B7,$0B,$AE,
+          $ED,$CB,$D4,$AA,$64,$EB,$D4,$EE,
+          $F3,$C7,$EA,$C1,$89,$56,$1A,$72,
+          $62,$50,$AE,$C4,$D4,$8C,$AD,$CA,
+          $FB,$BE,$2C,$E3,$C1,$6C,$E2,$D6,
+          $91,$A8,$CC,$E0,$6E,$88,$79,$55,
+          $6D,$44,$83,$ED,$71,$65,$C0,$63
+         ),
+         (
+          $F1,$AA,$2B,$04,$4F,$8F,$0C,$63,
+          $8A,$3F,$36,$2E,$67,$7B,$5D,$89,
+          $1D,$6F,$D2,$AB,$07,$65,$F6,$EE,
+          $1E,$49,$87,$DE,$05,$7E,$AD,$35,
+          $78,$83,$D9,$B4,$05,$B9,$D6,$09,
+          $EE,$A1,$B8,$69,$D9,$7F,$B1,$6D,
+          $9B,$51,$01,$7C,$55,$3F,$3B,$93,
+          $C0,$A1,$E0,$F1,$29,$6F,$ED,$CD
+         ),
+         (
+          $CB,$AA,$25,$95,$72,$D4,$AE,$BF,
+          $C1,$91,$7A,$CD,$DC,$58,$2B,$9F,
+          $8D,$FA,$A9,$28,$A1,$98,$CA,$7A,
+          $CD,$0F,$2A,$A7,$6A,$13,$4A,$90,
+          $25,$2E,$62,$98,$A6,$5B,$08,$18,
+          $6A,$35,$0D,$5B,$76,$26,$69,$9F,
+          $8C,$B7,$21,$A3,$EA,$59,$21,$B7,
+          $53,$AE,$3A,$2D,$CE,$24,$BA,$3A
+         ),
+         (
+          $FA,$15,$49,$C9,$79,$6C,$D4,$D3,
+          $03,$DC,$F4,$52,$C1,$FB,$D5,$74,
+          $4F,$D9,$B9,$B4,$70,$03,$D9,$20,
+          $B9,$2D,$E3,$48,$39,$D0,$7E,$F2,
+          $A2,$9D,$ED,$68,$F6,$FC,$9E,$6C,
+          $45,$E0,$71,$A2,$E4,$8B,$D5,$0C,
+          $50,$84,$E9,$6B,$65,$7D,$D0,$40,
+          $40,$45,$A1,$DD,$EF,$E2,$82,$ED
+         ),
+         (
+          $5C,$F2,$AC,$89,$7A,$B4,$44,$DC,
+          $B5,$C8,$D8,$7C,$49,$5D,$BD,$B3,
+          $4E,$18,$38,$B6,$B6,$29,$42,$7C,
+          $AA,$51,$70,$2A,$D0,$F9,$68,$85,
+          $25,$F1,$3B,$EC,$50,$3A,$3C,$3A,
+          $2C,$80,$A6,$5E,$0B,$57,$15,$E8,
+          $AF,$AB,$00,$FF,$A5,$6E,$C4,$55,
+          $A4,$9A,$1A,$D3,$0A,$A2,$4F,$CD
+         ),
+         (
+          $9A,$AF,$80,$20,$7B,$AC,$E1,$7B,
+          $B7,$AB,$14,$57,$57,$D5,$69,$6B,
+          $DE,$32,$40,$6E,$F2,$2B,$44,$29,
+          $2E,$F6,$5D,$45,$19,$C3,$BB,$2A,
+          $D4,$1A,$59,$B6,$2C,$C3,$E9,$4B,
+          $6F,$A9,$6D,$32,$A7,$FA,$AD,$AE,
+          $28,$AF,$7D,$35,$09,$72,$19,$AA,
+          $3F,$D8,$CD,$A3,$1E,$40,$C2,$75
+         ),
+         (
+          $AF,$88,$B1,$63,$40,$2C,$86,$74,
+          $5C,$B6,$50,$C2,$98,$8F,$B9,$52,
+          $11,$B9,$4B,$03,$EF,$29,$0E,$ED,
+          $96,$62,$03,$42,$41,$FD,$51,$CF,
+          $39,$8F,$80,$73,$E3,$69,$35,$4C,
+          $43,$EA,$E1,$05,$2F,$9B,$63,$B0,
+          $81,$91,$CA,$A1,$38,$AA,$54,$FE,
+          $A8,$89,$CC,$70,$24,$23,$68,$97
+         ),
+         (
+          $48,$FA,$7D,$64,$E1,$CE,$EE,$27,
+          $B9,$86,$4D,$B5,$AD,$A4,$B5,$3D,
+          $00,$C9,$BC,$76,$26,$55,$58,$13,
+          $D3,$CD,$67,$30,$AB,$3C,$C0,$6F,
+          $F3,$42,$D7,$27,$90,$5E,$33,$17,
+          $1B,$DE,$6E,$84,$76,$E7,$7F,$B1,
+          $72,$08,$61,$E9,$4B,$73,$A2,$C5,
+          $38,$D2,$54,$74,$62,$85,$F4,$30
+         ),
+         (
+          $0E,$6F,$D9,$7A,$85,$E9,$04,$F8,
+          $7B,$FE,$85,$BB,$EB,$34,$F6,$9E,
+          $1F,$18,$10,$5C,$F4,$ED,$4F,$87,
+          $AE,$C3,$6C,$6E,$8B,$5F,$68,$BD,
+          $2A,$6F,$3D,$C8,$A9,$EC,$B2,$B6,
+          $1D,$B4,$EE,$DB,$6B,$2E,$A1,$0B,
+          $F9,$CB,$02,$51,$FB,$0F,$8B,$34,
+          $4A,$BF,$7F,$36,$6B,$6D,$E5,$AB
+         ),
+         (
+          $06,$62,$2D,$A5,$78,$71,$76,$28,
+          $7F,$DC,$8F,$ED,$44,$0B,$AD,$18,
+          $7D,$83,$00,$99,$C9,$4E,$6D,$04,
+          $C8,$E9,$C9,$54,$CD,$A7,$0C,$8B,
+          $B9,$E1,$FC,$4A,$6D,$0B,$AA,$83,
+          $1B,$9B,$78,$EF,$66,$48,$68,$1A,
+          $48,$67,$A1,$1D,$A9,$3E,$E3,$6E,
+          $5E,$6A,$37,$D8,$7F,$C6,$3F,$6F
+         ),
+         (
+          $1D,$A6,$77,$2B,$58,$FA,$BF,$9C,
+          $61,$F6,$8D,$41,$2C,$82,$F1,$82,
+          $C0,$23,$6D,$7D,$57,$5E,$F0,$B5,
+          $8D,$D2,$24,$58,$D6,$43,$CD,$1D,
+          $FC,$93,$B0,$38,$71,$C3,$16,$D8,
+          $43,$0D,$31,$29,$95,$D4,$19,$7F,
+          $08,$74,$C9,$91,$72,$BA,$00,$4A,
+          $01,$EE,$29,$5A,$BA,$C2,$4E,$46
+         ),
+         (
+          $3C,$D2,$D9,$32,$0B,$7B,$1D,$5F,
+          $B9,$AA,$B9,$51,$A7,$60,$23,$FA,
+          $66,$7B,$E1,$4A,$91,$24,$E3,$94,
+          $51,$39,$18,$A3,$F4,$40,$96,$AE,
+          $49,$04,$BA,$0F,$FC,$15,$0B,$63,
+          $BC,$7A,$B1,$EE,$B9,$A6,$E2,$57,
+          $E5,$C8,$F0,$00,$A7,$03,$94,$A5,
+          $AF,$D8,$42,$71,$5D,$E1,$5F,$29
+         ),
+         (
+          $04,$CD,$C1,$4F,$74,$34,$E0,$B4,
+          $BE,$70,$CB,$41,$DB,$4C,$77,$9A,
+          $88,$EA,$EF,$6A,$CC,$EB,$CB,$41,
+          $F2,$D4,$2F,$FF,$E7,$F3,$2A,$8E,
+          $28,$1B,$5C,$10,$3A,$27,$02,$1D,
+          $0D,$08,$36,$22,$50,$75,$3C,$DF,
+          $70,$29,$21,$95,$A5,$3A,$48,$72,
+          $8C,$EB,$58,$44,$C2,$D9,$8B,$AB
+         ),
+         (
+          $90,$71,$B7,$A8,$A0,$75,$D0,$09,
+          $5B,$8F,$B3,$AE,$51,$13,$78,$57,
+          $35,$AB,$98,$E2,$B5,$2F,$AF,$91,
+          $D5,$B8,$9E,$44,$AA,$C5,$B5,$D4,
+          $EB,$BF,$91,$22,$3B,$0F,$F4,$C7,
+          $19,$05,$DA,$55,$34,$2E,$64,$65,
+          $5D,$6E,$F8,$C8,$9A,$47,$68,$C3,
+          $F9,$3A,$6D,$C0,$36,$6B,$5B,$C8
+         ),
+         (
+          $EB,$B3,$02,$40,$DD,$96,$C7,$BC,
+          $8D,$0A,$BE,$49,$AA,$4E,$DC,$BB,
+          $4A,$FD,$C5,$1F,$F9,$AA,$F7,$20,
+          $D3,$F9,$E7,$FB,$B0,$F9,$C6,$D6,
+          $57,$13,$50,$50,$17,$69,$FC,$4E,
+          $BD,$0B,$21,$41,$24,$7F,$F4,$00,
+          $D4,$FD,$4B,$E4,$14,$ED,$F3,$77,
+          $57,$BB,$90,$A3,$2A,$C5,$C6,$5A
+         ),
+         (
+          $85,$32,$C5,$8B,$F3,$C8,$01,$5D,
+          $9D,$1C,$BE,$00,$EE,$F1,$F5,$08,
+          $2F,$8F,$36,$32,$FB,$E9,$F1,$ED,
+          $4F,$9D,$FB,$1F,$A7,$9E,$82,$83,
+          $06,$6D,$77,$C4,$4C,$4A,$F9,$43,
+          $D7,$6B,$30,$03,$64,$AE,$CB,$D0,
+          $64,$8C,$8A,$89,$39,$BD,$20,$41,
+          $23,$F4,$B5,$62,$60,$42,$2D,$EC
+         ),
+         (
+          $FE,$98,$46,$D6,$4F,$7C,$77,$08,
+          $69,$6F,$84,$0E,$2D,$76,$CB,$44,
+          $08,$B6,$59,$5C,$2F,$81,$EC,$6A,
+          $28,$A7,$F2,$F2,$0C,$B8,$8C,$FE,
+          $6A,$C0,$B9,$E9,$B8,$24,$4F,$08,
+          $BD,$70,$95,$C3,$50,$C1,$D0,$84,
+          $2F,$64,$FB,$01,$BB,$7F,$53,$2D,
+          $FC,$D4,$73,$71,$B0,$AE,$EB,$79
+         ),
+         (
+          $28,$F1,$7E,$A6,$FB,$6C,$42,$09,
+          $2D,$C2,$64,$25,$7E,$29,$74,$63,
+          $21,$FB,$5B,$DA,$EA,$98,$73,$C2,
+          $A7,$FA,$9D,$8F,$53,$81,$8E,$89,
+          $9E,$16,$1B,$C7,$7D,$FE,$80,$90,
+          $AF,$D8,$2B,$F2,$26,$6C,$5C,$1B,
+          $C9,$30,$A8,$D1,$54,$76,$24,$43,
+          $9E,$66,$2E,$F6,$95,$F2,$6F,$24
+         ),
+         (
+          $EC,$6B,$7D,$7F,$03,$0D,$48,$50,
+          $AC,$AE,$3C,$B6,$15,$C2,$1D,$D2,
+          $52,$06,$D6,$3E,$84,$D1,$DB,$8D,
+          $95,$73,$70,$73,$7B,$A0,$E9,$84,
+          $67,$EA,$0C,$E2,$74,$C6,$61,$99,
+          $90,$1E,$AE,$C1,$8A,$08,$52,$57,
+          $15,$F5,$3B,$FD,$B0,$AA,$CB,$61,
+          $3D,$34,$2E,$BD,$CE,$ED,$DC,$3B
+         ),
+         (
+          $B4,$03,$D3,$69,$1C,$03,$B0,$D3,
+          $41,$8D,$F3,$27,$D5,$86,$0D,$34,
+          $BB,$FC,$C4,$51,$9B,$FB,$CE,$36,
+          $BF,$33,$B2,$08,$38,$5F,$AD,$B9,
+          $18,$6B,$C7,$8A,$76,$C4,$89,$D8,
+          $9F,$D5,$7E,$7D,$C7,$54,$12,$D2,
+          $3B,$CD,$1D,$AE,$84,$70,$CE,$92,
+          $74,$75,$4B,$B8,$58,$5B,$13,$C5
+         ),
+         (
+          $31,$FC,$79,$73,$8B,$87,$72,$B3,
+          $F5,$5C,$D8,$17,$88,$13,$B3,$B5,
+          $2D,$0D,$B5,$A4,$19,$D3,$0B,$A9,
+          $49,$5C,$4B,$9D,$A0,$21,$9F,$AC,
+          $6D,$F8,$E7,$C2,$3A,$81,$15,$51,
+          $A6,$2B,$82,$7F,$25,$6E,$CD,$B8,
+          $12,$4A,$C8,$A6,$79,$2C,$CF,$EC,
+          $C3,$B3,$01,$27,$22,$E9,$44,$63
+         ),
+         (
+          $BB,$20,$39,$EC,$28,$70,$91,$BC,
+          $C9,$64,$2F,$C9,$00,$49,$E7,$37,
+          $32,$E0,$2E,$57,$7E,$28,$62,$B3,
+          $22,$16,$AE,$9B,$ED,$CD,$73,$0C,
+          $4C,$28,$4E,$F3,$96,$8C,$36,$8B,
+          $7D,$37,$58,$4F,$97,$BD,$4B,$4D,
+          $C6,$EF,$61,$27,$AC,$FE,$2E,$6A,
+          $E2,$50,$91,$24,$E6,$6C,$8A,$F4
+         ),
+         (
+          $F5,$3D,$68,$D1,$3F,$45,$ED,$FC,
+          $B9,$BD,$41,$5E,$28,$31,$E9,$38,
+          $35,$0D,$53,$80,$D3,$43,$22,$78,
+          $FC,$1C,$0C,$38,$1F,$CB,$7C,$65,
+          $C8,$2D,$AF,$E0,$51,$D8,$C8,$B0,
+          $D4,$4E,$09,$74,$A0,$E5,$9E,$C7,
+          $BF,$7E,$D0,$45,$9F,$86,$E9,$6F,
+          $32,$9F,$C7,$97,$52,$51,$0F,$D3
+         ),
+         (
+          $8D,$56,$8C,$79,$84,$F0,$EC,$DF,
+          $76,$40,$FB,$C4,$83,$B5,$D8,$C9,
+          $F8,$66,$34,$F6,$F4,$32,$91,$84,
+          $1B,$30,$9A,$35,$0A,$B9,$C1,$13,
+          $7D,$24,$06,$6B,$09,$DA,$99,$44,
+          $BA,$C5,$4D,$5B,$B6,$58,$0D,$83,
+          $60,$47,$AA,$C7,$4A,$B7,$24,$B8,
+          $87,$EB,$F9,$3D,$4B,$32,$EC,$A9
+         ),
+         (
+          $C0,$B6,$5C,$E5,$A9,$6F,$F7,$74,
+          $C4,$56,$CA,$C3,$B5,$F2,$C4,$CD,
+          $35,$9B,$4F,$F5,$3E,$F9,$3A,$3D,
+          $A0,$77,$8B,$E4,$90,$0D,$1E,$8D,
+          $A1,$60,$1E,$76,$9E,$8F,$1B,$02,
+          $D2,$A2,$F8,$C5,$B9,$FA,$10,$B4,
+          $4F,$1C,$18,$69,$85,$46,$8F,$EE,
+          $B0,$08,$73,$02,$83,$A6,$65,$7D
+         ),
+         (
+          $49,$00,$BB,$A6,$F5,$FB,$10,$3E,
+          $CE,$8E,$C9,$6A,$DA,$13,$A5,$C3,
+          $C8,$54,$88,$E0,$55,$51,$DA,$6B,
+          $6B,$33,$D9,$88,$E6,$11,$EC,$0F,
+          $E2,$E3,$C2,$AA,$48,$EA,$6A,$E8,
+          $98,$6A,$3A,$23,$1B,$22,$3C,$5D,
+          $27,$CE,$C2,$EA,$DD,$E9,$1C,$E0,
+          $79,$81,$EE,$65,$28,$62,$D1,$E4
+         ),
+         (
+          $C7,$F5,$C3,$7C,$72,$85,$F9,$27,
+          $F7,$64,$43,$41,$4D,$43,$57,$FF,
+          $78,$96,$47,$D7,$A0,$05,$A5,$A7,
+          $87,$E0,$3C,$34,$6B,$57,$F4,$9F,
+          $21,$B6,$4F,$A9,$CF,$4B,$7E,$45,
+          $57,$3E,$23,$04,$90,$17,$56,$71,
+          $21,$A9,$C3,$D4,$B2,$B7,$3E,$C5,
+          $E9,$41,$35,$77,$52,$5D,$B4,$5A
+         ),
+         (
+          $EC,$70,$96,$33,$07,$36,$FD,$B2,
+          $D6,$4B,$56,$53,$E7,$47,$5D,$A7,
+          $46,$C2,$3A,$46,$13,$A8,$26,$87,
+          $A2,$80,$62,$D3,$23,$63,$64,$28,
+          $4A,$C0,$17,$20,$FF,$B4,$06,$CF,
+          $E2,$65,$C0,$DF,$62,$6A,$18,$8C,
+          $9E,$59,$63,$AC,$E5,$D3,$D5,$BB,
+          $36,$3E,$32,$C3,$8C,$21,$90,$A6
+         ),
+         (
+          $82,$E7,$44,$C7,$5F,$46,$49,$EC,
+          $52,$B8,$07,$71,$A7,$7D,$47,$5A,
+          $3B,$C0,$91,$98,$95,$56,$96,$0E,
+          $27,$6A,$5F,$9E,$AD,$92,$A0,$3F,
+          $71,$87,$42,$CD,$CF,$EA,$EE,$5C,
+          $B8,$5C,$44,$AF,$19,$8A,$DC,$43,
+          $A4,$A4,$28,$F5,$F0,$C2,$DD,$B0,
+          $BE,$36,$05,$9F,$06,$D7,$DF,$73
+         ),
+         (
+          $28,$34,$B7,$A7,$17,$0F,$1F,$5B,
+          $68,$55,$9A,$B7,$8C,$10,$50,$EC,
+          $21,$C9,$19,$74,$0B,$78,$4A,$90,
+          $72,$F6,$E5,$D6,$9F,$82,$8D,$70,
+          $C9,$19,$C5,$03,$9F,$B1,$48,$E3,
+          $9E,$2C,$8A,$52,$11,$83,$78,$B0,
+          $64,$CA,$8D,$50,$01,$CD,$10,$A5,
+          $47,$83,$87,$B9,$66,$71,$5E,$D6
+         ),
+         (
+          $16,$B4,$AD,$A8,$83,$F7,$2F,$85,
+          $3B,$B7,$EF,$25,$3E,$FC,$AB,$0C,
+          $3E,$21,$61,$68,$7A,$D6,$15,$43,
+          $A0,$D2,$82,$4F,$91,$C1,$F8,$13,
+          $47,$D8,$6B,$E7,$09,$B1,$69,$96,
+          $E1,$7F,$2D,$D4,$86,$92,$7B,$02,
+          $88,$AD,$38,$D1,$30,$63,$C4,$A9,
+          $67,$2C,$39,$39,$7D,$37,$89,$B6
+         ),
+         (
+          $78,$D0,$48,$F3,$A6,$9D,$8B,$54,
+          $AE,$0E,$D6,$3A,$57,$3A,$E3,$50,
+          $D8,$9F,$7C,$6C,$F1,$F3,$68,$89,
+          $30,$DE,$89,$9A,$FA,$03,$76,$97,
+          $62,$9B,$31,$4E,$5C,$D3,$03,$AA,
+          $62,$FE,$EA,$72,$A2,$5B,$F4,$2B,
+          $30,$4B,$6C,$6B,$CB,$27,$FA,$E2,
+          $1C,$16,$D9,$25,$E1,$FB,$DA,$C3
+         ),
+         (
+          $0F,$74,$6A,$48,$74,$92,$87,$AD,
+          $A7,$7A,$82,$96,$1F,$05,$A4,$DA,
+          $4A,$BD,$B7,$D7,$7B,$12,$20,$F8,
+          $36,$D0,$9E,$C8,$14,$35,$9C,$0E,
+          $C0,$23,$9B,$8C,$7B,$9F,$F9,$E0,
+          $2F,$56,$9D,$1B,$30,$1E,$F6,$7C,
+          $46,$12,$D1,$DE,$4F,$73,$0F,$81,
+          $C1,$2C,$40,$CC,$06,$3C,$5C,$AA
+         ),
+         (
+          $F0,$FC,$85,$9D,$3B,$D1,$95,$FB,
+          $DC,$2D,$59,$1E,$4C,$DA,$C1,$51,
+          $79,$EC,$0F,$1D,$C8,$21,$C1,$1D,
+          $F1,$F0,$C1,$D2,$6E,$62,$60,$AA,
+          $A6,$5B,$79,$FA,$FA,$CA,$FD,$7D,
+          $3A,$D6,$1E,$60,$0F,$25,$09,$05,
+          $F5,$87,$8C,$87,$45,$28,$97,$64,
+          $7A,$35,$B9,$95,$BC,$AD,$C3,$A3
+         ),
+         (
+          $26,$20,$F6,$87,$E8,$62,$5F,$6A,
+          $41,$24,$60,$B4,$2E,$2C,$EF,$67,
+          $63,$42,$08,$CE,$10,$A0,$CB,$D4,
+          $DF,$F7,$04,$4A,$41,$B7,$88,$00,
+          $77,$E9,$F8,$DC,$3B,$8D,$12,$16,
+          $D3,$37,$6A,$21,$E0,$15,$B5,$8F,
+          $B2,$79,$B5,$21,$D8,$3F,$93,$88,
+          $C7,$38,$2C,$85,$05,$59,$0B,$9B
+         ),
+         (
+          $22,$7E,$3A,$ED,$8D,$2C,$B1,$0B,
+          $91,$8F,$CB,$04,$F9,$DE,$3E,$6D,
+          $0A,$57,$E0,$84,$76,$D9,$37,$59,
+          $CD,$7B,$2E,$D5,$4A,$1C,$BF,$02,
+          $39,$C5,$28,$FB,$04,$BB,$F2,$88,
+          $25,$3E,$60,$1D,$3B,$C3,$8B,$21,
+          $79,$4A,$FE,$F9,$0B,$17,$09,$4A,
+          $18,$2C,$AC,$55,$77,$45,$E7,$5F
+         ),
+         (
+          $1A,$92,$99,$01,$B0,$9C,$25,$F2,
+          $7D,$6B,$35,$BE,$7B,$2F,$1C,$47,
+          $45,$13,$1F,$DE,$BC,$A7,$F3,$E2,
+          $45,$19,$26,$72,$04,$34,$E0,$DB,
+          $6E,$74,$FD,$69,$3A,$D2,$9B,$77,
+          $7D,$C3,$35,$5C,$59,$2A,$36,$1C,
+          $48,$73,$B0,$11,$33,$A5,$7C,$2E,
+          $3B,$70,$75,$CB,$DB,$86,$F4,$FC
+         ),
+         (
+          $5F,$D7,$96,$8B,$C2,$FE,$34,$F2,
+          $20,$B5,$E3,$DC,$5A,$F9,$57,$17,
+          $42,$D7,$3B,$7D,$60,$81,$9F,$28,
+          $88,$B6,$29,$07,$2B,$96,$A9,$D8,
+          $AB,$2D,$91,$B8,$2D,$0A,$9A,$AB,
+          $A6,$1B,$BD,$39,$95,$81,$32,$FC,
+          $C4,$25,$70,$23,$D1,$EC,$A5,$91,
+          $B3,$05,$4E,$2D,$C8,$1C,$82,$00
+         ),
+         (
+          $DF,$CC,$E8,$CF,$32,$87,$0C,$C6,
+          $A5,$03,$EA,$DA,$FC,$87,$FD,$6F,
+          $78,$91,$8B,$9B,$4D,$07,$37,$DB,
+          $68,$10,$BE,$99,$6B,$54,$97,$E7,
+          $E5,$CC,$80,$E3,$12,$F6,$1E,$71,
+          $FF,$3E,$96,$24,$43,$60,$73,$15,
+          $64,$03,$F7,$35,$F5,$6B,$0B,$01,
+          $84,$5C,$18,$F6,$CA,$F7,$72,$E6
+         ),
+         (
+          $02,$F7,$EF,$3A,$9C,$E0,$FF,$F9,
+          $60,$F6,$70,$32,$B2,$96,$EF,$CA,
+          $30,$61,$F4,$93,$4D,$69,$07,$49,
+          $F2,$D0,$1C,$35,$C8,$1C,$14,$F3,
+          $9A,$67,$FA,$35,$0B,$C8,$A0,$35,
+          $9B,$F1,$72,$4B,$FF,$C3,$BC,$A6,
+          $D7,$C7,$BB,$A4,$79,$1F,$D5,$22,
+          $A3,$AD,$35,$3C,$02,$EC,$5A,$A8
+         ),
+         (
+          $64,$BE,$5C,$6A,$BA,$65,$D5,$94,
+          $84,$4A,$E7,$8B,$B0,$22,$E5,$BE,
+          $BE,$12,$7F,$D6,$B6,$FF,$A5,$A1,
+          $37,$03,$85,$5A,$B6,$3B,$62,$4D,
+          $CD,$1A,$36,$3F,$99,$20,$3F,$63,
+          $2E,$C3,$86,$F3,$EA,$76,$7F,$C9,
+          $92,$E8,$ED,$96,$86,$58,$6A,$A2,
+          $75,$55,$A8,$59,$9D,$5B,$80,$8F
+         ),
+         (
+          $F7,$85,$85,$50,$5C,$4E,$AA,$54,
+          $A8,$B5,$BE,$70,$A6,$1E,$73,$5E,
+          $0F,$F9,$7A,$F9,$44,$DD,$B3,$00,
+          $1E,$35,$D8,$6C,$4E,$21,$99,$D9,
+          $76,$10,$4B,$6A,$E3,$17,$50,$A3,
+          $6A,$72,$6E,$D2,$85,$06,$4F,$59,
+          $81,$B5,$03,$88,$9F,$EF,$82,$2F,
+          $CD,$C2,$89,$8D,$DD,$B7,$88,$9A
+         ),
+         (
+          $E4,$B5,$56,$60,$33,$86,$95,$72,
+          $ED,$FD,$87,$47,$9A,$5B,$B7,$3C,
+          $80,$E8,$75,$9B,$91,$23,$28,$79,
+          $D9,$6B,$1D,$DA,$36,$C0,$12,$07,
+          $6E,$E5,$A2,$ED,$7A,$E2,$DE,$63,
+          $EF,$84,$06,$A0,$6A,$EA,$82,$C1,
+          $88,$03,$1B,$56,$0B,$EA,$FB,$58,
+          $3F,$B3,$DE,$9E,$57,$95,$2A,$7E
+         ),
+         (
+          $E1,$B3,$E7,$ED,$86,$7F,$6C,$94,
+          $84,$A2,$A9,$7F,$77,$15,$F2,$5E,
+          $25,$29,$4E,$99,$2E,$41,$F6,$A7,
+          $C1,$61,$FF,$C2,$AD,$C6,$DA,$AE,
+          $B7,$11,$31,$02,$D5,$E6,$09,$02,
+          $87,$FE,$6A,$D9,$4C,$E5,$D6,$B7,
+          $39,$C6,$CA,$24,$0B,$05,$C7,$6F,
+          $B7,$3F,$25,$DD,$02,$4B,$F9,$35
+         ),
+         (
+          $85,$FD,$08,$5F,$DC,$12,$A0,$80,
+          $98,$3D,$F0,$7B,$D7,$01,$2B,$0D,
+          $40,$2A,$0F,$40,$43,$FC,$B2,$77,
+          $5A,$DF,$0B,$AD,$17,$4F,$9B,$08,
+          $D1,$67,$6E,$47,$69,$85,$78,$5C,
+          $0A,$5D,$CC,$41,$DB,$FF,$6D,$95,
+          $EF,$4D,$66,$A3,$FB,$DC,$4A,$74,
+          $B8,$2B,$A5,$2D,$A0,$51,$2B,$74
+         ),
+         (
+          $AE,$D8,$FA,$76,$4B,$0F,$BF,$F8,
+          $21,$E0,$52,$33,$D2,$F7,$B0,$90,
+          $0E,$C4,$4D,$82,$6F,$95,$E9,$3C,
+          $34,$3C,$1B,$C3,$BA,$5A,$24,$37,
+          $4B,$1D,$61,$6E,$7E,$7A,$BA,$45,
+          $3A,$0A,$DA,$5E,$4F,$AB,$53,$82,
+          $40,$9E,$0D,$42,$CE,$9C,$2B,$C7,
+          $FB,$39,$A9,$9C,$34,$0C,$20,$F0
+         ),
+         (
+          $7B,$A3,$B2,$E2,$97,$23,$35,$22,
+          $EE,$B3,$43,$BD,$3E,$BC,$FD,$83,
+          $5A,$04,$00,$77,$35,$E8,$7F,$0C,
+          $A3,$00,$CB,$EE,$6D,$41,$65,$65,
+          $16,$21,$71,$58,$1E,$40,$20,$FF,
+          $4C,$F1,$76,$45,$0F,$12,$91,$EA,
+          $22,$85,$CB,$9E,$BF,$FE,$4C,$56,
+          $66,$06,$27,$68,$51,$45,$05,$1C
+         ),
+         (
+          $DE,$74,$8B,$CF,$89,$EC,$88,$08,
+          $47,$21,$E1,$6B,$85,$F3,$0A,$DB,
+          $1A,$61,$34,$D6,$64,$B5,$84,$35,
+          $69,$BA,$BC,$5B,$BD,$1A,$15,$CA,
+          $9B,$61,$80,$3C,$90,$1A,$4F,$EF,
+          $32,$96,$5A,$17,$49,$C9,$F3,$A4,
+          $E2,$43,$E1,$73,$93,$9D,$C5,$A8,
+          $DC,$49,$5C,$67,$1A,$B5,$21,$45
+         ),
+         (
+          $AA,$F4,$D2,$BD,$F2,$00,$A9,$19,
+          $70,$6D,$98,$42,$DC,$E1,$6C,$98,
+          $14,$0D,$34,$BC,$43,$3D,$F3,$20,
+          $AB,$A9,$BD,$42,$9E,$54,$9A,$A7,
+          $A3,$39,$76,$52,$A4,$D7,$68,$27,
+          $77,$86,$CF,$99,$3C,$DE,$23,$38,
+          $67,$3E,$D2,$E6,$B6,$6C,$96,$1F,
+          $EF,$B8,$2C,$D2,$0C,$93,$33,$8F
+         ),
+         (
+          $C4,$08,$21,$89,$68,$B7,$88,$BF,
+          $86,$4F,$09,$97,$E6,$BC,$4C,$3D,
+          $BA,$68,$B2,$76,$E2,$12,$5A,$48,
+          $43,$29,$60,$52,$FF,$93,$BF,$57,
+          $67,$B8,$CD,$CE,$71,$31,$F0,$87,
+          $64,$30,$C1,$16,$5F,$EC,$6C,$4F,
+          $47,$AD,$AA,$4F,$D8,$BC,$FA,$CE,
+          $F4,$63,$B5,$D3,$D0,$FA,$61,$A0
+         ),
+         (
+          $76,$D2,$D8,$19,$C9,$2B,$CE,$55,
+          $FA,$8E,$09,$2A,$B1,$BF,$9B,$9E,
+          $AB,$23,$7A,$25,$26,$79,$86,$CA,
+          $CF,$2B,$8E,$E1,$4D,$21,$4D,$73,
+          $0D,$C9,$A5,$AA,$2D,$7B,$59,$6E,
+          $86,$A1,$FD,$8F,$A0,$80,$4C,$77,
+          $40,$2D,$2F,$CD,$45,$08,$36,$88,
+          $B2,$18,$B1,$CD,$FA,$0D,$CB,$CB
+         ),
+         (
+          $72,$06,$5E,$E4,$DD,$91,$C2,$D8,
+          $50,$9F,$A1,$FC,$28,$A3,$7C,$7F,
+          $C9,$FA,$7D,$5B,$3F,$8A,$D3,$D0,
+          $D7,$A2,$56,$26,$B5,$7B,$1B,$44,
+          $78,$8D,$4C,$AF,$80,$62,$90,$42,
+          $5F,$98,$90,$A3,$A2,$A3,$5A,$90,
+          $5A,$B4,$B3,$7A,$CF,$D0,$DA,$6E,
+          $45,$17,$B2,$52,$5C,$96,$51,$E4
+         ),
+         (
+          $64,$47,$5D,$FE,$76,$00,$D7,$17,
+          $1B,$EA,$0B,$39,$4E,$27,$C9,$B0,
+          $0D,$8E,$74,$DD,$1E,$41,$6A,$79,
+          $47,$36,$82,$AD,$3D,$FD,$BB,$70,
+          $66,$31,$55,$80,$55,$CF,$C8,$A4,
+          $0E,$07,$BD,$01,$5A,$45,$40,$DC,
+          $DE,$A1,$58,$83,$CB,$BF,$31,$41,
+          $2D,$F1,$DE,$1C,$D4,$15,$2B,$91
+         ),
+         (
+          $12,$CD,$16,$74,$A4,$48,$8A,$5D,
+          $7C,$2B,$31,$60,$D2,$E2,$C4,$B5,
+          $83,$71,$BE,$DA,$D7,$93,$41,$8D,
+          $6F,$19,$C6,$EE,$38,$5D,$70,$B3,
+          $E0,$67,$39,$36,$9D,$4D,$F9,$10,
+          $ED,$B0,$B0,$A5,$4C,$BF,$F4,$3D,
+          $54,$54,$4C,$D3,$7A,$B3,$A0,$6C,
+          $FA,$0A,$3D,$DA,$C8,$B6,$6C,$89
+         ),
+         (
+          $60,$75,$69,$66,$47,$9D,$ED,$C6,
+          $DD,$4B,$CF,$F8,$EA,$7D,$1D,$4C,
+          $E4,$D4,$AF,$2E,$7B,$09,$7E,$32,
+          $E3,$76,$35,$18,$44,$11,$47,$CC,
+          $12,$B3,$C0,$EE,$6D,$2E,$CA,$BF,
+          $11,$98,$CE,$C9,$2E,$86,$A3,$61,
+          $6F,$BA,$4F,$4E,$87,$2F,$58,$25,
+          $33,$0A,$DB,$B4,$C1,$DE,$E4,$44
+         ),
+         (
+          $A7,$80,$3B,$CB,$71,$BC,$1D,$0F,
+          $43,$83,$DD,$E1,$E0,$61,$2E,$04,
+          $F8,$72,$B7,$15,$AD,$30,$81,$5C,
+          $22,$49,$CF,$34,$AB,$B8,$B0,$24,
+          $91,$5C,$B2,$FC,$9F,$4E,$7C,$C4,
+          $C8,$CF,$D4,$5B,$E2,$D5,$A9,$1E,
+          $AB,$09,$41,$C7,$D2,$70,$E2,$DA,
+          $4C,$A4,$A9,$F7,$AC,$68,$66,$3A
+         ),
+         (
+          $B8,$4E,$F6,$A7,$22,$9A,$34,$A7,
+          $50,$D9,$A9,$8E,$E2,$52,$98,$71,
+          $81,$6B,$87,$FB,$E3,$BC,$45,$B4,
+          $5F,$A5,$AE,$82,$D5,$14,$15,$40,
+          $21,$11,$65,$C3,$C5,$D7,$A7,$47,
+          $6B,$A5,$A4,$AA,$06,$D6,$64,$76,
+          $F0,$D9,$DC,$49,$A3,$F1,$EE,$72,
+          $C3,$AC,$AB,$D4,$98,$96,$74,$14
+         ),
+         (
+          $FA,$E4,$B6,$D8,$EF,$C3,$F8,$C8,
+          $E6,$4D,$00,$1D,$AB,$EC,$3A,$21,
+          $F5,$44,$E8,$27,$14,$74,$52,$51,
+          $B2,$B4,$B3,$93,$F2,$F4,$3E,$0D,
+          $A3,$D4,$03,$C6,$4D,$B9,$5A,$2C,
+          $B6,$E2,$3E,$BB,$7B,$9E,$94,$CD,
+          $D5,$DD,$AC,$54,$F0,$7C,$4A,$61,
+          $BD,$3C,$B1,$0A,$A6,$F9,$3B,$49
+         ),
+         (
+          $34,$F7,$28,$66,$05,$A1,$22,$36,
+          $95,$40,$14,$1D,$ED,$79,$B8,$95,
+          $72,$55,$DA,$2D,$41,$55,$AB,$BF,
+          $5A,$8D,$BB,$89,$C8,$EB,$7E,$DE,
+          $8E,$EE,$F1,$DA,$A4,$6D,$C2,$9D,
+          $75,$1D,$04,$5D,$C3,$B1,$D6,$58,
+          $BB,$64,$B8,$0F,$F8,$58,$9E,$DD,
+          $B3,$82,$4B,$13,$DA,$23,$5A,$6B
+         ),
+         (
+          $3B,$3B,$48,$43,$4B,$E2,$7B,$9E,
+          $AB,$AB,$BA,$43,$BF,$6B,$35,$F1,
+          $4B,$30,$F6,$A8,$8D,$C2,$E7,$50,
+          $C3,$58,$47,$0D,$6B,$3A,$A3,$C1,
+          $8E,$47,$DB,$40,$17,$FA,$55,$10,
+          $6D,$82,$52,$F0,$16,$37,$1A,$00,
+          $F5,$F8,$B0,$70,$B7,$4B,$A5,$F2,
+          $3C,$FF,$C5,$51,$1C,$9F,$09,$F0
+         ),
+         (
+          $BA,$28,$9E,$BD,$65,$62,$C4,$8C,
+          $3E,$10,$A8,$AD,$6C,$E0,$2E,$73,
+          $43,$3D,$1E,$93,$D7,$C9,$27,$9D,
+          $4D,$60,$A7,$E8,$79,$EE,$11,$F4,
+          $41,$A0,$00,$F4,$8E,$D9,$F7,$C4,
+          $ED,$87,$A4,$51,$36,$D7,$DC,$CD,
+          $CA,$48,$21,$09,$C7,$8A,$51,$06,
+          $2B,$3B,$A4,$04,$4A,$DA,$24,$69
+         ),
+         (
+          $02,$29,$39,$E2,$38,$6C,$5A,$37,
+          $04,$98,$56,$C8,$50,$A2,$BB,$10,
+          $A1,$3D,$FE,$A4,$21,$2B,$4C,$73,
+          $2A,$88,$40,$A9,$FF,$A5,$FA,$F5,
+          $48,$75,$C5,$44,$88,$16,$B2,$78,
+          $5A,$00,$7D,$A8,$A8,$D2,$BC,$7D,
+          $71,$A5,$4E,$4E,$65,$71,$F1,$0B,
+          $60,$0C,$BD,$B2,$5D,$13,$ED,$E3
+         ),
+         (
+          $E6,$FE,$C1,$9D,$89,$CE,$87,$17,
+          $B1,$A0,$87,$02,$46,$70,$FE,$02,
+          $6F,$6C,$7C,$BD,$A1,$1C,$AE,$F9,
+          $59,$BB,$2D,$35,$1B,$F8,$56,$F8,
+          $05,$5D,$1C,$0E,$BD,$AA,$A9,$D1,
+          $B1,$78,$86,$FC,$2C,$56,$2B,$5E,
+          $99,$64,$2F,$C0,$64,$71,$0C,$0D,
+          $34,$88,$A0,$2B,$5E,$D7,$F6,$FD
+         ),
+         (
+          $94,$C9,$6F,$02,$A8,$F5,$76,$AC,
+          $A3,$2B,$A6,$1C,$2B,$20,$6F,$90,
+          $72,$85,$D9,$29,$9B,$83,$AC,$17,
+          $5C,$20,$9A,$8D,$43,$D5,$3B,$FE,
+          $68,$3D,$D1,$D8,$3E,$75,$49,$CB,
+          $90,$6C,$28,$F5,$9A,$B7,$C4,$6F,
+          $87,$51,$36,$6A,$28,$C3,$9D,$D5,
+          $FE,$26,$93,$C9,$01,$96,$66,$C8
+         ),
+         (
+          $31,$A0,$CD,$21,$5E,$BD,$2C,$B6,
+          $1D,$E5,$B9,$ED,$C9,$1E,$61,$95,
+          $E3,$1C,$59,$A5,$64,$8D,$5C,$9F,
+          $73,$7E,$12,$5B,$26,$05,$70,$8F,
+          $2E,$32,$5A,$B3,$38,$1C,$8D,$CE,
+          $1A,$3E,$95,$88,$86,$F1,$EC,$DC,
+          $60,$31,$8F,$88,$2C,$FE,$20,$A2,
+          $41,$91,$35,$2E,$61,$7B,$0F,$21
+         ),
+         (
+          $91,$AB,$50,$4A,$52,$2D,$CE,$78,
+          $77,$9F,$4C,$6C,$6B,$A2,$E6,$B6,
+          $DB,$55,$65,$C7,$6D,$3E,$7E,$7C,
+          $92,$0C,$AF,$7F,$75,$7E,$F9,$DB,
+          $7C,$8F,$CF,$10,$E5,$7F,$03,$37,
+          $9E,$A9,$BF,$75,$EB,$59,$89,$5D,
+          $96,$E1,$49,$80,$0B,$6A,$AE,$01,
+          $DB,$77,$8B,$B9,$0A,$FB,$C9,$89
+         ),
+         (
+          $D8,$5C,$AB,$C6,$BD,$5B,$1A,$01,
+          $A5,$AF,$D8,$C6,$73,$47,$40,$DA,
+          $9F,$D1,$C1,$AC,$C6,$DB,$29,$BF,
+          $C8,$A2,$E5,$B6,$68,$B0,$28,$B6,
+          $B3,$15,$4B,$FB,$87,$03,$FA,$31,
+          $80,$25,$1D,$58,$9A,$D3,$80,$40,
+          $CE,$B7,$07,$C4,$BA,$D1,$B5,$34,
+          $3C,$B4,$26,$B6,$1E,$AA,$49,$C1
+         ),
+         (
+          $D6,$2E,$FB,$EC,$2C,$A9,$C1,$F8,
+          $BD,$66,$CE,$8B,$3F,$6A,$89,$8C,
+          $B3,$F7,$56,$6B,$A6,$56,$8C,$61,
+          $8A,$D1,$FE,$B2,$B6,$5B,$76,$C3,
+          $CE,$1D,$D2,$0F,$73,$95,$37,$2F,
+          $AF,$28,$42,$7F,$61,$C9,$27,$80,
+          $49,$CF,$01,$40,$DF,$43,$4F,$56,
+          $33,$04,$8C,$86,$B8,$1E,$03,$99
+         ),
+         (
+          $7C,$8F,$DC,$61,$75,$43,$9E,$2C,
+          $3D,$B1,$5B,$AF,$A7,$FB,$06,$14,
+          $3A,$6A,$23,$BC,$90,$F4,$49,$E7,
+          $9D,$EE,$F7,$3C,$3D,$49,$2A,$67,
+          $17,$15,$C1,$93,$B6,$FE,$A9,$F0,
+          $36,$05,$0B,$94,$60,$69,$85,$6B,
+          $89,$7E,$08,$C0,$07,$68,$F5,$EE,
+          $5D,$DC,$F7,$0B,$7C,$D6,$D0,$E0
+         ),
+         (
+          $58,$60,$2E,$E7,$46,$8E,$6B,$C9,
+          $DF,$21,$BD,$51,$B2,$3C,$00,$5F,
+          $72,$D6,$CB,$01,$3F,$0A,$1B,$48,
+          $CB,$EC,$5E,$CA,$29,$92,$99,$F9,
+          $7F,$09,$F5,$4A,$9A,$01,$48,$3E,
+          $AE,$B3,$15,$A6,$47,$8B,$AD,$37,
+          $BA,$47,$CA,$13,$47,$C7,$C8,$FC,
+          $9E,$66,$95,$59,$2C,$91,$D7,$23
+         ),
+         (
+          $27,$F5,$B7,$9E,$D2,$56,$B0,$50,
+          $99,$3D,$79,$34,$96,$ED,$F4,$80,
+          $7C,$1D,$85,$A7,$B0,$A6,$7C,$9C,
+          $4F,$A9,$98,$60,$75,$0B,$0A,$E6,
+          $69,$89,$67,$0A,$8F,$FD,$78,$56,
+          $D7,$CE,$41,$15,$99,$E5,$8C,$4D,
+          $77,$B2,$32,$A6,$2B,$EF,$64,$D1,
+          $52,$75,$BE,$46,$A6,$82,$35,$FF
+         ),
+         (
+          $39,$57,$A9,$76,$B9,$F1,$88,$7B,
+          $F0,$04,$A8,$DC,$A9,$42,$C9,$2D,
+          $2B,$37,$EA,$52,$60,$0F,$25,$E0,
+          $C9,$BC,$57,$07,$D0,$27,$9C,$00,
+          $C6,$E8,$5A,$83,$9B,$0D,$2D,$8E,
+          $B5,$9C,$51,$D9,$47,$88,$EB,$E6,
+          $24,$74,$A7,$91,$CA,$DF,$52,$CC,
+          $CF,$20,$F5,$07,$0B,$65,$73,$FC
+         ),
+         (
+          $EA,$A2,$37,$6D,$55,$38,$0B,$F7,
+          $72,$EC,$CA,$9C,$B0,$AA,$46,$68,
+          $C9,$5C,$70,$71,$62,$FA,$86,$D5,
+          $18,$C8,$CE,$0C,$A9,$BF,$73,$62,
+          $B9,$F2,$A0,$AD,$C3,$FF,$59,$92,
+          $2D,$F9,$21,$B9,$45,$67,$E8,$1E,
+          $45,$2F,$6C,$1A,$07,$FC,$81,$7C,
+          $EB,$E9,$96,$04,$B3,$50,$5D,$38
+         ),
+         (
+          $C1,$E2,$C7,$8B,$6B,$27,$34,$E2,
+          $48,$0E,$C5,$50,$43,$4C,$B5,$D6,
+          $13,$11,$1A,$DC,$C2,$1D,$47,$55,
+          $45,$C3,$B1,$B7,$E6,$FF,$12,$44,
+          $44,$76,$E5,$C0,$55,$13,$2E,$22,
+          $29,$DC,$0F,$80,$70,$44,$BB,$91,
+          $9B,$1A,$56,$62,$DD,$38,$A9,$EE,
+          $65,$E2,$43,$A3,$91,$1A,$ED,$1A
+         ),
+         (
+          $8A,$B4,$87,$13,$38,$9D,$D0,$FC,
+          $F9,$F9,$65,$D3,$CE,$66,$B1,$E5,
+          $59,$A1,$F8,$C5,$87,$41,$D6,$76,
+          $83,$CD,$97,$13,$54,$F4,$52,$E6,
+          $2D,$02,$07,$A6,$5E,$43,$6C,$5D,
+          $5D,$8F,$8E,$E7,$1C,$6A,$BF,$E5,
+          $0E,$66,$90,$04,$C3,$02,$B3,$1A,
+          $7E,$A8,$31,$1D,$4A,$91,$60,$51
+         ),
+         (
+          $24,$CE,$0A,$DD,$AA,$4C,$65,$03,
+          $8B,$D1,$B1,$C0,$F1,$45,$2A,$0B,
+          $12,$87,$77,$AA,$BC,$94,$A2,$9D,
+          $F2,$FD,$6C,$7E,$2F,$85,$F8,$AB,
+          $9A,$C7,$EF,$F5,$16,$B0,$E0,$A8,
+          $25,$C8,$4A,$24,$CF,$E4,$92,$EA,
+          $AD,$0A,$63,$08,$E4,$6D,$D4,$2F,
+          $E8,$33,$3A,$B9,$71,$BB,$30,$CA
+         ),
+         (
+          $51,$54,$F9,$29,$EE,$03,$04,$5B,
+          $6B,$0C,$00,$04,$FA,$77,$8E,$DE,
+          $E1,$D1,$39,$89,$32,$67,$CC,$84,
+          $82,$5A,$D7,$B3,$6C,$63,$DE,$32,
+          $79,$8E,$4A,$16,$6D,$24,$68,$65,
+          $61,$35,$4F,$63,$B0,$07,$09,$A1,
+          $36,$4B,$3C,$24,$1D,$E3,$FE,$BF,
+          $07,$54,$04,$58,$97,$46,$7C,$D4
+         ),
+         (
+          $E7,$4E,$90,$79,$20,$FD,$87,$BD,
+          $5A,$D6,$36,$DD,$11,$08,$5E,$50,
+          $EE,$70,$45,$9C,$44,$3E,$1C,$E5,
+          $80,$9A,$F2,$BC,$2E,$BA,$39,$F9,
+          $E6,$D7,$12,$8E,$0E,$37,$12,$C3,
+          $16,$DA,$06,$F4,$70,$5D,$78,$A4,
+          $83,$8E,$28,$12,$1D,$43,$44,$A2,
+          $C7,$9C,$5E,$0D,$B3,$07,$A6,$77
+         ),
+         (
+          $BF,$91,$A2,$23,$34,$BA,$C2,$0F,
+          $3F,$D8,$06,$63,$B3,$CD,$06,$C4,
+          $E8,$80,$2F,$30,$E6,$B5,$9F,$90,
+          $D3,$03,$5C,$C9,$79,$8A,$21,$7E,
+          $D5,$A3,$1A,$BB,$DA,$7F,$A6,$84,
+          $28,$27,$BD,$F2,$A7,$A1,$C2,$1F,
+          $6F,$CF,$CC,$BB,$54,$C6,$C5,$29,
+          $26,$F3,$2D,$A8,$16,$26,$9B,$E1
+         ),
+         (
+          $D9,$D5,$C7,$4B,$E5,$12,$1B,$0B,
+          $D7,$42,$F2,$6B,$FF,$B8,$C8,$9F,
+          $89,$17,$1F,$3F,$93,$49,$13,$49,
+          $2B,$09,$03,$C2,$71,$BB,$E2,$B3,
+          $39,$5E,$F2,$59,$66,$9B,$EF,$43,
+          $B5,$7F,$7F,$CC,$30,$27,$DB,$01,
+          $82,$3F,$6B,$AE,$E6,$6E,$4F,$9F,
+          $EA,$D4,$D6,$72,$6C,$74,$1F,$CE
+         ),
+         (
+          $50,$C8,$B8,$CF,$34,$CD,$87,$9F,
+          $80,$E2,$FA,$AB,$32,$30,$B0,$C0,
+          $E1,$CC,$3E,$9D,$CA,$DE,$B1,$B9,
+          $D9,$7A,$B9,$23,$41,$5D,$D9,$A1,
+          $FE,$38,$AD,$DD,$5C,$11,$75,$6C,
+          $67,$99,$0B,$25,$6E,$95,$AD,$6D,
+          $8F,$9F,$ED,$CE,$10,$BF,$1C,$90,
+          $67,$9C,$DE,$0E,$CF,$1B,$E3,$47
+         ),
+         (
+          $0A,$38,$6E,$7C,$D5,$DD,$9B,$77,
+          $A0,$35,$E0,$9F,$E6,$FE,$E2,$C8,
+          $CE,$61,$B5,$38,$3C,$87,$EA,$43,
+          $20,$50,$59,$C5,$E4,$CD,$4F,$44,
+          $08,$31,$9B,$B0,$A8,$23,$60,$F6,
+          $A5,$8E,$6C,$9C,$E3,$F4,$87,$C4,
+          $46,$06,$3B,$F8,$13,$BC,$6B,$A5,
+          $35,$E1,$7F,$C1,$82,$6C,$FC,$91
+         ),
+         (
+          $1F,$14,$59,$CB,$6B,$61,$CB,$AC,
+          $5F,$0E,$FE,$8F,$C4,$87,$53,$8F,
+          $42,$54,$89,$87,$FC,$D5,$62,$21,
+          $CF,$A7,$BE,$B2,$25,$04,$76,$9E,
+          $79,$2C,$45,$AD,$FB,$1D,$6B,$3D,
+          $60,$D7,$B7,$49,$C8,$A7,$5B,$0B,
+          $DF,$14,$E8,$EA,$72,$1B,$95,$DC,
+          $A5,$38,$CA,$6E,$25,$71,$12,$09
+         ),
+         (
+          $E5,$8B,$38,$36,$B7,$D8,$FE,$DB,
+          $B5,$0C,$A5,$72,$5C,$65,$71,$E7,
+          $4C,$07,$85,$E9,$78,$21,$DA,$B8,
+          $B6,$29,$8C,$10,$E4,$C0,$79,$D4,
+          $A6,$CD,$F2,$2F,$0F,$ED,$B5,$50,
+          $32,$92,$5C,$16,$74,$81,$15,$F0,
+          $1A,$10,$5E,$77,$E0,$0C,$EE,$3D,
+          $07,$92,$4D,$C0,$D8,$F9,$06,$59
+         ),
+         (
+          $B9,$29,$CC,$65,$05,$F0,$20,$15,
+          $86,$72,$DE,$DA,$56,$D0,$DB,$08,
+          $1A,$2E,$E3,$4C,$00,$C1,$10,$00,
+          $29,$BD,$F8,$EA,$98,$03,$4F,$A4,
+          $BF,$3E,$86,$55,$EC,$69,$7F,$E3,
+          $6F,$40,$55,$3C,$5B,$B4,$68,$01,
+          $64,$4A,$62,$7D,$33,$42,$F4,$FC,
+          $92,$B6,$1F,$03,$29,$0F,$B3,$81
+         ),
+         (
+          $72,$D3,$53,$99,$4B,$49,$D3,$E0,
+          $31,$53,$92,$9A,$1E,$4D,$4F,$18,
+          $8E,$E5,$8A,$B9,$E7,$2E,$E8,$E5,
+          $12,$F2,$9B,$C7,$73,$91,$38,$19,
+          $CE,$05,$7D,$DD,$70,$02,$C0,$43,
+          $3E,$E0,$A1,$61,$14,$E3,$D1,$56,
+          $DD,$2C,$4A,$7E,$80,$EE,$53,$37,
+          $8B,$86,$70,$F2,$3E,$33,$EF,$56
+         ),
+         (
+          $C7,$0E,$F9,$BF,$D7,$75,$D4,$08,
+          $17,$67,$37,$A0,$73,$6D,$68,$51,
+          $7C,$E1,$AA,$AD,$7E,$81,$A9,$3C,
+          $8C,$1E,$D9,$67,$EA,$21,$4F,$56,
+          $C8,$A3,$77,$B1,$76,$3E,$67,$66,
+          $15,$B6,$0F,$39,$88,$24,$1E,$AE,
+          $6E,$AB,$96,$85,$A5,$12,$49,$29,
+          $D2,$81,$88,$F2,$9E,$AB,$06,$F7
+         ),
+         (
+          $C2,$30,$F0,$80,$26,$79,$CB,$33,
+          $82,$2E,$F8,$B3,$B2,$1B,$F7,$A9,
+          $A2,$89,$42,$09,$29,$01,$D7,$DA,
+          $C3,$76,$03,$00,$83,$10,$26,$CF,
+          $35,$4C,$92,$32,$DF,$3E,$08,$4D,
+          $99,$03,$13,$0C,$60,$1F,$63,$C1,
+          $F4,$A4,$A4,$B8,$10,$6E,$46,$8C,
+          $D4,$43,$BB,$E5,$A7,$34,$F4,$5F
+         ),
+         (
+          $6F,$43,$09,$4C,$AF,$B5,$EB,$F1,
+          $F7,$A4,$93,$7E,$C5,$0F,$56,$A4,
+          $C9,$DA,$30,$3C,$BB,$55,$AC,$1F,
+          $27,$F1,$F1,$97,$6C,$D9,$6B,$ED,
+          $A9,$46,$4F,$0E,$7B,$9C,$54,$62,
+          $0B,$8A,$9F,$BA,$98,$31,$64,$B8,
+          $BE,$35,$78,$42,$5A,$02,$4F,$5F,
+          $E1,$99,$C3,$63,$56,$B8,$89,$72
+         ),
+         (
+          $37,$45,$27,$3F,$4C,$38,$22,$5D,
+          $B2,$33,$73,$81,$87,$1A,$0C,$6A,
+          $AF,$D3,$AF,$9B,$01,$8C,$88,$AA,
+          $02,$02,$58,$50,$A5,$DC,$3A,$42,
+          $A1,$A3,$E0,$3E,$56,$CB,$F1,$B0,
+          $87,$6D,$63,$A4,$41,$F1,$D2,$85,
+          $6A,$39,$B8,$80,$1E,$B5,$AF,$32,
+          $52,$01,$C4,$15,$D6,$5E,$97,$FE
+         ),
+         (
+          $C5,$0C,$44,$CC,$A3,$EC,$3E,$DA,
+          $AE,$77,$9A,$7E,$17,$94,$50,$EB,
+          $DD,$A2,$F9,$70,$67,$C6,$90,$AA,
+          $6C,$5A,$4A,$C7,$C3,$01,$39,$BB,
+          $27,$C0,$DF,$4D,$B3,$22,$0E,$63,
+          $CB,$11,$0D,$64,$F3,$7F,$FE,$07,
+          $8D,$B7,$26,$53,$E2,$DA,$AC,$F9,
+          $3A,$E3,$F0,$A2,$D1,$A7,$EB,$2E
+         ),
+         (
+          $8A,$EF,$26,$3E,$38,$5C,$BC,$61,
+          $E1,$9B,$28,$91,$42,$43,$26,$2A,
+          $F5,$AF,$E8,$72,$6A,$F3,$CE,$39,
+          $A7,$9C,$27,$02,$8C,$F3,$EC,$D3,
+          $F8,$D2,$DF,$D9,$CF,$C9,$AD,$91,
+          $B5,$8F,$6F,$20,$77,$8F,$D5,$F0,
+          $28,$94,$A3,$D9,$1C,$7D,$57,$D1,
+          $E4,$B8,$66,$A7,$F3,$64,$B6,$BE
+         ),
+         (
+          $28,$69,$61,$41,$DE,$6E,$2D,$9B,
+          $CB,$32,$35,$57,$8A,$66,$16,$6C,
+          $14,$48,$D3,$E9,$05,$A1,$B4,$82,
+          $D4,$23,$BE,$4B,$C5,$36,$9B,$C8,
+          $C7,$4D,$AE,$0A,$CC,$9C,$C1,$23,
+          $E1,$D8,$DD,$CE,$9F,$97,$91,$7E,
+          $8C,$01,$9C,$55,$2D,$A3,$2D,$39,
+          $D2,$21,$9B,$9A,$BF,$0F,$A8,$C8
+         ),
+         (
+          $2F,$B9,$EB,$20,$85,$83,$01,$81,
+          $90,$3A,$9D,$AF,$E3,$DB,$42,$8E,
+          $E1,$5B,$E7,$66,$22,$24,$EF,$D6,
+          $43,$37,$1F,$B2,$56,$46,$AE,$E7,
+          $16,$E5,$31,$EC,$A6,$9B,$2B,$DC,
+          $82,$33,$F1,$A8,$08,$1F,$A4,$3D,
+          $A1,$50,$03,$02,$97,$5A,$77,$F4,
+          $2F,$A5,$92,$13,$67,$10,$E9,$DC
+         ),
+         (
+          $66,$F9,$A7,$14,$3F,$7A,$33,$14,
+          $A6,$69,$BF,$2E,$24,$BB,$B3,$50,
+          $14,$26,$1D,$63,$9F,$49,$5B,$6C,
+          $9C,$1F,$10,$4F,$E8,$E3,$20,$AC,
+          $A6,$0D,$45,$50,$D6,$9D,$52,$ED,
+          $BD,$5A,$3C,$DE,$B4,$01,$4A,$E6,
+          $5B,$1D,$87,$AA,$77,$0B,$69,$AE,
+          $5C,$15,$F4,$33,$0B,$0B,$0A,$D8
+         ),
+         (
+          $F4,$C4,$DD,$1D,$59,$4C,$35,$65,
+          $E3,$E2,$5C,$A4,$3D,$AD,$82,$F6,
+          $2A,$BE,$A4,$83,$5E,$D4,$CD,$81,
+          $1B,$CD,$97,$5E,$46,$27,$98,$28,
+          $D4,$4D,$4C,$62,$C3,$67,$9F,$1B,
+          $7F,$7B,$9D,$D4,$57,$1D,$7B,$49,
+          $55,$73,$47,$B8,$C5,$46,$0C,$BD,
+          $C1,$BE,$F6,$90,$FB,$2A,$08,$C0
+         ),
+         (
+          $8F,$1D,$C9,$64,$9C,$3A,$84,$55,
+          $1F,$8F,$6E,$91,$CA,$C6,$82,$42,
+          $A4,$3B,$1F,$8F,$32,$8E,$E9,$22,
+          $80,$25,$73,$87,$FA,$75,$59,$AA,
+          $6D,$B1,$2E,$4A,$EA,$DC,$2D,$26,
+          $09,$91,$78,$74,$9C,$68,$64,$B3,
+          $57,$F3,$F8,$3B,$2F,$B3,$EF,$A8,
+          $D2,$A8,$DB,$05,$6B,$ED,$6B,$CC
+         ),
+         (
+          $31,$39,$C1,$A7,$F9,$7A,$FD,$16,
+          $75,$D4,$60,$EB,$BC,$07,$F2,$72,
+          $8A,$A1,$50,$DF,$84,$96,$24,$51,
+          $1E,$E0,$4B,$74,$3B,$A0,$A8,$33,
+          $09,$2F,$18,$C1,$2D,$C9,$1B,$4D,
+          $D2,$43,$F3,$33,$40,$2F,$59,$FE,
+          $28,$AB,$DB,$BB,$AE,$30,$1E,$7B,
+          $65,$9C,$7A,$26,$D5,$C0,$F9,$79
+         ),
+         (
+          $06,$F9,$4A,$29,$96,$15,$8A,$81,
+          $9F,$E3,$4C,$40,$DE,$3C,$F0,$37,
+          $9F,$D9,$FB,$85,$B3,$E3,$63,$BA,
+          $39,$26,$A0,$E7,$D9,$60,$E3,$F4,
+          $C2,$E0,$C7,$0C,$7C,$E0,$CC,$B2,
+          $A6,$4F,$C2,$98,$69,$F6,$E7,$AB,
+          $12,$BD,$4D,$3F,$14,$FC,$E9,$43,
+          $27,$90,$27,$E7,$85,$FB,$5C,$29
+         ),
+         (
+          $C2,$9C,$39,$9E,$F3,$EE,$E8,$96,
+          $1E,$87,$56,$5C,$1C,$E2,$63,$92,
+          $5F,$C3,$D0,$CE,$26,$7D,$13,$E4,
+          $8D,$D9,$E7,$32,$EE,$67,$B0,$F6,
+          $9F,$AD,$56,$40,$1B,$0F,$10,$FC,
+          $AA,$C1,$19,$20,$10,$46,$CC,$A2,
+          $8C,$5B,$14,$AB,$DE,$A3,$21,$2A,
+          $E6,$55,$62,$F7,$F1,$38,$DB,$3D
+         ),
+         (
+          $4C,$EC,$4C,$9D,$F5,$2E,$EF,$05,
+          $C3,$F6,$FA,$AA,$97,$91,$BC,$74,
+          $45,$93,$71,$83,$22,$4E,$CC,$37,
+          $A1,$E5,$8D,$01,$32,$D3,$56,$17,
+          $53,$1D,$7E,$79,$5F,$52,$AF,$7B,
+          $1E,$B9,$D1,$47,$DE,$12,$92,$D3,
+          $45,$FE,$34,$18,$23,$F8,$E6,$BC,
+          $1E,$5B,$AD,$CA,$5C,$65,$61,$08
+         ),
+         (
+          $89,$8B,$FB,$AE,$93,$B3,$E1,$8D,
+          $00,$69,$7E,$AB,$7D,$97,$04,$FA,
+          $36,$EC,$33,$9D,$07,$61,$31,$CE,
+          $FD,$F3,$0E,$DB,$E8,$D9,$CC,$81,
+          $C3,$A8,$0B,$12,$96,$59,$B1,$63,
+          $A3,$23,$BA,$B9,$79,$3D,$4F,$EE,
+          $D9,$2D,$54,$DA,$E9,$66,$C7,$75,
+          $29,$76,$4A,$09,$BE,$88,$DB,$45
+         ),
+         (
+          $EE,$9B,$D0,$46,$9D,$3A,$AF,$4F,
+          $14,$03,$5B,$E4,$8A,$2C,$3B,$84,
+          $D9,$B4,$B1,$FF,$F1,$D9,$45,$E1,
+          $F1,$C1,$D3,$89,$80,$A9,$51,$BE,
+          $19,$7B,$25,$FE,$22,$C7,$31,$F2,
+          $0A,$EA,$CC,$93,$0B,$A9,$C4,$A1,
+          $F4,$76,$22,$27,$61,$7A,$D3,$50,
+          $FD,$AB,$B4,$E8,$02,$73,$A0,$F4
+         ),
+         (
+          $3D,$4D,$31,$13,$30,$05,$81,$CD,
+          $96,$AC,$BF,$09,$1C,$3D,$0F,$3C,
+          $31,$01,$38,$CD,$69,$79,$E6,$02,
+          $6C,$DE,$62,$3E,$2D,$D1,$B2,$4D,
+          $4A,$86,$38,$BE,$D1,$07,$33,$44,
+          $78,$3A,$D0,$64,$9C,$C6,$30,$5C,
+          $CE,$C0,$4B,$EB,$49,$F3,$1C,$63,
+          $30,$88,$A9,$9B,$65,$13,$02,$67
+         ),
+         (
+          $95,$C0,$59,$1A,$D9,$1F,$92,$1A,
+          $C7,$BE,$6D,$9C,$E3,$7E,$06,$63,
+          $ED,$80,$11,$C1,$CF,$D6,$D0,$16,
+          $2A,$55,$72,$E9,$43,$68,$BA,$C0,
+          $20,$24,$48,$5E,$6A,$39,$85,$4A,
+          $A4,$6F,$E3,$8E,$97,$D6,$C6,$B1,
+          $94,$7C,$D2,$72,$D8,$6B,$06,$BB,
+          $5B,$2F,$78,$B9,$B6,$8D,$55,$9D
+         ),
+         (
+          $22,$7B,$79,$DE,$D3,$68,$15,$3B,
+          $F4,$6C,$0A,$3C,$A9,$78,$BF,$DB,
+          $EF,$31,$F3,$02,$4A,$56,$65,$84,
+          $24,$68,$49,$0B,$0F,$F7,$48,$AE,
+          $04,$E7,$83,$2E,$D4,$C9,$F4,$9D,
+          $E9,$B1,$70,$67,$09,$D6,$23,$E5,
+          $C8,$C1,$5E,$3C,$AE,$CA,$E8,$D5,
+          $E4,$33,$43,$0F,$F7,$2F,$20,$EB
+         ),
+         (
+          $5D,$34,$F3,$95,$2F,$01,$05,$EE,
+          $F8,$8A,$E8,$B6,$4C,$6C,$E9,$5E,
+          $BF,$AD,$E0,$E0,$2C,$69,$B0,$87,
+          $62,$A8,$71,$2D,$2E,$49,$11,$AD,
+          $3F,$94,$1F,$C4,$03,$4D,$C9,$B2,
+          $E4,$79,$FD,$BC,$D2,$79,$B9,$02,
+          $FA,$F5,$D8,$38,$BB,$2E,$0C,$64,
+          $95,$D3,$72,$B5,$B7,$02,$98,$13
+         ),
+         (
+          $7F,$93,$9B,$F8,$35,$3A,$BC,$E4,
+          $9E,$77,$F1,$4F,$37,$50,$AF,$20,
+          $B7,$B0,$39,$02,$E1,$A1,$E7,$FB,
+          $6A,$AF,$76,$D0,$25,$9C,$D4,$01,
+          $A8,$31,$90,$F1,$56,$40,$E7,$4F,
+          $3E,$6C,$5A,$90,$E8,$39,$C7,$82,
+          $1F,$64,$74,$75,$7F,$75,$C7,$BF,
+          $90,$02,$08,$4D,$DC,$7A,$62,$DC
+         ),
+         (
+          $06,$2B,$61,$A2,$F9,$A3,$3A,$71,
+          $D7,$D0,$A0,$61,$19,$64,$4C,$70,
+          $B0,$71,$6A,$50,$4D,$E7,$E5,$E1,
+          $BE,$49,$BD,$7B,$86,$E7,$ED,$68,
+          $17,$71,$4F,$9F,$0F,$C3,$13,$D0,
+          $61,$29,$59,$7E,$9A,$22,$35,$EC,
+          $85,$21,$DE,$36,$F7,$29,$0A,$90,
+          $CC,$FC,$1F,$FA,$6D,$0A,$EE,$29
+         ),
+         (
+          $F2,$9E,$01,$EE,$AE,$64,$31,$1E,
+          $B7,$F1,$C6,$42,$2F,$94,$6B,$F7,
+          $BE,$A3,$63,$79,$52,$3E,$7B,$2B,
+          $BA,$BA,$7D,$1D,$34,$A2,$2D,$5E,
+          $A5,$F1,$C5,$A0,$9D,$5C,$E1,$FE,
+          $68,$2C,$CE,$D9,$A4,$79,$8D,$1A,
+          $05,$B4,$6C,$D7,$2D,$FF,$5C,$1B,
+          $35,$54,$40,$B2,$A2,$D4,$76,$BC
+         ),
+         (
+          $EC,$38,$CD,$3B,$BA,$B3,$EF,$35,
+          $D7,$CB,$6D,$5C,$91,$42,$98,$35,
+          $1D,$8A,$9D,$C9,$7F,$CE,$E0,$51,
+          $A8,$A0,$2F,$58,$E3,$ED,$61,$84,
+          $D0,$B7,$81,$0A,$56,$15,$41,$1A,
+          $B1,$B9,$52,$09,$C3,$C8,$10,$11,
+          $4F,$DE,$B2,$24,$52,$08,$4E,$77,
+          $F3,$F8,$47,$C6,$DB,$AA,$FE,$16
+         ),
+         (
+          $C2,$AE,$F5,$E0,$CA,$43,$E8,$26,
+          $41,$56,$5B,$8C,$B9,$43,$AA,$8B,
+          $A5,$35,$50,$CA,$EF,$79,$3B,$65,
+          $32,$FA,$FA,$D9,$4B,$81,$60,$82,
+          $F0,$11,$3A,$3E,$A2,$F6,$36,$08,
+          $AB,$40,$43,$7E,$CC,$0F,$02,$29,
+          $CB,$8F,$A2,$24,$DC,$F1,$C4,$78,
+          $A6,$7D,$9B,$64,$16,$2B,$92,$D1
+         ),
+         (
+          $15,$F5,$34,$EF,$FF,$71,$05,$CD,
+          $1C,$25,$4D,$07,$4E,$27,$D5,$89,
+          $8B,$89,$31,$3B,$7D,$36,$6D,$C2,
+          $D7,$D8,$71,$13,$FA,$7D,$53,$AA,
+          $E1,$3F,$6D,$BA,$48,$7A,$D8,$10,
+          $3D,$5E,$85,$4C,$91,$FD,$B6,$E1,
+          $E7,$4B,$2E,$F6,$D1,$43,$17,$69,
+          $C3,$07,$67,$DD,$E0,$67,$A3,$5C
+         ),
+         (
+          $89,$AC,$BC,$A0,$B1,$69,$89,$7A,
+          $0A,$27,$14,$C2,$DF,$8C,$95,$B5,
+          $B7,$9C,$B6,$93,$90,$14,$2B,$7D,
+          $60,$18,$BB,$3E,$30,$76,$B0,$99,
+          $B7,$9A,$96,$41,$52,$A9,$D9,$12,
+          $B1,$B8,$64,$12,$B7,$E3,$72,$E9,
+          $CE,$CA,$D7,$F2,$5D,$4C,$BA,$B8,
+          $A3,$17,$BE,$36,$49,$2A,$67,$D7
+         ),
+         (
+          $E3,$C0,$73,$91,$90,$ED,$84,$9C,
+          $9C,$96,$2F,$D9,$DB,$B5,$5E,$20,
+          $7E,$62,$4F,$CA,$C1,$EB,$41,$76,
+          $91,$51,$54,$99,$EE,$A8,$D8,$26,
+          $7B,$7E,$8F,$12,$87,$A6,$36,$33,
+          $AF,$50,$11,$FD,$E8,$C4,$DD,$F5,
+          $5B,$FD,$F7,$22,$ED,$F8,$88,$31,
+          $41,$4F,$2C,$FA,$ED,$59,$CB,$9A
+         ),
+         (
+          $8D,$6C,$F8,$7C,$08,$38,$0D,$2D,
+          $15,$06,$EE,$E4,$6F,$D4,$22,$2D,
+          $21,$D8,$C0,$4E,$58,$5F,$BF,$D0,
+          $82,$69,$C9,$8F,$70,$28,$33,$A1,
+          $56,$32,$6A,$07,$24,$65,$64,$00,
+          $EE,$09,$35,$1D,$57,$B4,$40,$17,
+          $5E,$2A,$5D,$E9,$3C,$C5,$F8,$0D,
+          $B6,$DA,$F8,$35,$76,$CF,$75,$FA
+         ),
+         (
+          $DA,$24,$BE,$DE,$38,$36,$66,$D5,
+          $63,$EE,$ED,$37,$F6,$31,$9B,$AF,
+          $20,$D5,$C7,$5D,$16,$35,$A6,$BA,
+          $5E,$F4,$CF,$A1,$AC,$95,$48,$7E,
+          $96,$F8,$C0,$8A,$F6,$00,$AA,$B8,
+          $7C,$98,$6E,$BA,$D4,$9F,$C7,$0A,
+          $58,$B4,$89,$0B,$9C,$87,$6E,$09,
+          $10,$16,$DA,$F4,$9E,$1D,$32,$2E
+         ),
+         (
+          $F9,$D1,$D1,$B1,$E8,$7E,$A7,$AE,
+          $75,$3A,$02,$97,$50,$CC,$1C,$F3,
+          $D0,$15,$7D,$41,$80,$5E,$24,$5C,
+          $56,$17,$BB,$93,$4E,$73,$2F,$0A,
+          $E3,$18,$0B,$78,$E0,$5B,$FE,$76,
+          $C7,$C3,$05,$1E,$3E,$3A,$C7,$8B,
+          $9B,$50,$C0,$51,$42,$65,$7E,$1E,
+          $03,$21,$5D,$6E,$C7,$BF,$D0,$FC
+         ),
+         (
+          $11,$B7,$BC,$16,$68,$03,$20,$48,
+          $AA,$43,$34,$3D,$E4,$76,$39,$5E,
+          $81,$4B,$BB,$C2,$23,$67,$8D,$B9,
+          $51,$A1,$B0,$3A,$02,$1E,$FA,$C9,
+          $48,$CF,$BE,$21,$5F,$97,$FE,$9A,
+          $72,$A2,$F6,$BC,$03,$9E,$39,$56,
+          $BF,$A4,$17,$C1,$A9,$F1,$0D,$6D,
+          $7B,$A5,$D3,$D3,$2F,$F3,$23,$E5
+         ),
+         (
+          $B8,$D9,$00,$0E,$4F,$C2,$B0,$66,
+          $ED,$B9,$1A,$FE,$E8,$E7,$EB,$0F,
+          $24,$E3,$A2,$01,$DB,$8B,$67,$93,
+          $C0,$60,$85,$81,$E6,$28,$ED,$0B,
+          $CC,$4E,$5A,$A6,$78,$79,$92,$A4,
+          $BC,$C4,$4E,$28,$80,$93,$E6,$3E,
+          $E8,$3A,$BD,$0B,$C3,$EC,$6D,$09,
+          $34,$A6,$74,$A4,$DA,$13,$83,$8A
+         ),
+         (
+          $CE,$32,$5E,$29,$4F,$9B,$67,$19,
+          $D6,$B6,$12,$78,$27,$6A,$E0,$6A,
+          $25,$64,$C0,$3B,$B0,$B7,$83,$FA,
+          $FE,$78,$5B,$DF,$89,$C7,$D5,$AC,
+          $D8,$3E,$78,$75,$6D,$30,$1B,$44,
+          $56,$99,$02,$4E,$AE,$B7,$7B,$54,
+          $D4,$77,$33,$6E,$C2,$A4,$F3,$32,
+          $F2,$B3,$F8,$87,$65,$DD,$B0,$C3
+         ),
+         (
+          $29,$AC,$C3,$0E,$96,$03,$AE,$2F,
+          $CC,$F9,$0B,$F9,$7E,$6C,$C4,$63,
+          $EB,$E2,$8C,$1B,$2F,$9B,$4B,$76,
+          $5E,$70,$53,$7C,$25,$C7,$02,$A2,
+          $9D,$CB,$FB,$F1,$4C,$99,$C5,$43,
+          $45,$BA,$2B,$51,$F1,$7B,$77,$B5,
+          $F1,$5D,$B9,$2B,$BA,$D8,$FA,$95,
+          $C4,$71,$F5,$D0,$70,$A1,$37,$CC
+         ),
+         (
+          $33,$79,$CB,$AA,$E5,$62,$A8,$7B,
+          $4C,$04,$25,$55,$0F,$FD,$D6,$BF,
+          $E1,$20,$3F,$0D,$66,$6C,$C7,$EA,
+          $09,$5B,$E4,$07,$A5,$DF,$E6,$1E,
+          $E9,$14,$41,$CD,$51,$54,$B3,$E5,
+          $3B,$4F,$5F,$B3,$1A,$D4,$C7,$A9,
+          $AD,$5C,$7A,$F4,$AE,$67,$9A,$A5,
+          $1A,$54,$00,$3A,$54,$CA,$6B,$2D
+         ),
+         (
+          $30,$95,$A3,$49,$D2,$45,$70,$8C,
+          $7C,$F5,$50,$11,$87,$03,$D7,$30,
+          $2C,$27,$B6,$0A,$F5,$D4,$E6,$7F,
+          $C9,$78,$F8,$A4,$E6,$09,$53,$C7,
+          $A0,$4F,$92,$FC,$F4,$1A,$EE,$64,
+          $32,$1C,$CB,$70,$7A,$89,$58,$51,
+          $55,$2B,$1E,$37,$B0,$0B,$C5,$E6,
+          $B7,$2F,$A5,$BC,$EF,$9E,$3F,$FF
+         ),
+         (
+          $07,$26,$2D,$73,$8B,$09,$32,$1F,
+          $4D,$BC,$CE,$C4,$BB,$26,$F4,$8C,
+          $B0,$F0,$ED,$24,$6C,$E0,$B3,$1B,
+          $9A,$6E,$7B,$C6,$83,$04,$9F,$1F,
+          $3E,$55,$45,$F2,$8C,$E9,$32,$DD,
+          $98,$5C,$5A,$B0,$F4,$3B,$D6,$DE,
+          $07,$70,$56,$0A,$F3,$29,$06,$5E,
+          $D2,$E4,$9D,$34,$62,$4C,$2C,$BB
+         ),
+         (
+          $B6,$40,$5E,$CA,$8E,$E3,$31,$6C,
+          $87,$06,$1C,$C6,$EC,$18,$DB,$A5,
+          $3E,$6C,$25,$0C,$63,$BA,$1F,$3B,
+          $AE,$9E,$55,$DD,$34,$98,$03,$6A,
+          $F0,$8C,$D2,$72,$AA,$24,$D7,$13,
+          $C6,$02,$0D,$77,$AB,$2F,$39,$19,
+          $AF,$1A,$32,$F3,$07,$42,$06,$18,
+          $AB,$97,$E7,$39,$53,$99,$4F,$B4
+         ),
+         (
+          $7E,$E6,$82,$F6,$31,$48,$EE,$45,
+          $F6,$E5,$31,$5D,$A8,$1E,$5C,$6E,
+          $55,$7C,$2C,$34,$64,$1F,$C5,$09,
+          $C7,$A5,$70,$10,$88,$C3,$8A,$74,
+          $75,$61,$68,$E2,$CD,$8D,$35,$1E,
+          $88,$FD,$1A,$45,$1F,$36,$0A,$01,
+          $F5,$B2,$58,$0F,$9B,$5A,$2E,$8C,
+          $FC,$13,$8F,$3D,$D5,$9A,$3F,$FC
+         ),
+         (
+          $1D,$26,$3C,$17,$9D,$6B,$26,$8F,
+          $6F,$A0,$16,$F3,$A4,$F2,$9E,$94,
+          $38,$91,$12,$5E,$D8,$59,$3C,$81,
+          $25,$60,$59,$F5,$A7,$B4,$4A,$F2,
+          $DC,$B2,$03,$0D,$17,$5C,$00,$E6,
+          $2E,$CA,$F7,$EE,$96,$68,$2A,$A0,
+          $7A,$B2,$0A,$61,$10,$24,$A2,$85,
+          $32,$B1,$C2,$5B,$86,$65,$79,$02
+         ),
+         (
+          $10,$6D,$13,$2C,$BD,$B4,$CD,$25,
+          $97,$81,$28,$46,$E2,$BC,$1B,$F7,
+          $32,$FE,$C5,$F0,$A5,$F6,$5D,$BB,
+          $39,$EC,$4E,$6D,$C6,$4A,$B2,$CE,
+          $6D,$24,$63,$0D,$0F,$15,$A8,$05,
+          $C3,$54,$00,$25,$D8,$4A,$FA,$98,
+          $E3,$67,$03,$C3,$DB,$EE,$71,$3E,
+          $72,$DD,$E8,$46,$5B,$C1,$BE,$7E
+         ),
+         (
+          $0E,$79,$96,$82,$26,$65,$06,$67,
+          $A8,$D8,$62,$EA,$8D,$A4,$89,$1A,
+          $F5,$6A,$4E,$3A,$8B,$6D,$17,$50,
+          $E3,$94,$F0,$DE,$A7,$6D,$64,$0D,
+          $85,$07,$7B,$CE,$C2,$CC,$86,$88,
+          $6E,$50,$67,$51,$B4,$F6,$A5,$83,
+          $8F,$7F,$0B,$5F,$EF,$76,$5D,$9D,
+          $C9,$0D,$CD,$CB,$AF,$07,$9F,$08
+         ),
+         (
+          $52,$11,$56,$A8,$2A,$B0,$C4,$E5,
+          $66,$E5,$84,$4D,$5E,$31,$AD,$9A,
+          $AF,$14,$4B,$BD,$5A,$46,$4F,$DC,
+          $A3,$4D,$BD,$57,$17,$E8,$FF,$71,
+          $1D,$3F,$FE,$BB,$FA,$08,$5D,$67,
+          $FE,$99,$6A,$34,$F6,$D3,$E4,$E6,
+          $0B,$13,$96,$BF,$4B,$16,$10,$C2,
+          $63,$BD,$BB,$83,$4D,$56,$08,$16
+         ),
+         (
+          $1A,$BA,$88,$BE,$FC,$55,$BC,$25,
+          $EF,$BC,$E0,$2D,$B8,$B9,$93,$3E,
+          $46,$F5,$76,$61,$BA,$EA,$BE,$B2,
+          $1C,$C2,$57,$4D,$2A,$51,$8A,$3C,
+          $BA,$5D,$C5,$A3,$8E,$49,$71,$34,
+          $40,$B2,$5F,$9C,$74,$4E,$75,$F6,
+          $B8,$5C,$9D,$8F,$46,$81,$F6,$76,
+          $16,$0F,$61,$05,$35,$7B,$84,$06
+         ),
+         (
+          $5A,$99,$49,$FC,$B2,$C4,$73,$CD,
+          $A9,$68,$AC,$1B,$5D,$08,$56,$6D,
+          $C2,$D8,$16,$D9,$60,$F5,$7E,$63,
+          $B8,$98,$FA,$70,$1C,$F8,$EB,$D3,
+          $F5,$9B,$12,$4D,$95,$BF,$BB,$ED,
+          $C5,$F1,$CF,$0E,$17,$D5,$EA,$ED,
+          $0C,$02,$C5,$0B,$69,$D8,$A4,$02,
+          $CA,$BC,$CA,$44,$33,$B5,$1F,$D4
+         ),
+         (
+          $B0,$CE,$AD,$09,$80,$7C,$67,$2A,
+          $F2,$EB,$2B,$0F,$06,$DD,$E4,$6C,
+          $F5,$37,$0E,$15,$A4,$09,$6B,$1A,
+          $7D,$7C,$BB,$36,$EC,$31,$C2,$05,
+          $FB,$EF,$CA,$00,$B7,$A4,$16,$2F,
+          $A8,$9F,$B4,$FB,$3E,$B7,$8D,$79,
+          $77,$0C,$23,$F4,$4E,$72,$06,$66,
+          $4C,$E3,$CD,$93,$1C,$29,$1E,$5D
+         ),
+         (
+          $BB,$66,$64,$93,$1E,$C9,$70,$44,
+          $E4,$5B,$2A,$E4,$20,$AE,$1C,$55,
+          $1A,$88,$74,$BC,$93,$7D,$08,$E9,
+          $69,$39,$9C,$39,$64,$EB,$DB,$A8,
+          $34,$6C,$DD,$5D,$09,$CA,$AF,$E4,
+          $C2,$8B,$A7,$EC,$78,$81,$91,$CE,
+          $CA,$65,$DD,$D6,$F9,$5F,$18,$58,
+          $3E,$04,$0D,$0F,$30,$D0,$36,$4D
+         ),
+         (
+          $65,$BC,$77,$0A,$5F,$AA,$37,$92,
+          $36,$98,$03,$68,$3E,$84,$4B,$0B,
+          $E7,$EE,$96,$F2,$9F,$6D,$6A,$35,
+          $56,$80,$06,$BD,$55,$90,$F9,$A4,
+          $EF,$63,$9B,$7A,$80,$61,$C7,$B0,
+          $42,$4B,$66,$B6,$0A,$C3,$4A,$F3,
+          $11,$99,$05,$F3,$3A,$9D,$8C,$3A,
+          $E1,$83,$82,$CA,$9B,$68,$99,$00
+         ),
+         (
+          $EA,$9B,$4D,$CA,$33,$33,$36,$AA,
+          $F8,$39,$A4,$5C,$6E,$AA,$48,$B8,
+          $CB,$4C,$7D,$DA,$BF,$FE,$A4,$F6,
+          $43,$D6,$35,$7E,$A6,$62,$8A,$48,
+          $0A,$5B,$45,$F2,$B0,$52,$C1,$B0,
+          $7D,$1F,$ED,$CA,$91,$8B,$6F,$11,
+          $39,$D8,$0F,$74,$C2,$45,$10,$DC,
+          $BA,$A4,$BE,$70,$EA,$CC,$1B,$06
+         ),
+         (
+          $E6,$34,$2F,$B4,$A7,$80,$AD,$97,
+          $5D,$0E,$24,$BC,$E1,$49,$98,$9B,
+          $91,$D3,$60,$55,$7E,$87,$99,$4F,
+          $6B,$45,$7B,$89,$55,$75,$CC,$02,
+          $D0,$C1,$5B,$AD,$3C,$E7,$57,$7F,
+          $4C,$63,$92,$7F,$F1,$3F,$3E,$38,
+          $1F,$F7,$E7,$2B,$DB,$E7,$45,$32,
+          $48,$44,$A9,$D2,$7E,$3F,$1C,$01
+         ),
+         (
+          $3E,$20,$9C,$9B,$33,$E8,$E4,$61,
+          $17,$8A,$B4,$6B,$1C,$64,$B4,$9A,
+          $07,$FB,$74,$5F,$1C,$8B,$C9,$5F,
+          $BF,$B9,$4C,$6B,$87,$C6,$95,$16,
+          $65,$1B,$26,$4E,$F9,$80,$93,$7F,
+          $AD,$41,$23,$8B,$91,$DD,$C0,$11,
+          $A5,$DD,$77,$7C,$7E,$FD,$44,$94,
+          $B4,$B6,$EC,$D3,$A9,$C2,$2A,$C0
+         ),
+         (
+          $FD,$6A,$3D,$5B,$18,$75,$D8,$04,
+          $86,$D6,$E6,$96,$94,$A5,$6D,$BB,
+          $04,$A9,$9A,$4D,$05,$1F,$15,$DB,
+          $26,$89,$77,$6B,$A1,$C4,$88,$2E,
+          $6D,$46,$2A,$60,$3B,$70,$15,$DC,
+          $9F,$4B,$74,$50,$F0,$53,$94,$30,
+          $3B,$86,$52,$CF,$B4,$04,$A2,$66,
+          $96,$2C,$41,$BA,$E6,$E1,$8A,$94
+         ),
+         (
+          $95,$1E,$27,$51,$7E,$6B,$AD,$9E,
+          $41,$95,$FC,$86,$71,$DE,$E3,$E7,
+          $E9,$BE,$69,$CE,$E1,$42,$2C,$B9,
+          $FE,$CF,$CE,$0D,$BA,$87,$5F,$7B,
+          $31,$0B,$93,$EE,$3A,$3D,$55,$8F,
+          $94,$1F,$63,$5F,$66,$8F,$F8,$32,
+          $D2,$C1,$D0,$33,$C5,$E2,$F0,$99,
+          $7E,$4C,$66,$F1,$47,$34,$4E,$02
+         ),
+         (
+          $8E,$BA,$2F,$87,$4F,$1A,$E8,$40,
+          $41,$90,$3C,$7C,$42,$53,$C8,$22,
+          $92,$53,$0F,$C8,$50,$95,$50,$BF,
+          $DC,$34,$C9,$5C,$7E,$28,$89,$D5,
+          $65,$0B,$0A,$D8,$CB,$98,$8E,$5C,
+          $48,$94,$CB,$87,$FB,$FB,$B1,$96,
+          $12,$EA,$93,$CC,$C4,$C5,$CA,$D1,
+          $71,$58,$B9,$76,$34,$64,$B4,$92
+         ),
+         (
+          $16,$F7,$12,$EA,$A1,$B7,$C6,$35,
+          $47,$19,$A8,$E7,$DB,$DF,$AF,$55,
+          $E4,$06,$3A,$4D,$27,$7D,$94,$75,
+          $50,$01,$9B,$38,$DF,$B5,$64,$83,
+          $09,$11,$05,$7D,$50,$50,$61,$36,
+          $E2,$39,$4C,$3B,$28,$94,$5C,$C9,
+          $64,$96,$7D,$54,$E3,$00,$0C,$21,
+          $81,$62,$6C,$FB,$9B,$73,$EF,$D2
+         ),
+         (
+          $C3,$96,$39,$E7,$D5,$C7,$FB,$8C,
+          $DD,$0F,$D3,$E6,$A5,$20,$96,$03,
+          $94,$37,$12,$2F,$21,$C7,$8F,$16,
+          $79,$CE,$A9,$D7,$8A,$73,$4C,$56,
+          $EC,$BE,$B2,$86,$54,$B4,$F1,$8E,
+          $34,$2C,$33,$1F,$6F,$72,$29,$EC,
+          $4B,$4B,$C2,$81,$B2,$D8,$0A,$6E,
+          $B5,$00,$43,$F3,$17,$96,$C8,$8C
+         ),
+         (
+          $72,$D0,$81,$AF,$99,$F8,$A1,$73,
+          $DC,$C9,$A0,$AC,$4E,$B3,$55,$74,
+          $05,$63,$9A,$29,$08,$4B,$54,$A4,
+          $01,$72,$91,$2A,$2F,$8A,$39,$51,
+          $29,$D5,$53,$6F,$09,$18,$E9,$02,
+          $F9,$E8,$FA,$60,$00,$99,$5F,$41,
+          $68,$DD,$C5,$F8,$93,$01,$1B,$E6,
+          $A0,$DB,$C9,$B8,$A1,$A3,$F5,$BB
+         ),
+         (
+          $C1,$1A,$A8,$1E,$5E,$FD,$24,$D5,
+          $FC,$27,$EE,$58,$6C,$FD,$88,$47,
+          $FB,$B0,$E2,$76,$01,$CC,$EC,$E5,
+          $EC,$CA,$01,$98,$E3,$C7,$76,$53,
+          $93,$BB,$74,$45,$7C,$7E,$7A,$27,
+          $EB,$91,$70,$35,$0E,$1F,$B5,$38,
+          $57,$17,$75,$06,$BE,$3E,$76,$2C,
+          $C0,$F1,$4D,$8C,$3A,$FE,$90,$77
+         ),
+         (
+          $C2,$8F,$21,$50,$B4,$52,$E6,$C0,
+          $C4,$24,$BC,$DE,$6F,$8D,$72,$00,
+          $7F,$93,$10,$FE,$D7,$F2,$F8,$7D,
+          $E0,$DB,$B6,$4F,$44,$79,$D6,$C1,
+          $44,$1B,$A6,$6F,$44,$B2,$AC,$CE,
+          $E6,$16,$09,$17,$7E,$D3,$40,$12,
+          $8B,$40,$7E,$CE,$C7,$C6,$4B,$BE,
+          $50,$D6,$3D,$22,$D8,$62,$77,$27
+         ),
+         (
+          $F6,$3D,$88,$12,$28,$77,$EC,$30,
+          $B8,$C8,$B0,$0D,$22,$E8,$90,$00,
+          $A9,$66,$42,$61,$12,$BD,$44,$16,
+          $6E,$2F,$52,$5B,$76,$9C,$CB,$E9,
+          $B2,$86,$D4,$37,$A0,$12,$91,$30,
+          $DD,$E1,$A8,$6C,$43,$E0,$4B,$ED,
+          $B5,$94,$E6,$71,$D9,$82,$83,$AF,
+          $E6,$4C,$E3,$31,$DE,$98,$28,$FD
+         ),
+         (
+          $34,$8B,$05,$32,$88,$0B,$88,$A6,
+          $61,$4A,$8D,$74,$08,$C3,$F9,$13,
+          $35,$7F,$BB,$60,$E9,$95,$C6,$02,
+          $05,$BE,$91,$39,$E7,$49,$98,$AE,
+          $DE,$7F,$45,$81,$E4,$2F,$6B,$52,
+          $69,$8F,$7F,$A1,$21,$97,$08,$C1,
+          $44,$98,$06,$7F,$D1,$E0,$95,$02,
+          $DE,$83,$A7,$7D,$D2,$81,$15,$0C
+         ),
+         (
+          $51,$33,$DC,$8B,$EF,$72,$53,$59,
+          $DF,$F5,$97,$92,$D8,$5E,$AF,$75,
+          $B7,$E1,$DC,$D1,$97,$8B,$01,$C3,
+          $5B,$1B,$85,$FC,$EB,$C6,$33,$88,
+          $AD,$99,$A1,$7B,$63,$46,$A2,$17,
+          $DC,$1A,$96,$22,$EB,$D1,$22,$EC,
+          $F6,$91,$3C,$4D,$31,$A6,$B5,$2A,
+          $69,$5B,$86,$AF,$00,$D7,$41,$A0
+         ),
+         (
+          $27,$53,$C4,$C0,$E9,$8E,$CA,$D8,
+          $06,$E8,$87,$80,$EC,$27,$FC,$CD,
+          $0F,$5C,$1A,$B5,$47,$F9,$E4,$BF,
+          $16,$59,$D1,$92,$C2,$3A,$A2,$CC,
+          $97,$1B,$58,$B6,$80,$25,$80,$BA,
+          $EF,$8A,$DC,$3B,$77,$6E,$F7,$08,
+          $6B,$25,$45,$C2,$98,$7F,$34,$8E,
+          $E3,$71,$9C,$DE,$F2,$58,$C4,$03
+         ),
+         (
+          $B1,$66,$35,$73,$CE,$4B,$9D,$8C,
+          $AE,$FC,$86,$50,$12,$F3,$E3,$97,
+          $14,$B9,$89,$8A,$5D,$A6,$CE,$17,
+          $C2,$5A,$6A,$47,$93,$1A,$9D,$DB,
+          $9B,$BE,$98,$AD,$AA,$55,$3B,$EE,
+          $D4,$36,$E8,$95,$78,$45,$54,$16,
+          $C2,$A5,$2A,$52,$5C,$F2,$86,$2B,
+          $8D,$1D,$49,$A2,$53,$1B,$73,$91
+         ),
+         (
+          $64,$F5,$8B,$D6,$BF,$C8,$56,$F5,
+          $E8,$73,$B2,$A2,$95,$6E,$A0,$ED,
+          $A0,$D6,$DB,$0D,$A3,$9C,$8C,$7F,
+          $C6,$7C,$9F,$9F,$EE,$FC,$FF,$30,
+          $72,$CD,$F9,$E6,$EA,$37,$F6,$9A,
+          $44,$F0,$C6,$1A,$A0,$DA,$36,$93,
+          $C2,$DB,$5B,$54,$96,$0C,$02,$81,
+          $A0,$88,$15,$1D,$B4,$2B,$11,$E8
+         ),
+         (
+          $07,$64,$C7,$BE,$28,$12,$5D,$90,
+          $65,$C4,$B9,$8A,$69,$D6,$0A,$ED,
+          $E7,$03,$54,$7C,$66,$A1,$2E,$17,
+          $E1,$C6,$18,$99,$41,$32,$F5,$EF,
+          $82,$48,$2C,$1E,$3F,$E3,$14,$6C,
+          $C6,$53,$76,$CC,$10,$9F,$01,$38,
+          $ED,$9A,$80,$E4,$9F,$1F,$3C,$7D,
+          $61,$0D,$2F,$24,$32,$F2,$06,$05
+         ),
+         (
+          $F7,$48,$78,$43,$98,$A2,$FF,$03,
+          $EB,$EB,$07,$E1,$55,$E6,$61,$16,
+          $A8,$39,$74,$1A,$33,$6E,$32,$DA,
+          $71,$EC,$69,$60,$01,$F0,$AD,$1B,
+          $25,$CD,$48,$C6,$9C,$FC,$A7,$26,
+          $5E,$CA,$1D,$D7,$19,$04,$A0,$CE,
+          $74,$8A,$C4,$12,$4F,$35,$71,$07,
+          $6D,$FA,$71,$16,$A9,$CF,$00,$E9
+         ),
+         (
+          $3F,$0D,$BC,$01,$86,$BC,$EB,$6B,
+          $78,$5B,$A7,$8D,$2A,$2A,$01,$3C,
+          $91,$0B,$E1,$57,$BD,$AF,$FA,$E8,
+          $1B,$B6,$66,$3B,$1A,$73,$72,$2F,
+          $7F,$12,$28,$79,$5F,$3E,$CA,$DA,
+          $87,$CF,$6E,$F0,$07,$84,$74,$AF,
+          $73,$F3,$1E,$CA,$0C,$C2,$00,$ED,
+          $97,$5B,$68,$93,$F7,$61,$CB,$6D
+         ),
+         (
+          $D4,$76,$2C,$D4,$59,$98,$76,$CA,
+          $75,$B2,$B8,$FE,$24,$99,$44,$DB,
+          $D2,$7A,$CE,$74,$1F,$DA,$B9,$36,
+          $16,$CB,$C6,$E4,$25,$46,$0F,$EB,
+          $51,$D4,$E7,$AD,$CC,$38,$18,$0E,
+          $7F,$C4,$7C,$89,$02,$4A,$7F,$56,
+          $19,$1A,$DB,$87,$8D,$FD,$E4,$EA,
+          $D6,$22,$23,$F5,$A2,$61,$0E,$FE
+         ),
+         (
+          $CD,$36,$B3,$D5,$B4,$C9,$1B,$90,
+          $FC,$BB,$A7,$95,$13,$CF,$EE,$19,
+          $07,$D8,$64,$5A,$16,$2A,$FD,$0C,
+          $D4,$CF,$41,$92,$D4,$A5,$F4,$C8,
+          $92,$18,$3A,$8E,$AC,$DB,$2B,$6B,
+          $6A,$9D,$9A,$A8,$C1,$1A,$C1,$B2,
+          $61,$B3,$80,$DB,$EE,$24,$CA,$46,
+          $8F,$1B,$FD,$04,$3C,$58,$EE,$FE
+         ),
+         (
+          $98,$59,$34,$52,$28,$16,$61,$A5,
+          $3C,$48,$A9,$D8,$CD,$79,$08,$26,
+          $C1,$A1,$CE,$56,$77,$38,$05,$3D,
+          $0B,$EE,$4A,$91,$A3,$D5,$BD,$92,
+          $EE,$FD,$BA,$BE,$BE,$32,$04,$F2,
+          $03,$1C,$A5,$F7,$81,$BD,$A9,$9E,
+          $F5,$D8,$AE,$56,$E5,$B0,$4A,$9E,
+          $1E,$CD,$21,$B0,$EB,$05,$D3,$E1
+         ),
+         (
+          $77,$1F,$57,$DD,$27,$75,$CC,$DA,
+          $B5,$59,$21,$D3,$E8,$E3,$0C,$CF,
+          $48,$4D,$61,$FE,$1C,$1B,$9C,$2A,
+          $E8,$19,$D0,$FB,$2A,$12,$FA,$B9,
+          $BE,$70,$C4,$A7,$A1,$38,$DA,$84,
+          $E8,$28,$04,$35,$DA,$AD,$E5,$BB,
+          $E6,$6A,$F0,$83,$6A,$15,$4F,$81,
+          $7F,$B1,$7F,$33,$97,$E7,$25,$A3
+         ),
+         (
+          $C6,$08,$97,$C6,$F8,$28,$E2,$1F,
+          $16,$FB,$B5,$F1,$5B,$32,$3F,$87,
+          $B6,$C8,$95,$5E,$AB,$F1,$D3,$80,
+          $61,$F7,$07,$F6,$08,$AB,$DD,$99,
+          $3F,$AC,$30,$70,$63,$3E,$28,$6C,
+          $F8,$33,$9C,$E2,$95,$DD,$35,$2D,
+          $F4,$B4,$B4,$0B,$2F,$29,$DA,$1D,
+          $D5,$0B,$3A,$05,$D0,$79,$E6,$BB
+         ),
+         (
+          $82,$10,$CD,$2C,$2D,$3B,$13,$5C,
+          $2C,$F0,$7F,$A0,$D1,$43,$3C,$D7,
+          $71,$F3,$25,$D0,$75,$C6,$46,$9D,
+          $9C,$7F,$1B,$A0,$94,$3C,$D4,$AB,
+          $09,$80,$8C,$AB,$F4,$AC,$B9,$CE,
+          $5B,$B8,$8B,$49,$89,$29,$B4,$B8,
+          $47,$F6,$81,$AD,$2C,$49,$0D,$04,
+          $2D,$B2,$AE,$C9,$42,$14,$B0,$6B
+         ),
+         (
+          $1D,$4E,$DF,$FF,$D8,$FD,$80,$F7,
+          $E4,$10,$78,$40,$FA,$3A,$A3,$1E,
+          $32,$59,$84,$91,$E4,$AF,$70,$13,
+          $C1,$97,$A6,$5B,$7F,$36,$DD,$3A,
+          $C4,$B4,$78,$45,$61,$11,$CD,$43,
+          $09,$D9,$24,$35,$10,$78,$2F,$A3,
+          $1B,$7C,$4C,$95,$FA,$95,$15,$20,
+          $D0,$20,$EB,$7E,$5C,$36,$E4,$EF
+         ),
+         (
+          $AF,$8E,$6E,$91,$FA,$B4,$6C,$E4,
+          $87,$3E,$1A,$50,$A8,$EF,$44,$8C,
+          $C2,$91,$21,$F7,$F7,$4D,$EE,$F3,
+          $4A,$71,$EF,$89,$CC,$00,$D9,$27,
+          $4B,$C6,$C2,$45,$4B,$BB,$32,$30,
+          $D8,$B2,$EC,$94,$C6,$2B,$1D,$EC,
+          $85,$F3,$59,$3B,$FA,$30,$EA,$6F,
+          $7A,$44,$D7,$C0,$94,$65,$A2,$53
+         ),
+         (
+          $29,$FD,$38,$4E,$D4,$90,$6F,$2D,
+          $13,$AA,$9F,$E7,$AF,$90,$59,$90,
+          $93,$8B,$ED,$80,$7F,$18,$32,$45,
+          $4A,$37,$2A,$B4,$12,$EE,$A1,$F5,
+          $62,$5A,$1F,$CC,$9A,$C8,$34,$3B,
+          $7C,$67,$C5,$AB,$A6,$E0,$B1,$CC,
+          $46,$44,$65,$49,$13,$69,$2C,$6B,
+          $39,$EB,$91,$87,$CE,$AC,$D3,$EC
+         ),
+         (
+          $A2,$68,$C7,$88,$5D,$98,$74,$A5,
+          $1C,$44,$DF,$FE,$D8,$EA,$53,$E9,
+          $4F,$78,$45,$6E,$0B,$2E,$D9,$9F,
+          $F5,$A3,$92,$47,$60,$81,$38,$26,
+          $D9,$60,$A1,$5E,$DB,$ED,$BB,$5D,
+          $E5,$22,$6B,$A4,$B0,$74,$E7,$1B,
+          $05,$C5,$5B,$97,$56,$BB,$79,$E5,
+          $5C,$02,$75,$4C,$2C,$7B,$6C,$8A
+         ),
+         (
+          $0C,$F8,$54,$54,$88,$D5,$6A,$86,
+          $81,$7C,$D7,$EC,$B1,$0F,$71,$16,
+          $B7,$EA,$53,$0A,$45,$B6,$EA,$49,
+          $7B,$6C,$72,$C9,$97,$E0,$9E,$3D,
+          $0D,$A8,$69,$8F,$46,$BB,$00,$6F,
+          $C9,$77,$C2,$CD,$3D,$11,$77,$46,
+          $3A,$C9,$05,$7F,$DD,$16,$62,$C8,
+          $5D,$0C,$12,$64,$43,$C1,$04,$73
+         ),
+         (
+          $B3,$96,$14,$26,$8F,$DD,$87,$81,
+          $51,$5E,$2C,$FE,$BF,$89,$B4,$D5,
+          $40,$2B,$AB,$10,$C2,$26,$E6,$34,
+          $4E,$6B,$9A,$E0,$00,$FB,$0D,$6C,
+          $79,$CB,$2F,$3E,$C8,$0E,$80,$EA,
+          $EB,$19,$80,$D2,$F8,$69,$89,$16,
+          $BD,$2E,$9F,$74,$72,$36,$65,$51,
+          $16,$64,$9C,$D3,$CA,$23,$A8,$37
+         ),
+         (
+          $74,$BE,$F0,$92,$FC,$6F,$1E,$5D,
+          $BA,$36,$63,$A3,$FB,$00,$3B,$2A,
+          $5B,$A2,$57,$49,$65,$36,$D9,$9F,
+          $62,$B9,$D7,$3F,$8F,$9E,$B3,$CE,
+          $9F,$F3,$EE,$C7,$09,$EB,$88,$36,
+          $55,$EC,$9E,$B8,$96,$B9,$12,$8F,
+          $2A,$FC,$89,$CF,$7D,$1A,$B5,$8A,
+          $72,$F4,$A3,$BF,$03,$4D,$2B,$4A
+         ),
+         (
+          $3A,$98,$8D,$38,$D7,$56,$11,$F3,
+          $EF,$38,$B8,$77,$49,$80,$B3,$3E,
+          $57,$3B,$6C,$57,$BE,$E0,$46,$9B,
+          $A5,$EE,$D9,$B4,$4F,$29,$94,$5E,
+          $73,$47,$96,$7F,$BA,$2C,$16,$2E,
+          $1C,$3B,$E7,$F3,$10,$F2,$F7,$5E,
+          $E2,$38,$1E,$7B,$FD,$6B,$3F,$0B,
+          $AE,$A8,$D9,$5D,$FB,$1D,$AF,$B1
+         ),
+         (
+          $58,$AE,$DF,$CE,$6F,$67,$DD,$C8,
+          $5A,$28,$C9,$92,$F1,$C0,$BD,$09,
+          $69,$F0,$41,$E6,$6F,$1E,$E8,$80,
+          $20,$A1,$25,$CB,$FC,$FE,$BC,$D6,
+          $17,$09,$C9,$C4,$EB,$A1,$92,$C1,
+          $5E,$69,$F0,$20,$D4,$62,$48,$60,
+          $19,$FA,$8D,$EA,$0C,$D7,$A4,$29,
+          $21,$A1,$9D,$2F,$E5,$46,$D4,$3D
+         ),
+         (
+          $93,$47,$BD,$29,$14,$73,$E6,$B4,
+          $E3,$68,$43,$7B,$8E,$56,$1E,$06,
+          $5F,$64,$9A,$6D,$8A,$DA,$47,$9A,
+          $D0,$9B,$19,$99,$A8,$F2,$6B,$91,
+          $CF,$61,$20,$FD,$3B,$FE,$01,$4E,
+          $83,$F2,$3A,$CF,$A4,$C0,$AD,$7B,
+          $37,$12,$B2,$C3,$C0,$73,$32,$70,
+          $66,$31,$12,$CC,$D9,$28,$5C,$D9
+         ),
+         (
+          $B3,$21,$63,$E7,$C5,$DB,$B5,$F5,
+          $1F,$DC,$11,$D2,$EA,$C8,$75,$EF,
+          $BB,$CB,$7E,$76,$99,$09,$0A,$7E,
+          $7F,$F8,$A8,$D5,$07,$95,$AF,$5D,
+          $74,$D9,$FF,$98,$54,$3E,$F8,$CD,
+          $F8,$9A,$C1,$3D,$04,$85,$27,$87,
+          $56,$E0,$EF,$00,$C8,$17,$74,$56,
+          $61,$E1,$D5,$9F,$E3,$8E,$75,$37
+         ),
+         (
+          $10,$85,$D7,$83,$07,$B1,$C4,$B0,
+          $08,$C5,$7A,$2E,$7E,$5B,$23,$46,
+          $58,$A0,$A8,$2E,$4F,$F1,$E4,$AA,
+          $AC,$72,$B3,$12,$FD,$A0,$FE,$27,
+          $D2,$33,$BC,$5B,$10,$E9,$CC,$17,
+          $FD,$C7,$69,$7B,$54,$0C,$7D,$95,
+          $EB,$21,$5A,$19,$A1,$A0,$E2,$0E,
+          $1A,$BF,$A1,$26,$EF,$D5,$68,$C7
+         ),
+         (
+          $4E,$5C,$73,$4C,$7D,$DE,$01,$1D,
+          $83,$EA,$C2,$B7,$34,$7B,$37,$35,
+          $94,$F9,$2D,$70,$91,$B9,$CA,$34,
+          $CB,$9C,$6F,$39,$BD,$F5,$A8,$D2,
+          $F1,$34,$37,$9E,$16,$D8,$22,$F6,
+          $52,$21,$70,$CC,$F2,$DD,$D5,$5C,
+          $84,$B9,$E6,$C6,$4F,$C9,$27,$AC,
+          $4C,$F8,$DF,$B2,$A1,$77,$01,$F2
+         ),
+         (
+          $69,$5D,$83,$BD,$99,$0A,$11,$17,
+          $B3,$D0,$CE,$06,$CC,$88,$80,$27,
+          $D1,$2A,$05,$4C,$26,$77,$FD,$82,
+          $F0,$D4,$FB,$FC,$93,$57,$55,$23,
+          $E7,$99,$1A,$5E,$35,$A3,$75,$2E,
+          $9B,$70,$CE,$62,$99,$2E,$26,$8A,
+          $87,$77,$44,$CD,$D4,$35,$F5,$F1,
+          $30,$86,$9C,$9A,$20,$74,$B3,$38
+         ),
+         (
+          $A6,$21,$37,$43,$56,$8E,$3B,$31,
+          $58,$B9,$18,$43,$01,$F3,$69,$08,
+          $47,$55,$4C,$68,$45,$7C,$B4,$0F,
+          $C9,$A4,$B8,$CF,$D8,$D4,$A1,$18,
+          $C3,$01,$A0,$77,$37,$AE,$DA,$0F,
+          $92,$9C,$68,$91,$3C,$5F,$51,$C8,
+          $03,$94,$F5,$3B,$FF,$1C,$3E,$83,
+          $B2,$E4,$0C,$A9,$7E,$BA,$9E,$15
+         ),
+         (
+          $D4,$44,$BF,$A2,$36,$2A,$96,$DF,
+          $21,$3D,$07,$0E,$33,$FA,$84,$1F,
+          $51,$33,$4E,$4E,$76,$86,$6B,$81,
+          $39,$E8,$AF,$3B,$B3,$39,$8B,$E2,
+          $DF,$AD,$DC,$BC,$56,$B9,$14,$6D,
+          $E9,$F6,$81,$18,$DC,$58,$29,$E7,
+          $4B,$0C,$28,$D7,$71,$19,$07,$B1,
+          $21,$F9,$16,$1C,$B9,$2B,$69,$A9
+         ),
+         (
+          $14,$27,$09,$D6,$2E,$28,$FC,$CC,
+          $D0,$AF,$97,$FA,$D0,$F8,$46,$5B,
+          $97,$1E,$82,$20,$1D,$C5,$10,$70,
+          $FA,$A0,$37,$2A,$A4,$3E,$92,$48,
+          $4B,$E1,$C1,$E7,$3B,$A1,$09,$06,
+          $D5,$D1,$85,$3D,$B6,$A4,$10,$6E,
+          $0A,$7B,$F9,$80,$0D,$37,$3D,$6D,
+          $EE,$2D,$46,$D6,$2E,$F2,$A4,$61
+         )
+        );
+ var Index:TRNLSizeInt;
+     Key:TRNLBLAKE2BKey;
+     Hash:TRNLBLAKE2BHash;
+     Buf:array[0..BLAKE2_KAT_LENGTH-1] of UInt8;
+ begin
+  for Index:=0 to TRNLBLAKE2BContext.BLAKE2B_KEYBYTES-1 do begin
+   Key[Index]:=Index;
+  end;
+  for Index:=0 to BLAKE2_KAT_LENGTH-1 do begin
+   Buf[Index]:=Index;
+  end;
+  for Index:=0 to BLAKE2_KAT_LENGTH-1 do begin
+   write('[BLAKE2B] Testing offical vector #',Index,' ... ');
+   TRNLBLAKE2B.Process(Hash,Buf,Index,TRNLBLAKE2BContext.BLAKE2B_OUTBYTES,@Key,TRNLBLAKE2BContext.BLAKE2B_KEYBYTES);
+   if TRNLMemory.SecureIsEqual(Hash,BLAKB2B_KEYED_KAT[Index],SizeOf(TRNLBLAKE2BHash)) then begin
+    writeln('OK!');
+   end else begin
+    writeln('FAILED!');
+   end;
+  end;
+ end;
+type TTestVector=record
+      Data:TRNLRawByteString;
+      Key:TRNLRawByteString;
+      Hash:TRNLRawByteString;
+     end;
+     PTestVector=^TTestVector;
+const TestVectors:array[0..7] of TTestVector=
+       (
+        (Data:'';Key:'';Hash:'786a02f742015903c6c6fd852552d272912f4740e15847618a86e217f71f5419d25e1031afee585313896444934eb04b903a685b1448b755d56f701afe9be2ce'),
+        (Data:'Hallo';Key:'';Hash:'6c834952e7478042b5edc6af7f8e50cbf30938122ae60d08ff7807c2ddd71a56256ea21b4410e2ed65f314df41a5d9937bc25bf0843c4ee3922a5620de9cf417'),
+        (Data:'Hello world';Key:'';Hash:'6ff843ba685842aa82031d3f53c48b66326df7639a63d128974c5c14f31a0f33343a8c65551134ed1ae0f2b0dd2bb495dc81039e3eeb0aa1bb0388bbeac29183'),
+        (Data:'';Key:'test';Hash:'af007b40b85039c1ac7ca29c4a484e3a614a9fead502fdf5693733ec52d768bc8915b3700a04ae607866141eda16322c9b85b433ccc09f9abd2825c4c23b4f31'),
+        (Data:'Hallo';Key:'test';Hash:'2b6641a65091fda18d2a9876cd2aec933e7bd70d2668d93c15c9b34363e09399eb6cdaafe94ceceb1d47b457d71a331b24c65ef3a9ef5283fe55d44363fcd5ba'),
+        (Data:'Hello world';Key:'test';Hash:'56f5d8250e65acd4da3c3025a514219f5c65f63ef8c4298dcf1336932fe3e1f70d17c430b22d1895499003d8a9155043d4fab1a4766c3a8fbd0a87032dc8c87d'),
+        (Data:'abcdefghbcdefghicdefghijdefghijkefghijklfghijklmghijklmnhijklmnoijklmnopjklmnopqklmnopqrlmnopqrsmnopqrstnopqrstu';Key:'';Hash:'ce741ac5930fe346811175c5227bb7bfcd47f42612fae46c0809514f9e0e3a11ee1773287147cdeaeedff50709aa716341fe65240f4ad6777d6bfaf9726e5e52'),
+        (Data:'The quick brown fox jumps over the lazy dog';Key:'';Hash:'a8add4bdddfd93e4877d2746e62817b116364a1fa7bc148d95090bc7333b3673f82401cf7aa2e4cb1ecd90296e3f14cb5413f8ed77be73045b13914cdcd6a918')
+       );
+var Index,DataLen,KeyLen,HashLen,HashIndex:TRNLSizeInt;
+    TestVector:PTestVector;
+    Hash,RefHash:TRNLBLAKE2BHash;
+    Data,Key:pointer;
+begin
+
+ RFC7693Test;
+
+ OfficalTest;
+
+ for Index:=Low(TestVectors) to High(TestVectors) do begin
+  TestVector:=@TestVectors[Index];
+  DataLen:=length(TestVector^.Data);
+  KeyLen:=length(TestVector^.Key);
+  if DataLen>0 then begin
+   Data:=@TestVector^.Data[1];
+  end else begin
+   Data:=nil;
+  end;
+  if KeyLen>0 then begin
+   Key:=@TestVector^.Key[1];
+  end else begin
+   Key:=nil;
+  end;
+  HashLen:=length(TestVector^.Hash) shr 1;
+  write('[BLAKE2B] Testing additional test vector #',Index,' ... ');
+  FillChar(Hash,SizeOf(TRNLBLAKE2BHash),#0);
+  if TRNLBLAKE2B.Process(Hash,Data^,DataLen,HashLen,Key,KeyLen) then begin
+   FillChar(RefHash,SizeOf(TRNLBLAKE2BHash),#0);
+   for HashIndex:=0 to HashLen-1 do begin
+    RefHash[HashIndex]:=StrToInt('$'+Copy(TestVector^.Hash,(HashIndex shl 1)+1,2));
+   end;
+   if TRNLMemory.SecureIsEqual(Hash,RefHash,HashLen) then begin
+    writeln('OK!');
+   end else begin
+    writeln('FAILED!');
+   end;
+  end else begin
+   writeln('FAILED!');
+  end;
+ end;
+end;
+
 class procedure TRNLED25519.ModL(out aR;const aX);
 const L:array[0..31] of TRNLInt64=
        (
@@ -7694,7 +11474,7 @@ begin
 
  // Constructs the "random" nonce from the secret key and message.
  // An actual random number would work just fine, and would save us
- // the trouble of hashing the message twice.  If we did that
+ // the trouble of hashing the message twice. If we did that
  // however, the user could fuck it up and reuse the nonce.
  Hash.Initialize;
  Hash.Update(Prefix^,32);
@@ -7746,6 +11526,11 @@ begin
 end;
 
 class procedure TRNLED25519.SelfTest;
+{$ifdef RNLUseBLAKE2B}
+begin
+ // TODO
+end;
+{$else}
 const PrivateKey0:array[0..31] of TRNLUInt8=
        (
         $9d,$61,$b1,$9d,$ef,$fd,$5a,$60,
@@ -7862,6 +11647,7 @@ begin
  end;
 
 end;
+{$endif}
 
 function TRNLChaCha20Context.GetCounter:TRNLUInt64;
 begin
@@ -8670,6 +12456,7 @@ begin
 end;
 
 procedure TRNLObjectList<T>.Insert(const pIndex:TRNLSizeInt;const pItem:T);
+var a,b:pointer;
 begin
  if pIndex>=0 then begin
   if pIndex<fCount then begin
@@ -8678,7 +12465,9 @@ begin
     fAllocated:=fCount shl 1;
     SetLength(fItems,fAllocated);
    end;
-   Move(fItems[pIndex],fItems[pIndex+1],(fCount-(pIndex+1))*SizeOf(T));
+   a:=@fItems[pIndex];
+   b:=@fItems[pIndex+1];
+   Move(a^,b^,(fCount-(pIndex+1))*SizeOf(T));
    FillChar(fItems[pIndex],SizeOf(T),#0);
   end else begin
    fCount:=pIndex+1;
@@ -8692,6 +12481,7 @@ begin
 end;
 
 procedure TRNLObjectList<T>.Delete(const pIndex:TRNLSizeInt);
+var a,b:pointer;
 begin
  if (pIndex<0) or (pIndex>=fCount) then begin
   raise ERangeError.Create('Out of index range');
@@ -8700,7 +12490,9 @@ begin
   FreeAndNil(fItems[pIndex]);
  end;
  pointer(fItems[pIndex]):=nil;
- Move(fItems[pIndex+1],fItems[pIndex],(fCount-pIndex)*SizeOf(T));
+ a:=@fItems[pIndex+1];
+ b:=@fItems[pIndex];
+ Move(a^,b^,(fCount-pIndex)*SizeOf(T));
  dec(fCount);
  FillChar(fItems[fCount],SizeOf(T),#0);
  if fCount<(fAllocated shr 1) then begin
@@ -9857,14 +13649,12 @@ type TInAddr=record
       iErrorCode:array[0..FD_MAX_EVENTS-1] of TRNLInt32;
      end;
 
-     TGetTickCount64=function:TRNLUInt64; stdcall;
 
      TQueryUnbiasedInterruptTime=function(var lpUnbiasedInterruptTime:TRNLUInt64):bool; stdcall;
 
 const GetAddrInfo:TGetAddrInfo=nil;
       FreeAddrInfo:TFreeAddrInfo=nil;
       GetNameInfo:TGetNameInfo=nil;
-      GetTickCount64:TGetTickCount64=nil;
       QueryUnbiasedInterruptTime:TQueryUnbiasedInterruptTime=nil;
 
       WinSock2LibHandle:THandle=0;
@@ -9872,6 +13662,8 @@ const GetAddrInfo:TGetAddrInfo=nil;
 
       QueryPerformanceFrequencyBase:TRNLUInt64=0;
       QueryPerformanceFrequencyShift:TRNLInt32=0;
+
+function GetTickCount64:TRNLUInt64; stdcall; external 'kernel32.dll' name 'GetTickCount64';
 
 function WSAStartup(wVersionRequired:TRNLUInt16;var WSData:TWSAData):TRNLInt32; stdcall; external 'ws2_32.dll' name 'WSAStartup';
 function WSACleanup:TRNLInt32; stdcall; external 'ws2_32.dll' name 'WSACleanup';
@@ -9924,7 +13716,6 @@ begin
   WSACleanup;
   raise ERNLInstance.Create('Incompatible system version');
  end;
- GetTickCount64:=GetProcAddress(Kernel32LibHandle,PAnsiChar(AnsiString('GetTickCount64')));
  QueryUnbiasedInterruptTime:=GetProcAddress(Kernel32LibHandle,PAnsiChar(AnsiString('QueryUnbiasedInterruptTime')));
  if QueryPerformanceFrequency(QueryPerformanceFrequencyBase) then begin
   if QueryPerformanceFrequencyBase=1000 then begin
@@ -9954,10 +13745,9 @@ begin
   result:=result div 10000;
  end else if (QueryPerformanceFrequencyBase<>0) and QueryPerformanceCounter(TRNLUInt64(result.fValue)) then begin
   result:=(((result.fValue shr QueryPerformanceFrequencyShift)*1000) div QueryPerformanceFrequencyBase)-fTimeBase;
- end else if assigned(GetTickCount64) then begin
-  result:=GetTickCount64-fTimeBase;
  end else begin
-  result:=timeGetTime-fTimeBase;
+  result:=GetTickCount64-fTimeBase;
+//result:=timeGetTime-fTimeBase;
  end;
 end;
 
@@ -20779,9 +24569,15 @@ begin
  Peer.fConnectionChallengeResponse^:=aIncomingPacket^.Challenge;
 
  for Index:=1 to TRNLEndianness.LittleEndianToHost16(aIncomingPacket^.CountChallengeRepetitions) do begin
+{$ifdef RNLUseBLAKE2B}
+  TRNLBLAKE2B.Process(Peer.fConnectionChallengeResponse^,
+                      Peer.fConnectionChallengeResponse^,
+                      SizeOf(TRNLConnectionChallenge));
+{$else}
   TRNLSHA512.Process(Peer.fConnectionChallengeResponse^,
                      Peer.fConnectionChallengeResponse^,
                      SizeOf(TRNLConnectionChallenge));
+{$endif}
  end;
 
  Peer.fConnectionNonce:=PRNLUInt64(TRNLPointer(Peer.fConnectionChallengeResponse))^;
@@ -20856,9 +24652,15 @@ begin
   ConnectionCandidate^.fData^.fSolvedChallenge:=ConnectionCandidate^.fData^.fChallenge;
 
   for Index:=1 to ConnectionCandidate^.fData^.fCountChallengeRepetitions do begin
+{$ifdef RNLUseBLAKE2B}
+   TRNLBLAKE2B.Process(ConnectionCandidate^.fData^.fSolvedChallenge,
+                       ConnectionCandidate^.fData^.fSolvedChallenge,
+                       SizeOf(TRNLConnectionChallenge));
+{$else}
    TRNLSHA512.Process(ConnectionCandidate^.fData^.fSolvedChallenge,
                       ConnectionCandidate^.fData^.fSolvedChallenge,
                       SizeOf(TRNLConnectionChallenge));
+{$endif}
   end;
 
   ChallengeResult:=0;
