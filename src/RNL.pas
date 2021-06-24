@@ -490,7 +490,7 @@ uses {$if defined(Posix)}
 {    Generics.Defaults,
      Generics.Collections;}
 
-const RNL_VERSION='1.00.2021.05.25.21.39.0000';
+const RNL_VERSION='1.00.2021.06.24.18.13.0000';
 
 type PPRNLInt8=^PRNLInt8;
      PRNLInt8=^TRNLInt8;
@@ -1283,7 +1283,7 @@ type PRNLVersion=^TRNLVersion;
 {$ifend}
        procedure Compress(const aLast:boolean);
       public
-       function Initialize(const aOutLen:TRNLSizeInt=BLAKE2B_OUTBYTES;const aKey:Pointer=nil;const aKeyLen:TRNLSizeInt=TRNLBLAKE2BContext.BLAKE2B_KEYBYTES):boolean;
+       function Initialize(const aOutLen:TRNLSizeInt=BLAKE2B_OUTBYTES;const aKey:Pointer=nil;const aKeyLen:TRNLSizeInt=64):boolean;
        procedure Update(const aMessage;const aMessageSize:TRNLSizeUInt);
        procedure Finalize(out aHash);
      end;
