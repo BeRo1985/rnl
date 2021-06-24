@@ -490,7 +490,7 @@ uses {$if defined(Posix)}
 {    Generics.Defaults,
      Generics.Collections;}
 
-const RNL_VERSION='1.00.2021.06.24.18.13.0000';
+const RNL_VERSION='1.00.2021.06.24.18.22.0000';
 
 type PPRNLInt8=^PRNLInt8;
      PRNLInt8=^TRNLInt8;
@@ -16575,7 +16575,7 @@ begin
 {$ifend}
 {$if defined(fpc)}
   result:=fpselect(Max(aEvent.fEventPipeFDs[0],aMaxSocket)+1,@ReadSet,@WriteSet,nil,t);
-{$elseif defined(nextgen)}
+{$elseif defined(NextGen) or defined(Android) or defined(iOS)}
   if aEvent.fEventPipeFDs[0]<aMaxSocket then begin
    result:=Posix.SysSelect.select(aMaxSocket+1,@ReadSet,@WriteSet,nil,t);
   end else begin
@@ -17106,7 +17106,7 @@ var SIN:TSockaddrStorage;
 begin
  SINLength:=aFamily.GetSockAddrSize;
  RecvLength:=0;
-{$if defined(nextgen) and not defined(fpc)}
+{$if (defined(NextGen) or defined(Android) or defined(iOS)) and not defined(fpc)}
  if assigned(aAddress) then begin
   RecvLength:=Posix.SysSocket.RecvFrom(aSocket,aData,aDataLength,MSG_NOSIGNAL,sockaddr(TRNLPointer(@SIN)^),Cardinal(TRNLPointer(@SINLength)^));
  end else begin
