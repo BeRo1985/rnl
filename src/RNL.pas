@@ -490,7 +490,7 @@ uses {$if defined(Posix)}
 {    Generics.Defaults,
      Generics.Collections;}
 
-const RNL_VERSION='1.00.2021.06.24.18.22.0000';
+const RNL_VERSION='1.00.2021.06.25.07.56.0000';
 
 type PPRNLInt8=^PRNLInt8;
      PRNLInt8=^TRNLInt8;
@@ -17108,9 +17108,9 @@ begin
  RecvLength:=0;
 {$if (defined(NextGen) or defined(Android) or defined(iOS)) and not defined(fpc)}
  if assigned(aAddress) then begin
-  RecvLength:=Posix.SysSocket.RecvFrom(aSocket,aData,aDataLength,MSG_NOSIGNAL,sockaddr(TRNLPointer(@SIN)^),Cardinal(TRNLPointer(@SINLength)^));
+  RecvLength:=Posix.SysSocket.RecvFrom(aSocket,aData,aDataLength,MSG_NOSIGNAL,sockaddr(TRNLPointer(@SIN)^),{$ifdef cpu64}Cardinal{$else}Integer{$endif}(TRNLPointer(@SINLength)^));
  end else begin
-  RecvLength:=Posix.SysSocket.RecvFrom(aSocket,aData,aDataLength,MSG_NOSIGNAL,sockaddr(TRNLPointer(nil)^),Cardinal(TRNLPointer(@SIN)^));
+  RecvLength:=Posix.SysSocket.RecvFrom(aSocket,aData,aDataLength,MSG_NOSIGNAL,sockaddr(TRNLPointer(nil)^),{$ifdef cpu64}Cardinal{$else}Integer{$endif}(TRNLPointer(@SIN)^));
  end;
 {$else}
  if assigned(aAddress) then begin
