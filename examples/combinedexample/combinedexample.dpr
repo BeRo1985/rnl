@@ -293,7 +293,7 @@ begin
     try
      Event.Initialize;
      try
-      if Client.Service(Event,5000)=RNL_HOST_SERVICE_STATUS_EVENT then begin
+      if Client.ConnectService(Event,5000)=RNL_HOST_SERVICE_STATUS_EVENT then begin
        case Event.Type_ of
         RNL_HOST_EVENT_TYPE_PEER_APPROVAL:begin
          if Event.Peer=Peer then begin

@@ -490,7 +490,7 @@ uses {$if defined(Posix)}
 {    Generics.Defaults,
      Generics.Collections;}
 
-const RNL_VERSION='1.00.2021.07.06.14.29.0000';
+const RNL_VERSION='1.00.2021.07.06.17.34.0000';
 
 type PPRNLInt8=^PRNLInt8;
      PRNLInt8=^TRNLInt8;
@@ -3778,6 +3778,7 @@ type PRNLVersion=^TRNLVersion;
        procedure BroadcastMessageString(const aChannel:TRNLUInt8;const aString:TRNLString;const aFlags:TRNLMessageFlags=[]);
        procedure BroadcastMessageStream(const aChannel:TRNLUInt8;const aStream:TStream;const aFlags:TRNLMessageFlags=[]);
        function Service(var aEvent:TRNLHostEvent;const aTimeout:TRNLInt64=1000):TRNLHostServiceStatus;
+       function ConnectService(var aEvent:TRNLHostEvent;const aTimeout:TRNLInt64=1000):TRNLHostServiceStatus;
        function CheckEvents(var aEvent:TRNLHostEvent):boolean;
        function Flush:boolean;
        procedure Interrupt;
@@ -25861,6 +25862,26 @@ end;
 function TRNLHost.Service(var aEvent:TRNLHostEvent;const aTimeout:TRNLInt64=1000):TRNLHostServiceStatus;
 begin
  result:=DispatchIteration(@aEvent,aTimeout);
+end;
+
+function TRNLHost.ConnectService(var aEvent:TRNLHostEvent;const aTimeout:TRNLInt64=1000):TRNLHostServiceStatus;
+var Timeout:TRNLTime;
+    TimeoutInterval:Int64;
+begin
+ Timeout:=fInstance.Time+Max(0,aTimeout);
+ repeat
+  if aTimeout<>0 then begin
+   TimeoutInterval:=Timeout.fValue-fInstance.Time;
+   if TimeoutInterval<1 then begin
+    TimeoutInterval:=1;
+   end else if TimeoutInterval>aTimeout then begin
+    TimeoutInterval:=aTimeout;
+   end;
+  end else begin
+   TimeoutInterval:=aTimeout;
+  end;
+  result:=Service(aEvent,TimeoutInterval);
+ until (result in [RNL_HOST_SERVICE_STATUS_EVENT,RNL_HOST_SERVICE_STATUS_ERROR]) or ((aTimeout>0) and (fInstance.Time>=Timeout)) or (aTimeout<0);
 end;
 
 function TRNLHost.CheckEvents(var aEvent:TRNLHostEvent):boolean;
