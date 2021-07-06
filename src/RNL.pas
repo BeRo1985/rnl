@@ -490,7 +490,7 @@ uses {$if defined(Posix)}
 {    Generics.Defaults,
      Generics.Collections;}
 
-const RNL_VERSION='1.00.2021.06.25.07.56.0000';
+const RNL_VERSION='1.00.2021.07.06.14.29.0000';
 
 type PPRNLInt8=^PRNLInt8;
      PRNLInt8=^TRNLInt8;
@@ -23189,8 +23189,8 @@ begin
                                                SizeOf(TRNLProtocolNormalPacketHeader),
                                                PayloadData^,
                                                PayloadDataLength) then begin
-{$if defined(RNL_DEBUG) and defined(RNL_DEBUG_SECURITY_EXTENDED)}
-     fInstance.fDebugLock.Acquire;
+{$if defined(RNL_DEBUG) and defined(RNL_DEBUG_SECURITY_EXTENDED) and false}
+     fHost.fInstance.fDebugLock.Acquire;
      try
       if assigned(Peer) then begin
        RNLDebugOutputString('DP: '+IntToStr(Peer.fSharedSecretKey.ui32[0])+' '+IntToStr(Peer.fSharedSecretKey.ui32[1])+' '+IntToStr(Peer.fSharedSecretKey.ui32[2])+' '+IntToStr(Peer.fSharedSecretKey.ui32[3])+' '+IntToStr(TRNLUInt32(fReceivedDataLength)-ReceivedDataOffset));
@@ -23198,18 +23198,18 @@ begin
        RNLDebugOutputString('DH: '+IntToStr(Peer.fSharedSecretKey.ui32[0])+' '+IntToStr(Peer.fSharedSecretKey.ui32[1])+' '+IntToStr(Peer.fSharedSecretKey.ui32[2])+' '+IntToStr(Peer.fSharedSecretKey.ui32[3])+' '+IntToStr(TRNLUInt32(fReceivedDataLength)-ReceivedDataOffset));
       end;
      finally
-      fInstance.fDebugLock.Release;
+      fHost.fInstance.fDebugLock.Release;
      end;
 {$ifend}
      continue;
     end;
 
 {$if defined(RNL_DEBUG) and false}
-    fInstance.fDebugLock.Acquire;
+    fHost.fInstance.fDebugLock.Acquire;
     try
-     RNLDebugOutputString(IntToStr(Peer.fIncomingEncryptedPacketSequenceNumber)+' '+IntToStr(EncryptedPacketSequenceNumber));
+     RNLDebugOutputString(IntToStr(fIncomingEncryptedPacketSequenceNumber)+' '+IntToStr(EncryptedPacketSequenceNumber));
     finally
-     fInstance.fDebugLock.Release;
+     fHost.fInstance.fDebugLock.Release;
     end;
 {$ifend}
 
@@ -23370,7 +23370,7 @@ begin
 {$if defined(RNL_DEBUG) and defined(RNL_DEBUG_COMPRESS)}
      fHost.fInstance.fDebugLock.Acquire;
      try
-      RNLDebugOutputString('Peer '+IntToStr(fLocalPeerID)+': ',
+      RNLDebugOutputString('Peer '+IntToStr(fLocalPeerID)+': '+
                            'uncompressed '+IntToStr(OutgoingPayloadDataLength)+' => compressed '+IntToStr(CompressedDataLength)+' '+
                            '('+RNLDebugFormatFloat((CompressedDataLength*100.0)/OutgoingPayloadDataLength,1,1)+'%)');
      finally
@@ -24693,7 +24693,7 @@ begin
  {$if defined(RNL_DEBUG) and defined(RNL_DEBUG_SECURITY_EXTENDED)}
   fInstance.fDebugLock.Acquire;
   try
-   RNLDebugOutputString('HandleConnectionRequest SharedSecretKey: '+IntToStr(ConnectionCandidate^.Data^.SharedSecretKey.ui32[0])+' '+IntToStr(ConnectionCandidate^.Data^.SharedSecretKey.ui32[1])+' '+IntToStr(ConnectionCandidate^.Data^.SharedSecretKey.ui32[2])+' '+IntToStr(ConnectionCandidate^.Data^.SharedSecretKey.ui32[3]));
+   RNLDebugOutputString('HandleConnectionRequest SharedSecretKey: '+IntToStr(ConnectionCandidate^.fData^.fSharedSecretKey.ui32[0])+' '+IntToStr(ConnectionCandidate^.fData^.fSharedSecretKey.ui32[1])+' '+IntToStr(ConnectionCandidate^.fData^.fSharedSecretKey.ui32[2])+' '+IntToStr(ConnectionCandidate^.fData^.fSharedSecretKey.ui32[3]));
   finally
    fInstance.fDebugLock.Release;
   end;
