@@ -490,7 +490,7 @@ uses {$if defined(Posix)}
 {    Generics.Defaults,
      Generics.Collections;}
 
-const RNL_VERSION='1.00.2021.05.25.21.39.0000';
+const RNL_VERSION='1.00.2021.07.06.17.34.0000';
 
 type PPRNLInt8=^PRNLInt8;
      PRNLInt8=^TRNLInt8;
@@ -1283,7 +1283,7 @@ type PRNLVersion=^TRNLVersion;
 {$ifend}
        procedure Compress(const aLast:boolean);
       public
-       function Initialize(const aOutLen:TRNLSizeInt=BLAKE2B_OUTBYTES;const aKey:Pointer=nil;const aKeyLen:TRNLSizeInt=TRNLBLAKE2BContext.BLAKE2B_KEYBYTES):boolean;
+       function Initialize(const aOutLen:TRNLSizeInt=BLAKE2B_OUTBYTES;const aKey:Pointer=nil;const aKeyLen:TRNLSizeInt=64):boolean;
        procedure Update(const aMessage;const aMessageSize:TRNLSizeUInt);
        procedure Finalize(out aHash);
      end;
@@ -3778,6 +3778,7 @@ type PRNLVersion=^TRNLVersion;
        procedure BroadcastMessageString(const aChannel:TRNLUInt8;const aString:TRNLString;const aFlags:TRNLMessageFlags=[]);
        procedure BroadcastMessageStream(const aChannel:TRNLUInt8;const aStream:TStream;const aFlags:TRNLMessageFlags=[]);
        function Service(var aEvent:TRNLHostEvent;const aTimeout:TRNLInt64=1000):TRNLHostServiceStatus;
+       function ConnectService(var aEvent:TRNLHostEvent;const aTimeout:TRNLInt64=1000):TRNLHostServiceStatus;
        function CheckEvents(var aEvent:TRNLHostEvent):boolean;
        function Flush:boolean;
        procedure Interrupt;
@@ -16575,7 +16576,7 @@ begin
 {$ifend}
 {$if defined(fpc)}
   result:=fpselect(Max(aEvent.fEventPipeFDs[0],aMaxSocket)+1,@ReadSet,@WriteSet,nil,t);
-{$elseif defined(nextgen)}
+{$elseif defined(NextGen) or defined(Android) or defined(iOS)}
   if aEvent.fEventPipeFDs[0]<aMaxSocket then begin
    result:=Posix.SysSelect.select(aMaxSocket+1,@ReadSet,@WriteSet,nil,t);
   end else begin
@@ -17106,11 +17107,11 @@ var SIN:TSockaddrStorage;
 begin
  SINLength:=aFamily.GetSockAddrSize;
  RecvLength:=0;
-{$if defined(nextgen) and not defined(fpc)}
+{$if (defined(NextGen) or defined(Android) or defined(iOS)) and not defined(fpc)}
  if assigned(aAddress) then begin
-  RecvLength:=Posix.SysSocket.RecvFrom(aSocket,aData,aDataLength,MSG_NOSIGNAL,sockaddr(TRNLPointer(@SIN)^),Cardinal(TRNLPointer(@SINLength)^));
+  RecvLength:=Posix.SysSocket.RecvFrom(aSocket,aData,aDataLength,MSG_NOSIGNAL,sockaddr(TRNLPointer(@SIN)^),{$ifdef cpu64}Cardinal{$else}Integer{$endif}(TRNLPointer(@SINLength)^));
  end else begin
-  RecvLength:=Posix.SysSocket.RecvFrom(aSocket,aData,aDataLength,MSG_NOSIGNAL,sockaddr(TRNLPointer(nil)^),Cardinal(TRNLPointer(@SIN)^));
+  RecvLength:=Posix.SysSocket.RecvFrom(aSocket,aData,aDataLength,MSG_NOSIGNAL,sockaddr(TRNLPointer(nil)^),{$ifdef cpu64}Cardinal{$else}Integer{$endif}(TRNLPointer(@SIN)^));
  end;
 {$else}
  if assigned(aAddress) then begin
@@ -23189,8 +23190,8 @@ begin
                                                SizeOf(TRNLProtocolNormalPacketHeader),
                                                PayloadData^,
                                                PayloadDataLength) then begin
-{$if defined(RNL_DEBUG) and defined(RNL_DEBUG_SECURITY_EXTENDED)}
-     fInstance.fDebugLock.Acquire;
+{$if defined(RNL_DEBUG) and defined(RNL_DEBUG_SECURITY_EXTENDED) and false}
+     fHost.fInstance.fDebugLock.Acquire;
      try
       if assigned(Peer) then begin
        RNLDebugOutputString('DP: '+IntToStr(Peer.fSharedSecretKey.ui32[0])+' '+IntToStr(Peer.fSharedSecretKey.ui32[1])+' '+IntToStr(Peer.fSharedSecretKey.ui32[2])+' '+IntToStr(Peer.fSharedSecretKey.ui32[3])+' '+IntToStr(TRNLUInt32(fReceivedDataLength)-ReceivedDataOffset));
@@ -23198,18 +23199,18 @@ begin
        RNLDebugOutputString('DH: '+IntToStr(Peer.fSharedSecretKey.ui32[0])+' '+IntToStr(Peer.fSharedSecretKey.ui32[1])+' '+IntToStr(Peer.fSharedSecretKey.ui32[2])+' '+IntToStr(Peer.fSharedSecretKey.ui32[3])+' '+IntToStr(TRNLUInt32(fReceivedDataLength)-ReceivedDataOffset));
       end;
      finally
-      fInstance.fDebugLock.Release;
+      fHost.fInstance.fDebugLock.Release;
      end;
 {$ifend}
      continue;
     end;
 
 {$if defined(RNL_DEBUG) and false}
-    fInstance.fDebugLock.Acquire;
+    fHost.fInstance.fDebugLock.Acquire;
     try
-     RNLDebugOutputString(IntToStr(Peer.fIncomingEncryptedPacketSequenceNumber)+' '+IntToStr(EncryptedPacketSequenceNumber));
+     RNLDebugOutputString(IntToStr(fIncomingEncryptedPacketSequenceNumber)+' '+IntToStr(EncryptedPacketSequenceNumber));
     finally
-     fInstance.fDebugLock.Release;
+     fHost.fInstance.fDebugLock.Release;
     end;
 {$ifend}
 
@@ -23370,7 +23371,7 @@ begin
 {$if defined(RNL_DEBUG) and defined(RNL_DEBUG_COMPRESS)}
      fHost.fInstance.fDebugLock.Acquire;
      try
-      RNLDebugOutputString('Peer '+IntToStr(fLocalPeerID)+': ',
+      RNLDebugOutputString('Peer '+IntToStr(fLocalPeerID)+': '+
                            'uncompressed '+IntToStr(OutgoingPayloadDataLength)+' => compressed '+IntToStr(CompressedDataLength)+' '+
                            '('+RNLDebugFormatFloat((CompressedDataLength*100.0)/OutgoingPayloadDataLength,1,1)+'%)');
      finally
@@ -24693,7 +24694,7 @@ begin
  {$if defined(RNL_DEBUG) and defined(RNL_DEBUG_SECURITY_EXTENDED)}
   fInstance.fDebugLock.Acquire;
   try
-   RNLDebugOutputString('HandleConnectionRequest SharedSecretKey: '+IntToStr(ConnectionCandidate^.Data^.SharedSecretKey.ui32[0])+' '+IntToStr(ConnectionCandidate^.Data^.SharedSecretKey.ui32[1])+' '+IntToStr(ConnectionCandidate^.Data^.SharedSecretKey.ui32[2])+' '+IntToStr(ConnectionCandidate^.Data^.SharedSecretKey.ui32[3]));
+   RNLDebugOutputString('HandleConnectionRequest SharedSecretKey: '+IntToStr(ConnectionCandidate^.fData^.fSharedSecretKey.ui32[0])+' '+IntToStr(ConnectionCandidate^.fData^.fSharedSecretKey.ui32[1])+' '+IntToStr(ConnectionCandidate^.fData^.fSharedSecretKey.ui32[2])+' '+IntToStr(ConnectionCandidate^.fData^.fSharedSecretKey.ui32[3]));
   finally
    fInstance.fDebugLock.Release;
   end;
@@ -25861,6 +25862,26 @@ end;
 function TRNLHost.Service(var aEvent:TRNLHostEvent;const aTimeout:TRNLInt64=1000):TRNLHostServiceStatus;
 begin
  result:=DispatchIteration(@aEvent,aTimeout);
+end;
+
+function TRNLHost.ConnectService(var aEvent:TRNLHostEvent;const aTimeout:TRNLInt64=1000):TRNLHostServiceStatus;
+var Timeout:TRNLTime;
+    TimeoutInterval:Int64;
+begin
+ Timeout:=fInstance.Time+Max(0,aTimeout);
+ repeat
+  if aTimeout<>0 then begin
+   TimeoutInterval:=Timeout.fValue-fInstance.Time;
+   if TimeoutInterval<1 then begin
+    TimeoutInterval:=1;
+   end else if TimeoutInterval>aTimeout then begin
+    TimeoutInterval:=aTimeout;
+   end;
+  end else begin
+   TimeoutInterval:=aTimeout;
+  end;
+  result:=Service(aEvent,TimeoutInterval);
+ until (result in [RNL_HOST_SERVICE_STATUS_EVENT,RNL_HOST_SERVICE_STATUS_ERROR]) or ((aTimeout>0) and (fInstance.Time>=Timeout)) or (aTimeout<0);
 end;
 
 function TRNLHost.CheckEvents(var aEvent:TRNLHostEvent):boolean;
