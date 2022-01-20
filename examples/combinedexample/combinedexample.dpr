@@ -405,10 +405,13 @@ const DiscoveryServiceID:TRNLDiscoveryServiceID='123456789012345';
 var Server:TServer;
     Client:TClient;
     DiscoveryServer:TRNLDiscoveryServer;
+    DiscoveryServices:TRNLDiscoveryServices;
     OwnAddressIPV4:TRNLAddress;
     OwnAddressIPV6:TRNLAddress;
     s:string;
 begin
+// TRNLAddress.CreateFromString('[ff02::c]:1901');
+// exit;
  s:=ParamStr(1);
  RNLInstance:=TRNLInstance.Create;
  try
@@ -457,6 +460,17 @@ begin
                                                      nil
                                                     );
          try
+          DiscoveryServices:=TRNLDiscoveryClient.Discover(RNLInstance,
+                                                          RNLNetwork,
+                                                          1903,
+                                                          TRNLAddress.CreateFromString('255.255.255.255:1901'),
+                                                          TRNLAddress.CreateFromString('[ff02::1]:1901'),
+                                                          DiscoveryServiceID,
+                                                          0,
+                                                          1,
+                                                          1000
+                                                         );
+          writeln('Found services: ',length(DiscoveryServices));
           readln;
          finally
           FreeAndNil(DiscoveryServer);

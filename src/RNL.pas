@@ -3940,6 +3940,28 @@ type PRNLVersion=^TRNLVersion;
        property Flags:TRNLDiscoveryServerFlags read fFlags;
      end;
 
+     TRNLDiscoveryService=record
+      Address:TRNLAddress;
+      ServiceVersion:TRNLUInt32;
+     end;
+
+     PRNLDiscoveryService=^TRNLDiscoveryService;
+
+     TRNLDiscoveryServices=array of TRNLDiscoveryService;
+
+     TRNLDiscoveryClient=class
+      public
+       class function Discover(const aInstance:TRNLInstance;
+                               const aNetwork:TRNLNetwork;
+                               const aPort:TRNLUInt16;
+                               const aMulticastIPV4Address:TRNLAddress;
+                               const aMulticastIPV6Address:TRNLAddress;
+                               const aServiceID:TRNLDiscoveryServiceID;
+                               const aServiceVersion:TRNLUInt32;
+                               const aMaximumServers:TRNLInt32=1;
+                               const aTimeOut:TRNLInt32=1000):TRNLDiscoveryServices; static;
+     end;
+
 {$ifdef RNLWorkInProgress}
      TRNLTCPToUDPBridge=class;
 
@@ -12753,7 +12775,7 @@ end;
 
 constructor TRNLAddress.CreateFromString(const aString:TRNLString);
  function ParseIP(const aInputString:TRNLRawByteString;out aAddress:TRNLAddress):boolean;
- var Index,Part,StringLength,Value,Base,
+ var Index,Part,StringLength,SubLength,Value,Base,
      FirstColonPosition,
      FirstDotPosition,
      FirstOpenBracketPosition,
@@ -12813,6 +12835,11 @@ constructor TRNLAddress.CreateFromString(const aString:TRNLString);
    ZeroCompressionLocation:=-1;
 
    Index:=FirstOpenBracketPosition+1;
+
+   SubLength:=StringLength;
+   if (FirstCloseBracketPosition>0) and (FirstCloseBracketPosition<=SubLength) then begin
+    SubLength:=FirstCloseBracketPosition-1;
+   end;
 
    Part:=0;
    while Part<16 do begin
@@ -12877,24 +12904,26 @@ constructor TRNLAddress.CreateFromString(const aString:TRNLString);
 
      end else begin
 
-      if Part<14 then begin
+      if Part<15 then begin
+
+       aAddress.Host.Addr[Part+0]:=Value shr 8;
+       aAddress.Host.Addr[Part+1]:=Value and $ff;
+       inc(Part,2);
+
        if (Index<=StringLength) and (aInputString[Index]=':') then begin
         inc(Index);
        end else begin
-        exit;
+        break;
        end;
+
       end;
-
-      aAddress.Host.Addr[Part+0]:=Value shr 8;
-      aAddress.Host.Addr[Part+1]:=Value and $ff;
-
      end;
 
     end else begin
 
      if ZeroCompressionLocation>=0 then begin
-      if Index=(FirstOpenBracketPosition+1) then begin
-       dec(Part);
+      if ZeroCompressionLocation=Part then begin
+       dec(Part,2);
        break;
       end else begin
        exit;
@@ -12905,7 +12934,7 @@ constructor TRNLAddress.CreateFromString(const aString:TRNLString);
       if Part=0 then begin
        inc(Index);
        if (not (Index<=StringLength) and (aInputString[Index]=':')) then begin
-        exit;
+        break;
        end;
       end;
       inc(Index);
@@ -12915,8 +12944,6 @@ constructor TRNLAddress.CreateFromString(const aString:TRNLString);
      end;
 
     end;
-
-    inc(Part,2);
 
    end;
 
@@ -12934,7 +12961,7 @@ constructor TRNLAddress.CreateFromString(const aString:TRNLString);
   end else begin
 
    if (FirstDotPosition=0) or
-      (FirstColonPosition>FirstDotPosition) or
+      ((FirstColonPosition>0) and (FirstColonPosition<FirstDotPosition)) or
       (FirstOpenBracketPosition>0) or
       (FirstCloseBracketPosition>0) then begin
     exit;
@@ -25949,94 +25976,100 @@ begin
  for Index:=0 to 1 do begin
   if ((Index=0) and (RNL_DISCOVERY_SERVER_FLAG_IPV4 in fFlags) and not fServiceAddressIPv4.Equals(RNL_ADDRESS_NONE)) or
      ((Index=1) and (RNL_DISCOVERY_SERVER_FLAG_IPV6 in fFlags) and not fServiceAddressIPv6.Equals(RNL_ADDRESS_NONE)) then begin
-   case Index of
-    0:begin
-     // IPv4
-     Address:=TRNLAddress.CreateFromString('239.255.255.250');
-    end;
-    else begin
-     // IPv6
-     Address:=TRNLAddress.CreateFromString('ff02::c');
-    end;
-   end;
+   Address.Host:=RNL_HOST_ANY_INIT;
+   Address.ScopeID:=0;
+   Address.Port:=fPort;
    fSockets[Index]:=fNetwork.SocketCreate(RNL_SOCKET_TYPE_DATAGRAM,Families[Index]);
    if fSockets[Index]<>RNL_SOCKET_NULL then begin
     if Index=1 then begin
-     fNetwork.SocketSetOption(fSockets[Index],RNL_SOCKET_OPTION_NONBLOCK,1);
      fNetwork.SocketSetOption(fSockets[Index],RNL_SOCKET_OPTION_IPV6_V6ONLY,1);
-     fNetwork.SocketSetOption(fSockets[Index],RNL_SOCKET_OPTION_REUSEADDR,1);
     end;
+    fNetwork.SocketSetOption(fSockets[Index],RNL_SOCKET_OPTION_NONBLOCK,1);
+    fNetwork.SocketSetOption(fSockets[Index],RNL_SOCKET_OPTION_REUSEADDR,1);
+    fNetwork.SocketSetOption(fSockets[Index],RNL_SOCKET_OPTION_BROADCAST,1);
     if fNetwork.SocketBind(fSockets[Index],@Address,Families[Index]) then begin
      fNetwork.SocketSetOption(fSockets[Index],RNL_SOCKET_OPTION_NONBLOCK,1);
      fNetwork.SocketSetOption(fSockets[Index],RNL_SOCKET_OPTION_BROADCAST,1);
      fNetwork.SocketSetOption(fSockets[Index],RNL_SOCKET_OPTION_REUSEADDR,1);
+     fActiveSockets[Count]:=fSockets[Index];
+     inc(Count);
+    end else begin
+     fNetwork.SocketDestroy(fSockets[Index]);
+     fSockets[Index]:=RNL_SOCKET_NULL;
     end;
-    fActiveSockets[Count]:=fSockets[Index];
-    inc(Count);
    end;
   end;
  end;
  SetLength(fActiveSockets,Count);
 
- while not Terminated do begin
+ try
 
-  MaxSocket:=0;
-  ReadSet.fd_count:=0;
-  for Index:=Low(TRNLHostSockets) to High(TRNLHostSockets) do begin
-   if fSockets[Index]<>RNL_SOCKET_NULL then begin
-    ReadSet.Add(fSockets[Index]);
-    if MaxSocket<fSockets[Index] then begin
-     MaxSocket:=fSockets[Index];
+  while not Terminated do begin
+
+   MaxSocket:=0;
+   ReadSet.fd_count:=0;
+   for Index:=Low(TRNLHostSockets) to High(TRNLHostSockets) do begin
+    if fSockets[Index]<>RNL_SOCKET_NULL then begin
+     ReadSet.Add(fSockets[Index]);
+     if MaxSocket<fSockets[Index] then begin
+      MaxSocket:=fSockets[Index];
+     end;
     end;
    end;
-  end;
 
-  WriteSet.fd_count:=0;
+   WriteSet.fd_count:=0;
 
-  if fNetwork.SocketSelect(MaxSocket,
-                           ReadSet,
-                           WriteSet,
-                           1000,
-                           fEvent)>0 then begin
+   if fNetwork.SocketSelect(MaxSocket,
+                            ReadSet,
+                            WriteSet,
+                            1000,
+                            fEvent)>0 then begin
 
-   if Terminated then begin
-    break;
-   end else begin
+    if Terminated then begin
+     break;
+    end else begin
 
-    for Index:=Low(TRNLHostSockets) to High(TRNLHostSockets) do begin
+     for Index:=Low(TRNLHostSockets) to High(TRNLHostSockets) do begin
 
-     if (fSockets[Index]<>RNL_SOCKET_NULL) and ReadSet.Check(fSockets[Index]) then begin
+      if (fSockets[Index]<>RNL_SOCKET_NULL) and ReadSet.Check(fSockets[Index]) then begin
 
-      RecvLength:=fNetwork.Receive(fSockets[Index],
-                                   @ClientAddress,
-                                   fRecvData[0],
-                                   SizeOf(fRecvData),
-                                   Families[Index]);
+       RecvLength:=fNetwork.Receive(fSockets[Index],
+                                    @ClientAddress,
+                                    fRecvData[0],
+                                    SizeOf(fRecvData),
+                                    Families[Index]);
 
-      if RecvLength=SizeOf(TRNLDiscoveryServerRequestPacket) then begin
+       if RecvLength=SizeOf(TRNLDiscoveryServerRequestPacket) then begin
 
-       DiscoveryServerRequestPacket:=Pointer(@fRecvData[0]);
-       if (DiscoveryServerRequestPacket^.Signature=RNLDiscoveryRequestSignature) and
-          (DiscoveryServerRequestPacket^.ServiceID=fServiceID) then begin
+        DiscoveryServerRequestPacket:=Pointer(@fRecvData[0]);
+        if (DiscoveryServerRequestPacket^.Signature=RNLDiscoveryRequestSignature) and
+           (DiscoveryServerRequestPacket^.ServiceID=fServiceID) then begin
 
-        if (assigned(fOnAccept) and fOnAccept(DiscoveryServerRequestPacket^)) or not assigned(fOnAccept) then begin
+         DiscoveryServerRequestPacket^.ClientVersion:=TRNLEndianness.LittleEndianToHost32(DiscoveryServerRequestPacket^.ClientVersion);
+         DiscoveryServerRequestPacket^.ClientPort:=TRNLEndianness.LittleEndianToHost16(DiscoveryServerRequestPacket^.ClientPort);
 
-         DiscoveryServerAnswerPacket.Signature:=RNLDiscoveryAnswerSignature;
-         DiscoveryServerAnswerPacket.ServiceID:=fServiceID;
-         DiscoveryServerAnswerPacket.ServerVersion:=fServiceVersion;
-         if Index=0 then begin
-          DiscoveryServerAnswerPacket.ServerHost:=fServiceAddressIPv4.Host;
-          DiscoveryServerAnswerPacket.ServerPort:=fServiceAddressIPv4.Port;
-         end else begin
-          DiscoveryServerAnswerPacket.ServerHost:=fServiceAddressIPv6.Host;
-          DiscoveryServerAnswerPacket.ServerPort:=fServiceAddressIPv6.Port;
+         if (assigned(fOnAccept) and fOnAccept(DiscoveryServerRequestPacket^)) or not assigned(fOnAccept) then begin
+
+          DiscoveryServerAnswerPacket.Signature:=RNLDiscoveryAnswerSignature;
+          DiscoveryServerAnswerPacket.ServiceID:=fServiceID;
+          DiscoveryServerAnswerPacket.ServerVersion:=TRNLEndianness.HostToLittleEndian32(fServiceVersion);
+          if Index=0 then begin
+           DiscoveryServerAnswerPacket.ServerHost:=fServiceAddressIPv4.Host;
+           DiscoveryServerAnswerPacket.ServerPort:=TRNLEndianness.HostToLittleEndian16(fServiceAddressIPv4.Port);
+          end else begin
+           DiscoveryServerAnswerPacket.ServerHost:=fServiceAddressIPv6.Host;
+           DiscoveryServerAnswerPacket.ServerPort:=TRNLEndianness.HostToLittleEndian16(fServiceAddressIPv6.Port);
+          end;
+
+          ClientAddress.Port:=DiscoveryServerRequestPacket^.ClientPort;
+
+          fNetwork.Send(fSockets[Index],
+                        @ClientAddress,
+                        DiscoveryServerAnswerPacket,
+                        SizeOf(TRNLDiscoveryServerAnswerPacket),
+                        Families[Index]);
+
          end;
-
-         fNetwork.Send(fSockets[Index],
-                       @ClientAddress,
-                       DiscoveryServerAnswerPacket,
-                       SizeOf(TRNLDiscoveryServerAnswerPacket),
-                       Families[Index]);
 
         end;
 
@@ -26052,13 +26085,211 @@ begin
 
   end;
 
+ finally
+
+  for Index:=Low(TRNLHostSockets) to High(TRNLHostSockets) do begin
+   if fSockets[Index]<>RNL_SOCKET_NULL then begin
+    fNetwork.SocketDestroy(fSockets[Index]);
+    fSockets[Index]:=RNL_SOCKET_NULL;
+   end;
+  end;
+
  end;
 
- for Index:=Low(TRNLHostSockets) to High(TRNLHostSockets) do begin
-  if fSockets[Index]<>RNL_SOCKET_NULL then begin
-   fNetwork.SocketDestroy(fSockets[Index]);
-   fSockets[Index]:=RNL_SOCKET_NULL;
+end;
+
+class function TRNLDiscoveryClient.Discover(const aInstance:TRNLInstance;
+                                            const aNetwork:TRNLNetwork;
+                                            const aPort:TRNLUInt16;
+                                            const aMulticastIPV4Address:TRNLAddress;
+                                            const aMulticastIPV6Address:TRNLAddress;
+                                            const aServiceID:TRNLDiscoveryServiceID;
+                                            const aServiceVersion:TRNLUInt32;
+                                            const aMaximumServers:TRNLInt32=1;
+                                            const aTimeOut:TRNLInt32=1000):TRNLDiscoveryServices;
+const Families:array[0..1] of TRNLAddressFamily=(RNL_IPV4,RNL_IPV6);
+var Index,Count,RecvLength,OtherIndex:TRNLInt32;
+    Address,ClientAddress:TRNLAddress;
+    MaxSocket:TRNLSocket;
+    ReadSet,WriteSet:TRNLSocketSet;
+    DiscoveryServerRequestPacket:TRNLDiscoveryServerRequestPacket;
+    DiscoveryServerAnswerPacket:TRNLDiscoveryServerAnswerPacket;
+    Sockets:TRNLHostSockets;
+    NowTime,StartTime,StopTime:TRNLTime;
+    TimeOut:TRNLInt64;
+    DiscoveryService:TRNLDiscoveryService;
+    Found:boolean;
+begin
+
+ result:=nil;
+ Count:=0;
+ try
+
+  DiscoveryServerRequestPacket.Signature:=RNLDiscoveryRequestSignature;
+  DiscoveryServerRequestPacket.ServiceID:=aServiceID;
+  DiscoveryServerRequestPacket.ClientVersion:=TRNLEndianness.HostToLittleEndian32(aServiceVersion);
+  DiscoveryServerRequestPacket.ClientHost:=RNL_HOST_NONE;
+  DiscoveryServerRequestPacket.ClientPort:=TRNLEndianness.HostToLittleEndian16(aPort);
+
+  for Index:=Low(TRNLHostSockets) to High(TRNLHostSockets) do begin
+   Sockets[Index]:=RNL_SOCKET_NULL;
   end;
+
+  MaxSocket:=0;
+  for Index:=0 to 1 do begin
+   if (not aMulticastIPV4Address.Equals(RNL_ADDRESS_NONE)) or
+      (not aMulticastIPV6Address.Equals(RNL_ADDRESS_NONE)) then begin
+    Address.Host:=RNL_HOST_ANY_INIT;
+    Address.ScopeID:=0;
+    Address.Port:=aPort;
+    Sockets[Index]:=aNetwork.SocketCreate(RNL_SOCKET_TYPE_DATAGRAM,Families[Index]);
+    if Sockets[Index]<>RNL_SOCKET_NULL then begin
+     if Index=1 then begin
+      aNetwork.SocketSetOption(Sockets[Index],RNL_SOCKET_OPTION_IPV6_V6ONLY,1);
+     end;
+     aNetwork.SocketSetOption(Sockets[Index],RNL_SOCKET_OPTION_NONBLOCK,1);
+     aNetwork.SocketSetOption(Sockets[Index],RNL_SOCKET_OPTION_REUSEADDR,1);
+     aNetwork.SocketSetOption(Sockets[Index],RNL_SOCKET_OPTION_BROADCAST,1);
+     if aNetwork.SocketBind(Sockets[Index],@Address,Families[Index]) then begin
+      aNetwork.SocketSetOption(Sockets[Index],RNL_SOCKET_OPTION_NONBLOCK,1);
+      aNetwork.SocketSetOption(Sockets[Index],RNL_SOCKET_OPTION_BROADCAST,1);
+      aNetwork.SocketSetOption(Sockets[Index],RNL_SOCKET_OPTION_REUSEADDR,1);
+     end else begin
+      aNetwork.SocketDestroy(Sockets[Index]);
+      Sockets[Index]:=RNL_SOCKET_NULL;
+     end;
+    end;
+   end;
+  end;
+
+  try
+
+   NowTime:=aInstance.GetTime;
+
+   StartTime:=NowTime;
+
+   StopTime:=StartTime+aTimeOut;
+
+   while (NowTime<=StopTime) and (Count<aMaximumServers) do begin
+
+    for Index:=Low(TRNLHostSockets) to High(TRNLHostSockets) do begin
+     if Sockets[Index]<>RNL_SOCKET_NULL then begin
+      case Index of
+       0:begin
+        aNetwork.Send(Sockets[Index],
+                      @aMulticastIPV4Address,
+                      DiscoveryServerRequestPacket,
+                      SizeOf(TRNLDiscoveryServerRequestPacket),
+                      Families[Index]);
+       end;
+       1:begin
+        aNetwork.Send(Sockets[Index],
+                      @aMulticastIPV6Address,
+                      DiscoveryServerRequestPacket,
+                      SizeOf(TRNLDiscoveryServerRequestPacket),
+                      Families[Index]);
+       end;
+      end;
+     end;
+    end;
+
+    MaxSocket:=0;
+    ReadSet.fd_count:=0;
+    for Index:=Low(TRNLHostSockets) to High(TRNLHostSockets) do begin
+     if Sockets[Index]<>RNL_SOCKET_NULL then begin
+      ReadSet.Add(Sockets[Index]);
+      if MaxSocket<Sockets[Index] then begin
+       MaxSocket:=Sockets[Index];
+      end;
+     end;
+    end;
+
+    WriteSet.fd_count:=0;
+
+    NowTime:=aInstance.GetTime;
+    TimeOut:=StopTime-NowTime;
+    if TimeOut<1 then begin
+     TimeOut:=1;
+    end else if TimeOut>10 then begin
+     TimeOut:=10;
+    end;
+
+    if aNetwork.SocketSelect(MaxSocket,
+                             ReadSet,
+                             WriteSet,
+                             TimeOut)>0 then begin
+
+     for Index:=Low(TRNLHostSockets) to High(TRNLHostSockets) do begin
+
+      if (Sockets[Index]<>RNL_SOCKET_NULL) and ReadSet.Check(Sockets[Index]) then begin
+
+       RecvLength:=aNetwork.Receive(Sockets[Index],
+                                    @ClientAddress,
+                                    DiscoveryServerAnswerPacket,
+                                    SizeOf(TRNLDiscoveryServerAnswerPacket),
+                                    Families[Index]);
+
+       if RecvLength=SizeOf(TRNLDiscoveryServerAnswerPacket) then begin
+
+        if (DiscoveryServerAnswerPacket.Signature=RNLDiscoveryAnswerSignature) and
+           (DiscoveryServerAnswerPacket.ServiceID=aServiceID) then begin
+
+         if DiscoveryServerAnswerPacket.ServerHost.Equals(RNL_HOST_NONE) then begin
+          DiscoveryService.Address.Host:=ClientAddress.Host;
+         end else begin
+          DiscoveryService.Address.Host:=DiscoveryServerAnswerPacket.ServerHost;
+         end;
+         DiscoveryService.Address.ScopeID:=ClientAddress.ScopeID;
+         DiscoveryService.Address.Port:=DiscoveryServerAnswerPacket.ServerPort;
+         DiscoveryService.ServiceVersion:=DiscoveryServerAnswerPacket.ServerVersion;
+
+         Found:=false;
+         for OtherIndex:=0 to Count-1 do begin
+          if result[OtherIndex].Address.Equals(DiscoveryService.Address) and
+             (result[OtherIndex].ServiceVersion=DiscoveryService.ServiceVersion) then begin
+           Found:=true;
+           break;
+          end;
+         end;
+
+         if not Found then begin
+          OtherIndex:=Count;
+          if length(result)<=OtherIndex then begin
+           SetLength(result,(OtherIndex+1)*2);
+          end;
+          result[OtherIndex]:=DiscoveryService;
+          inc(Count);
+         end;
+
+        end;
+
+       end;
+
+      end;
+
+     end;
+
+    end;
+
+    NowTime:=aInstance.GetTime;
+
+   end;
+
+  finally
+
+   for Index:=Low(TRNLHostSockets) to High(TRNLHostSockets) do begin
+    if Sockets[Index]<>RNL_SOCKET_NULL then begin
+     aNetwork.SocketDestroy(Sockets[Index]);
+     Sockets[Index]:=RNL_SOCKET_NULL;
+    end;
+   end;
+
+  end;
+
+ finally
+
+  SetLength(result,Count);
+
  end;
 
 end;
