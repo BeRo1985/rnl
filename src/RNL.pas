@@ -480,6 +480,12 @@ uses {$if defined(Posix)}
       // Delphi and FreePascal: Win32, Win64
       Windows,
       MMSystem,
+      {$ifdef fpc}
+       jwaiptypes,
+      {$else}
+       Winapi.IpTypes,
+       Winapi.IpHlpApi,
+      {$endif}
      {$ifend}
      SysUtils,
      Classes,
@@ -1588,14 +1594,6 @@ type PRNLVersion=^TRNLVersion;
        RNL_SOCKET_SHUTDOWN_READ_WRITE=2
       );
 
-     PRNLHostAddress=^TRNLHostAddress;
-     TRNLHostAddress=packed record
-      public
-       Addr:array[0..15] of TRNLUInt8;
-       constructor CreateFromIPV4(Address:TRNLUInt32);
-       function Equals(const aWith:TRNLHostAddress):boolean;
-     end;
-
      PRNLAddressFamily=^TRNLAddressFamily;
      TRNLAddressFamily=TRNLUInt8;
 
@@ -1603,6 +1601,14 @@ type PRNLVersion=^TRNLVersion;
       public
        function GetAddressFamily:TRNLUInt16;
        function GetSockAddrSize:TRNLInt32;
+     end;
+
+     PRNLHostAddress=^TRNLHostAddress;
+     TRNLHostAddress=packed record
+      public
+       Addr:array[0..15] of TRNLUInt8;
+       constructor CreateFromIPV4(Address:TRNLUInt32);
+       function Equals(const aWith:TRNLHostAddress):boolean;
      end;
 
      PRNLAddress=^TRNLAddress;
@@ -1616,6 +1622,7 @@ type PRNLVersion=^TRNLVersion;
        function SetAddress(const aSIN:TRNLPointer):TRNLAddressFamily;
        function SetSIN(const aSIN:TRNLPointer;const aFamily:TRNLAddressFamily):boolean;
        function ToString:TRNLString;
+       function Equals(const aWith:TRNLAddress):boolean;
      end;
 
      PRNLSocketWaitCondition=^TRNLSocketWaitCondition;
@@ -2615,6 +2622,12 @@ type PRNLVersion=^TRNLVersion;
        class function WaitForMultipleEvents(const aEvents:array of TRNLNetworkEvent;const aTimeout:TRNLInt64):TRNLInt32; static;
      end;
 
+     TRNLInterfaceHostAddressType=
+      (
+       RNL_INTERFACE_HOST_ADDRESS_UNICAST,
+       RNL_INTERFACE_HOST_ADDRESS_MULTICAST
+      );
+
      TRNLNetwork=class
       private
        fInstance:TRNLInstance;
@@ -2624,6 +2637,7 @@ type PRNLVersion=^TRNLVersion;
        function AddressSetHost(var aAddress:TRNLAddress;const aName:TRNLRawByteString):boolean; virtual;
        function AddressGetHost(const aAddress:TRNLAddress;out aName;const aNameLength:TRNLInt32;const aFlags:TRNLInt32=0):boolean; virtual;
        function AddressGetHostIP(const aAddress:TRNLAddress;out aName;const aNameLength:TRNLInt32):boolean; virtual;
+       function AddressGetPrimaryInterfaceHostIP(var aAddress:TRNLAddress;const aFamily:TRNLAddressFamily;const aInterfaceHostAddressType:TRNLInterfaceHostAddressType=RNL_INTERFACE_HOST_ADDRESS_UNICAST):boolean; virtual;
        function SocketCreate(const aType:TRNLSocketType;const aFamily:TRNLAddressFamily):TRNLSocket; virtual;
        procedure SocketDestroy(const aSocket:TRNLSocket); virtual;
        function SocketShutdown(const aSocket:TRNLSocket;const aHow:TRNLSocketShutdown=RNL_SOCKET_SHUTDOWN_READ_WRITE):boolean; virtual;
@@ -2669,6 +2683,7 @@ type PRNLVersion=^TRNLVersion;
        function AddressSetHost(var aAddress:TRNLAddress;const aName:TRNLRawByteString):boolean; override;
        function AddressGetHost(const aAddress:TRNLAddress;out aName;const aNameLength:TRNLInt32;const aFlags:TRNLInt32=0):boolean; override;
        function AddressGetHostIP(const aAddress:TRNLAddress;out aName;const aNameLength:TRNLInt32):boolean; override;
+       function AddressGetPrimaryInterfaceHostIP(var aAddress:TRNLAddress;const aFamily:TRNLAddressFamily;const aInterfaceHostAddressType:TRNLInterfaceHostAddressType=RNL_INTERFACE_HOST_ADDRESS_UNICAST):boolean; override;
        function SocketCreate(const aType:TRNLSocketType;const aFamily:TRNLAddressFamily):TRNLSocket; override;
        procedure SocketDestroy(const aSocket:TRNLSocket); override;
        function SocketShutdown(const aSocket:TRNLSocket;const aHow:TRNLSocketShutdown=RNL_SOCKET_SHUTDOWN_READ_WRITE):boolean; override;
@@ -3872,6 +3887,18 @@ type PRNLVersion=^TRNLVersion;
 
      PRNLDiscoveryServerRequestPacket=^TRNLDiscoveryServerRequestPacket;
 
+     TRNLDiscoveryServerAnswerPacket=packed record
+      Signature:TRNLDiscoverySignature;
+      ServiceID:TRNLDiscoveryServiceID;
+      ServerVersion:TRNLUInt32;
+      ServerHost:TRNLHostAddress;
+      ServerPort:TRNLUInt16;
+     end;
+
+     PRNLDiscoveryServerAnswerPacket=^TRNLDiscoveryServerAnswerPacket;
+
+     TRNLDiscoveryServerOnAccept=function(const aRequestPacket:TRNLDiscoveryServerRequestPacket):boolean of object;
+
      TRNLDiscoveryServer=class(TThread)
       private
        fInstance:TRNLInstance;
@@ -3879,26 +3906,36 @@ type PRNLVersion=^TRNLVersion;
        fPort:TRNLUInt16;
        fServiceID:TRNLDiscoveryServiceID;
        fServiceVersion:TRNLUInt32;
-       fServiceAddress:TRNLAddress;
-       fServicePort:TRNLUInt32;
+       fServiceAddressIPv4:TRNLAddress;
+       fServiceAddressIPv6:TRNLAddress;
        fFlags:TRNLDiscoveryServerFlags;
-       fSockets:array[0..3] of TRNLSocket;
+       fSockets:TRNLHostSockets;
        fActiveSockets:TRNLSocketArray;
        fEvent:TRNLNetworkEvent;
        fRecvData:array[0..$ffff] of TRNLUInt8;
+       fOnAccept:TRNLDiscoveryServerOnAccept;
       protected
        procedure Execute; override;
       public
-       constructor Create(const aInstance:TRNLInstance;const aNetwork:TRNLNetwork;const aPort:TRNLUInt16;const aServiceID:TRNLDiscoveryServiceID;const aServiceVersion:TRNLUInt32;const aServiceAddress:TRNLAddress;const aServicePort:TRNLUInt32;const aFlags:TRNLDiscoveryServerFlags); reintroduce;
+       constructor Create(const aInstance:TRNLInstance;
+                          const aNetwork:TRNLNetwork;
+                          const aPort:TRNLUInt16;
+                          const aServiceID:TRNLDiscoveryServiceID;
+                          const aServiceVersion:TRNLUInt32;
+                          const aServiceAddressIPv4:TRNLAddress;
+                          const aServiceAddressIPv6:TRNLAddress;
+                          const aFlags:TRNLDiscoveryServerFlags;
+                          const aOnAccept:TRNLDiscoveryServerOnAccept); reintroduce;
        destructor Destroy; override;
        procedure Shutdown;
       public
        property Instance:TRNLInstance read fInstance;
        property Network:TRNLNetwork read fNetwork;
+       property Port:TRNLUInt16 read fPort;
        property ServiceID:TRNLDiscoveryServiceID read fServiceID;
        property ServiceVersion:TRNLUInt32 read fServiceVersion;
-       property ServiceAddress:TRNLAddress read fServiceAddress;
-       property ServicePort:TRNLUInt32 read fServicePort;
+       property ServiceAddressIPv4:TRNLAddress read fServiceAddressIPv4;
+       property ServiceAddressIPv6:TRNLAddress read fServiceAddressIPv6;
        property Flags:TRNLDiscoveryServerFlags read fFlags;
      end;
 
@@ -3946,7 +3983,11 @@ type PRNLVersion=^TRNLVersion;
      end;
 {$endif}
 
-const RNL_HOST_ANY_INIT:TRNLHostAddress=(Addr:(0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0));
+const RNL_ADDRESS_EMPTY:TRNLAddress=(Host:(Addr:(0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0));ScopeID:0;Port:0);
+      RNL_ADDRESS_NONE:TRNLAddress=(Host:(Addr:(0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0));ScopeID:0;Port:0);
+
+      RNL_HOST_NONE:TRNLHostAddress=(Addr:(0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0));
+      RNL_HOST_ANY_INIT:TRNLHostAddress=(Addr:(0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0));
       RNL_HOST_ANY:TRNLHostAddress=(Addr:(0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0));
       RNL_HOST_IPV4_LOCALHOST:TRNLHostAddress=(Addr:(0,0,0,0,0,0,0,0,0,0,255,255,127,0,0,1));
       RNL_IPV4MAPPED_PREFIX_INIT:TRNLHostAddress=(Addr:(0,0,0,0,0,0,0,0,0,0,255,255,0,0,0,0));
@@ -12928,6 +12969,8 @@ constructor TRNLAddress.CreateFromString(const aString:TRNLString);
 
   end;
 
+  result:=true;
+
   if (Index<=StringLength) and (aInputString[Index]=':') then begin
 
    inc(Index);
@@ -13091,6 +13134,11 @@ begin
  end;
 end;
 
+function TRNLAddress.Equals(const aWith:TRNLAddress):boolean;
+begin
+ result:=Host.Equals(aWith.Host) and (ScopeID=aWith.ScopeID) and (Port=aWith.Port);
+end;
+
 {$ifdef Windows}
 function __WSAFDIsSet(s:TRNLSocket;var FDSet:TRNLSocketSet):bool; stdcall; external 'ws2_32.dll' name '__WSAFDIsSet';
 
@@ -13174,18 +13222,6 @@ begin
 {$ifend}
 end;
 
-constructor TRNLHostAddress.CreateFromIPV4(Address:TRNLUInt32);
-begin
- self:=RNL_IPV4MAPPED_PREFIX_INIT;
- TRNLUInt32(TRNLPointer(@Addr[12])^):=Address;
-end;
-
-function TRNLHostAddress.Equals(const aWith:TRNLHostAddress):boolean;
-begin
- result:=(PRNLUInt64Array(TRNLPointer(@self))^[0]=PRNLUInt64Array(TRNLPointer(@aWith))^[0]) and
-         (PRNLUInt64Array(TRNLPointer(@self))^[1]=PRNLUInt64Array(TRNLPointer(@aWith))^[1]);
-end;
-
 function TRNLAddress.GetAddressFamily:TRNLAddressFamily;
 begin
  if (Host.Addr[0]=RNL_IPV4MAPPED_PREFIX.Addr[0]) and
@@ -13204,6 +13240,18 @@ begin
  end else begin
   result:=RNL_IPV6;
  end;
+end;
+
+constructor TRNLHostAddress.CreateFromIPV4(Address:TRNLUInt32);
+begin
+ self:=RNL_IPV4MAPPED_PREFIX_INIT;
+ TRNLUInt32(TRNLPointer(@Addr[12])^):=Address;
+end;
+
+function TRNLHostAddress.Equals(const aWith:TRNLHostAddress):boolean;
+begin
+ result:=(PRNLUInt64Array(TRNLPointer(@self))^[0]=PRNLUInt64Array(TRNLPointer(@aWith))^[0]) and
+         (PRNLUInt64Array(TRNLPointer(@self))^[1]=PRNLUInt64Array(TRNLPointer(@aWith))^[1]);
 end;
 
 var RNLInitializationReferenceCounter:TRNLInt32=0;
@@ -15692,6 +15740,11 @@ begin
  result:=false;
 end;
 
+function TRNLNetwork.AddressGetPrimaryInterfaceHostIP(var aAddress:TRNLAddress;const aFamily:TRNLAddressFamily;const aInterfaceHostAddressType:TRNLInterfaceHostAddressType=RNL_INTERFACE_HOST_ADDRESS_UNICAST):boolean;
+begin
+ result:=false;
+end;
+
 function TRNLNetwork.SocketCreate(const aType:TRNLSocketType;const aFamily:TRNLAddressFamily):TRNLSocket;
 begin
  result:=RNL_SOCKET_NULL;
@@ -16139,6 +16192,106 @@ function TRNLRealNetwork.AddressGetHostIP(const aAddress:TRNLAddress;out aName;c
 begin
  result:=AddressGetHost(aAddress,aName,aNameLength,NI_NUMERICHOST);
 end;
+
+function TRNLRealNetwork.AddressGetPrimaryInterfaceHostIP(var aAddress:TRNLAddress;const aFamily:TRNLAddressFamily;const aInterfaceHostAddressType:TRNLInterfaceHostAddressType=RNL_INTERFACE_HOST_ADDRESS_UNICAST):boolean;
+{$if defined(Windows)}
+var AdapterSize:DWORD;
+    Adapters,Adapter:PIP_ADAPTER_ADDRESSES;
+    AdapterUnicastAddress:PIP_ADAPTER_UNICAST_ADDRESS;
+    AdapterMulticastAddress:PIP_ADAPTER_MULTICAST_ADDRESS;
+    Found:boolean;
+    Temp:array[0..255] of AnsiChar;
+begin
+ case aFamily of
+  RNL_IPV4,RNL_IPV6:begin
+   AdapterSize:=20000;
+   Adapters:=nil;
+   try
+    repeat
+     GetMem(Adapters,AdapterSize);
+     case GetAdaptersAddresses(AF_UNSPEC,GAA_FLAG_INCLUDE_PREFIX,nil,Adapters,@AdapterSize) of
+      ERROR_BUFFER_OVERFLOW:begin
+       FreeMem(Adapters);
+       Adapters:=nil;
+      end;
+      ERROR_SUCCESS:begin
+       break;
+      end;
+      else begin
+       FreeMem(Adapters);
+       Adapters:=nil;
+       break;
+      end;
+     end;
+    until assigned(Adapters);
+    Adapter:=Adapters;
+    Found:=false;
+    while assigned(Adapter) and not Found do begin
+     if (Adapter^.IfType<>24{IF_TYPE_SOFTWARE_LOOPBACK}) and
+        (Adapter^.OperStatus=IfOperStatusUp) then begin
+      case aInterfaceHostAddressType of
+       RNL_INTERFACE_HOST_ADDRESS_UNICAST:begin
+        AdapterUnicastAddress:=Adapter^.FirstUnicastAddress;
+        while assigned(AdapterUnicastAddress) and not Found do begin
+         if ((aFamily=RNL_IPV4) and (AdapterUnicastAddress^.Address.lpSockaddr^.sa_family=AF_INET)) or
+            ((aFamily=RNL_IPV6) and (AdapterUnicastAddress^.Address.lpSockaddr^.sa_family=AF_INET6)) then begin
+          FillChar(Temp,SizeOf(Temp),#0);
+          GetNameInfo(pointer(AdapterUnicastAddress^.Address.lpSockaddr),
+                      AdapterUnicastAddress^.Address.iSockaddrLength,
+                      @Temp[0],
+                      SizeOf(Temp)-1,
+                      nil,
+                      0,
+                      NI_NUMERICHOST);
+          aAddress:=TRNLAddress.CreateFromString(String(PAnsiChar(@Temp[0])));
+          Found:=true;
+          break;
+         end;
+         AdapterUnicastAddress:=AdapterUnicastAddress^.Next;
+        end;
+       end;
+       RNL_INTERFACE_HOST_ADDRESS_MULTICAST:begin
+        AdapterMulticastAddress:=Adapter^.FirstMulticastAddress;
+        while assigned(AdapterMulticastAddress) and not Found do begin
+         if ((aFamily=RNL_IPV4) and (AdapterMulticastAddress^.Address.lpSockaddr^.sa_family=AF_INET)) or
+            ((aFamily=RNL_IPV6) and (AdapterMulticastAddress^.Address.lpSockaddr^.sa_family=AF_INET6)) then begin
+          FillChar(Temp,SizeOf(Temp),#0);
+          GetNameInfo(pointer(AdapterMulticastAddress^.Address.lpSockaddr),
+                      AdapterMulticastAddress^.Address.iSockaddrLength,
+                      @Temp[0],
+                      SizeOf(Temp)-1,
+                      nil,
+                      0,
+                      NI_NUMERICHOST);
+          aAddress:=TRNLAddress.CreateFromString(String(PAnsiChar(@Temp[0])));
+          Found:=true;
+          break;
+         end;
+         AdapterMulticastAddress:=AdapterMulticastAddress^.Next;
+        end;
+       end;
+      end;
+     end;
+     Adapter:=Adapter^.Next;
+    end;
+   finally
+    if assigned(Adapters) then begin
+     FreeMem(Adapters);
+    end;
+   end;
+   result:=Found;
+  end;
+  else
+  begin
+   result:=false;
+  end;
+ end;
+end;
+{$else}
+begin
+ result:=false;
+end;
+{$ifend}
 
 function TRNLRealNetwork.SocketCreate(const aType:TRNLSocketType;const aFamily:TRNLAddressFamily):TRNLSocket;
 {$if defined(Windows)}
@@ -20018,8 +20171,8 @@ begin
 end;
 
 procedure TRNLPeerReliableChannel.DispatchOutgoingAcknowledgementBlockPackets;
-var CountAcknowledgements,AcknowledgementIndex,MaximumAcknowledgementBits,
-    AcknowledgementDataLength,AcknowledgementDataPosition:TRNLSizeUInt;
+var CountAcknowledgements,AcknowledgementIndex:TRNLSizeInt;
+    MaximumAcknowledgementBits,AcknowledgementDataLength,AcknowledgementDataPosition:TRNLSizeUInt;
     BlockPacketSequenceNumber,StartSequenceNumber:TRNLSequenceNumber;
     AcknowledgmentBitIndex:TRNLInt32;
     BlockPacket:TRNLPeerBlockPacket;
@@ -25730,20 +25883,27 @@ begin
  end;
 end;
 
-constructor TRNLDiscoveryServer.Create(const aInstance:TRNLInstance;const aNetwork:TRNLNetwork;const aPort:TRNLUInt16;const aServiceID:TRNLDiscoveryServiceID;const aServiceVersion:TRNLUInt32;const aServiceAddress:TRNLAddress;const aServicePort:TRNLUInt32;const aFlags:TRNLDiscoveryServerFlags);
+constructor TRNLDiscoveryServer.Create(const aInstance:TRNLInstance;
+                                       const aNetwork:TRNLNetwork;
+                                       const aPort:TRNLUInt16;
+                                       const aServiceID:TRNLDiscoveryServiceID;
+                                       const aServiceVersion:TRNLUInt32;
+                                       const aServiceAddressIPv4:TRNLAddress;
+                                       const aServiceAddressIPv6:TRNLAddress;
+                                       const aFlags:TRNLDiscoveryServerFlags;
+                                       const aOnAccept:TRNLDiscoveryServerOnAccept);
 begin
  fInstance:=aInstance;
  fNetwork:=aNetwork;
  fPort:=aPort;
  fServiceID:=aServiceID;
  fServiceVersion:=aServiceVersion;
- fServiceAddress:=aServiceAddress;
- fServicePort:=aServicePort;
+ fServiceAddressIPv4:=aServiceAddressIPv4;
+ fServiceAddressIPv6:=aServiceAddressIPv6;
  fFlags:=aFlags;
- fSockets[0]:=RNL_INVALID_SOCKET;
- fSockets[1]:=RNL_INVALID_SOCKET;
- fSockets[2]:=RNL_INVALID_SOCKET;
- fSockets[3]:=RNL_INVALID_SOCKET;
+ fOnAccept:=aOnAccept;
+ fSockets[0]:=RNL_SOCKET_NULL;
+ fSockets[1]:=RNL_SOCKET_NULL;
  fActiveSockets:=nil;
  fEvent:=TRNLNetworkEvent.Create;
  inherited Create(false);
@@ -25762,30 +25922,32 @@ begin
  if not Finished then begin
   Terminate;
   fEvent.SetEvent;
+  WaitFor;
  end;
 end;
 
 procedure TRNLDiscoveryServer.Execute;
 const Families:array[0..1] of TRNLAddressFamily=(RNL_IPV4,RNL_IPV6);
-var Index,Count,BaseIndex,RecvLength:TRNLInt32;
+var Index,Count,RecvLength:TRNLInt32;
     Address,ClientAddress:TRNLAddress;
-    Conditions:TRNLSocketWaitConditions;
+//  Conditions:TRNLSocketWaitConditions;
     MaxSocket:TRNLSocket;
     ReadSet,WriteSet:TRNLSocketSet;
     DiscoveryServerRequestPacket:PRNLDiscoveryServerRequestPacket;
+    DiscoveryServerAnswerPacket:TRNLDiscoveryServerAnswerPacket;
 begin
 
- for Index:=0 to 3 do begin
-  fSockets[Index]:=RNL_INVALID_SOCKET;
+ for Index:=Low(TRNLHostSockets) to High(TRNLHostSockets) do begin
+  fSockets[Index]:=RNL_SOCKET_NULL;
  end;
 
  Count:=0;
  fActiveSockets:=nil;
- SetLength(fActiveSockets,4);
+ SetLength(fActiveSockets,2);
  MaxSocket:=0;
  for Index:=0 to 1 do begin
-  if ((Index=0) and (RNL_DISCOVERY_SERVER_FLAG_IPV4 in fFlags)) or
-     ((Index=1) and (RNL_DISCOVERY_SERVER_FLAG_IPV6 in fFlags)) then begin
+  if ((Index=0) and (RNL_DISCOVERY_SERVER_FLAG_IPV4 in fFlags) and not fServiceAddressIPv4.Equals(RNL_ADDRESS_NONE)) or
+     ((Index=1) and (RNL_DISCOVERY_SERVER_FLAG_IPV6 in fFlags) and not fServiceAddressIPv6.Equals(RNL_ADDRESS_NONE)) then begin
    case Index of
     0:begin
      // IPv4
@@ -25796,6 +25958,21 @@ begin
      Address:=TRNLAddress.CreateFromString('ff02::c');
     end;
    end;
+   fSockets[Index]:=fNetwork.SocketCreate(RNL_SOCKET_TYPE_DATAGRAM,Families[Index]);
+   if fSockets[Index]<>RNL_SOCKET_NULL then begin
+    if Index=1 then begin
+     fNetwork.SocketSetOption(fSockets[Index],RNL_SOCKET_OPTION_NONBLOCK,1);
+     fNetwork.SocketSetOption(fSockets[Index],RNL_SOCKET_OPTION_IPV6_V6ONLY,1);
+     fNetwork.SocketSetOption(fSockets[Index],RNL_SOCKET_OPTION_REUSEADDR,1);
+    end;
+    if fNetwork.SocketBind(fSockets[Index],@Address,Families[Index]) then begin
+     fNetwork.SocketSetOption(fSockets[Index],RNL_SOCKET_OPTION_NONBLOCK,1);
+     fNetwork.SocketSetOption(fSockets[Index],RNL_SOCKET_OPTION_BROADCAST,1);
+     fNetwork.SocketSetOption(fSockets[Index],RNL_SOCKET_OPTION_REUSEADDR,1);
+    end;
+    fActiveSockets[Count]:=fSockets[Index];
+    inc(Count);
+   end;
   end;
  end;
  SetLength(fActiveSockets,Count);
@@ -25804,9 +25981,8 @@ begin
 
   MaxSocket:=0;
   ReadSet.fd_count:=0;
-  for Index:=0 to 1 do begin
-   BaseIndex:=Index shl 1;
-   if fSockets[BaseIndex]<>RNL_INVALID_SOCKET then begin
+  for Index:=Low(TRNLHostSockets) to High(TRNLHostSockets) do begin
+   if fSockets[Index]<>RNL_SOCKET_NULL then begin
     ReadSet.Add(fSockets[Index]);
     if MaxSocket<fSockets[Index] then begin
      MaxSocket:=fSockets[Index];
@@ -25826,19 +26002,42 @@ begin
     break;
    end else begin
 
-    for Index:=0 to 1 do begin
+    for Index:=Low(TRNLHostSockets) to High(TRNLHostSockets) do begin
 
-     BaseIndex:=Index shl 1;
+     if (fSockets[Index]<>RNL_SOCKET_NULL) and ReadSet.Check(fSockets[Index]) then begin
 
-     if (fSockets[BaseIndex]<>RNL_INVALID_SOCKET) and ReadSet.Check(fSockets[Index]) then begin
+      RecvLength:=fNetwork.Receive(fSockets[Index],
+                                   @ClientAddress,
+                                   fRecvData[0],
+                                   SizeOf(fRecvData),
+                                   Families[Index]);
 
-      RecvLength:=fNetwork.Receive(fSockets[Index],@ClientAddress,fRecvData[0],SizeOf(fRecvData),Families[Index]);
       if RecvLength=SizeOf(TRNLDiscoveryServerRequestPacket) then begin
 
        DiscoveryServerRequestPacket:=Pointer(@fRecvData[0]);
-       if (DiscoveryServerRequestPacket^.Signature=RNLDiscoveryRequestSignature) and (DiscoveryServerRequestPacket^.ServiceID=fServiceID) then begin
+       if (DiscoveryServerRequestPacket^.Signature=RNLDiscoveryRequestSignature) and
+          (DiscoveryServerRequestPacket^.ServiceID=fServiceID) then begin
 
+        if (assigned(fOnAccept) and fOnAccept(DiscoveryServerRequestPacket^)) or not assigned(fOnAccept) then begin
 
+         DiscoveryServerAnswerPacket.Signature:=RNLDiscoveryAnswerSignature;
+         DiscoveryServerAnswerPacket.ServiceID:=fServiceID;
+         DiscoveryServerAnswerPacket.ServerVersion:=fServiceVersion;
+         if Index=0 then begin
+          DiscoveryServerAnswerPacket.ServerHost:=fServiceAddressIPv4.Host;
+          DiscoveryServerAnswerPacket.ServerPort:=fServiceAddressIPv4.Port;
+         end else begin
+          DiscoveryServerAnswerPacket.ServerHost:=fServiceAddressIPv6.Host;
+          DiscoveryServerAnswerPacket.ServerPort:=fServiceAddressIPv6.Port;
+         end;
+
+         fNetwork.Send(fSockets[Index],
+                       @ClientAddress,
+                       DiscoveryServerAnswerPacket,
+                       SizeOf(TRNLDiscoveryServerAnswerPacket),
+                       Families[Index]);
+
+        end;
 
        end;
 
@@ -25850,15 +26049,14 @@ begin
 
    end;
 
-  end else begin
-   break;
   end;
+
  end;
 
- for Index:=0 to 3 do begin
-  if fSockets[Index]<>RNL_INVALID_SOCKET then begin
+ for Index:=Low(TRNLHostSockets) to High(TRNLHostSockets) do begin
+  if fSockets[Index]<>RNL_SOCKET_NULL then begin
    fNetwork.SocketDestroy(fSockets[Index]);
-   fSockets[Index]:=RNL_INVALID_SOCKET;
+   fSockets[Index]:=RNL_SOCKET_NULL;
   end;
  end;
 

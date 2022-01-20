@@ -400,8 +400,13 @@ begin
  ConsoleOutput('Client: Thread stopped');
 end;
 
+const DiscoveryServiceID:TRNLDiscoveryServiceID='123456789012345';
+
 var Server:TServer;
     Client:TClient;
+    DiscoveryServer:TRNLDiscoveryServer;
+    OwnAddressIPV4:TRNLAddress;
+    OwnAddressIPV6:TRNLAddress;
     s:string;
 begin
  s:=ParamStr(1);
@@ -433,7 +438,30 @@ begin
       try
        ConsoleOutputThread:=TConsoleOutputThread.Create(false);
        try
-        if s='server' then begin
+        if s='discovery' then begin
+         RNLMainNetwork.AddressGetPrimaryInterfaceHostIP(OwnAddressIPV4,RNL_IPV4,RNL_INTERFACE_HOST_ADDRESS_UNICAST);
+         RNLMainNetwork.AddressGetPrimaryInterfaceHostIP(OwnAddressIPV6,RNL_IPV6,RNL_INTERFACE_HOST_ADDRESS_UNICAST);
+         OwnAddressIPV4.ScopeID:=0;
+         OwnAddressIPV6.ScopeID:=0;
+         OwnAddressIPV4.Port:=1902;
+         OwnAddressIPV6.Port:=1902;
+         DiscoveryServer:=TRNLDiscoveryServer.Create(RNLInstance,
+                                                     RNLNetwork,
+                                                     1901,
+                                                     DiscoveryServiceID,
+                                                     0,
+                                                     OwnAddressIPV4,
+                                                     OwnAddressIPV6,
+                                                     [RNL_DISCOVERY_SERVER_FLAG_IPV4,
+                                                      RNL_DISCOVERY_SERVER_FLAG_IPV6],
+                                                     nil
+                                                    );
+         try
+          readln;
+         finally
+          FreeAndNil(DiscoveryServer);
+         end;
+        end else if s='server' then begin
          Server:=TServer.Create(false);
          try
           readln;
