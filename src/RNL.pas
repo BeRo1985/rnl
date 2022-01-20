@@ -481,7 +481,8 @@ uses {$if defined(Posix)}
       Windows,
       MMSystem,
       {$ifdef fpc}
-       jwaiptypes,
+       jwaIpTypes,
+       JwaIpHlpApi,
       {$else}
        Winapi.IpTypes,
        Winapi.IpHlpApi,
@@ -496,7 +497,7 @@ uses {$if defined(Posix)}
 {    Generics.Defaults,
      Generics.Collections;}
 
-const RNL_VERSION='1.00.2022.01.20.03.31.0000';
+const RNL_VERSION='1.00.2022.01.20.16.21.0000';
 
 type PPRNLInt8=^PRNLInt8;
      PRNLInt8=^TRNLInt8;
