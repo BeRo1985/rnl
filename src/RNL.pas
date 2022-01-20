@@ -6,7 +6,7 @@
  *                                zlib license                                *
  *============================================================================*
  *                                                                            *
- * Copyright (C) 2016-2021, Benjamin Rosseaux (benjamin@rosseaux.de)          *
+ * Copyright (C) 2016-2022, Benjamin Rosseaux (benjamin@rosseaux.de)          *
  *                                                                            *
  * This software is provided 'as-is', without any express or implied          *
  * warranty. In no event will the authors be held liable for any damages      *
@@ -490,7 +490,7 @@ uses {$if defined(Posix)}
 {    Generics.Defaults,
      Generics.Collections;}
 
-const RNL_VERSION='1.00.2021.07.06.17.34.0000';
+const RNL_VERSION='1.00.2022.01.20.03.31.0000';
 
 type PPRNLInt8=^PRNLInt8;
      PRNLInt8=^TRNLInt8;
@@ -1340,6 +1340,8 @@ type PRNLVersion=^TRNLVersion;
 
      PRNLSocket=^TRNLSocket;
      TRNLSocket=type {$if defined(Unix)}TSocket{$else}TRNLPtrUInt{$ifend};
+
+     TRNLSocketArray=array of TRNLSocket;
 
      PRNLSocketSet=^TRNLSocketSet;
      TRNLSocketSet={$if defined(Posix)}fd_Set{$elseif defined(Unix)}TFDSet{$else}record
@@ -3844,6 +3846,62 @@ type PRNLVersion=^TRNLVersion;
        property OnPeerReceive:TRNLHostOnPeerReceive read fOnPeerReceive write fOnPeerReceive;
      end;
 
+     TRNLDiscoverySignature=array[0..7] of TRNLChar;
+
+     TRNLDiscoveryServiceID=array[0..15] of TRNLChar;
+
+     TRNLDiscoveryServerFlag=
+      (
+       RNL_DISCOVERY_SERVER_FLAG_IPV4=0,
+       RNL_DISCOVERY_SERVER_FLAG_IPV6=1
+      );
+
+     PRNLDiscoveryServerFlag=^TRNLDiscoveryServerFlag;
+
+     TRNLDiscoveryServerFlags=set of TRNLDiscoveryServerFlag;
+
+     PRNLDiscoveryServerFlags=^TRNLDiscoveryServerFlags;
+
+     TRNLDiscoveryServerRequestPacket=packed record
+      Signature:TRNLDiscoverySignature;
+      ServiceID:TRNLDiscoveryServiceID;
+      ClientVersion:TRNLUInt32;
+      ClientHost:TRNLHostAddress;
+      ClientPort:TRNLUInt16;
+     end;
+
+     PRNLDiscoveryServerRequestPacket=^TRNLDiscoveryServerRequestPacket;
+
+     TRNLDiscoveryServer=class(TThread)
+      private
+       fInstance:TRNLInstance;
+       fNetwork:TRNLNetwork;
+       fPort:TRNLUInt16;
+       fServiceID:TRNLDiscoveryServiceID;
+       fServiceVersion:TRNLUInt32;
+       fServiceAddress:TRNLAddress;
+       fServicePort:TRNLUInt32;
+       fFlags:TRNLDiscoveryServerFlags;
+       fSockets:array[0..3] of TRNLSocket;
+       fActiveSockets:TRNLSocketArray;
+       fEvent:TRNLNetworkEvent;
+       fRecvData:array[0..$ffff] of TRNLUInt8;
+      protected
+       procedure Execute; override;
+      public
+       constructor Create(const aInstance:TRNLInstance;const aNetwork:TRNLNetwork;const aPort:TRNLUInt16;const aServiceID:TRNLDiscoveryServiceID;const aServiceVersion:TRNLUInt32;const aServiceAddress:TRNLAddress;const aServicePort:TRNLUInt32;const aFlags:TRNLDiscoveryServerFlags); reintroduce;
+       destructor Destroy; override;
+       procedure Shutdown;
+      public
+       property Instance:TRNLInstance read fInstance;
+       property Network:TRNLNetwork read fNetwork;
+       property ServiceID:TRNLDiscoveryServiceID read fServiceID;
+       property ServiceVersion:TRNLUInt32 read fServiceVersion;
+       property ServiceAddress:TRNLAddress read fServiceAddress;
+       property ServicePort:TRNLUInt32 read fServicePort;
+       property Flags:TRNLDiscoveryServerFlags read fFlags;
+     end;
+
 {$ifdef RNLWorkInProgress}
      TRNLTCPToUDPBridge=class;
 
@@ -3920,7 +3978,11 @@ function SARInt64(Value:TRNLInt64;Shift:TRNLInt32):TRNLInt64;
 
 implementation
 
-const RNLProtocolHandshakePacketHeaderSignature:TRNLProtocolHandshakePacketHeaderSignature=
+const RNLDiscoveryRequestSignature:TRNLDiscoverySignature=('R','N','L','D','R',#0,#0,#0);
+
+      RNLDiscoveryAnswerSignature:TRNLDiscoverySignature=('R','N','L','D','A',#0,#0,#0);
+
+      RNLProtocolHandshakePacketHeaderSignature:TRNLProtocolHandshakePacketHeaderSignature=
        (TRNLUInt8(ord('R')),
         TRNLUInt8(ord('N')),
         TRNLUInt8(ord('L')),
@@ -12887,7 +12949,11 @@ constructor TRNLAddress.CreateFromString(const aString:TRNLString);
  end;
 begin
  FillChar(self,SizeOf(TRNLAddress),#0);
- ParseIP(aString,self);
+ if ParseIP(aString,self) then begin
+  ScopeID:=0;
+ end else begin
+  ScopeID:=TRNLUInt32($deadc0d3);
+ end;
 end;
 
 function TRNLAddress.ToString:TRNLString;
@@ -17309,246 +17375,9 @@ begin
 end;
 
 function TRNLVirtualNetwork.AddressSetHost(var aAddress:TRNLAddress;const aName:TRNLRawByteString):boolean;
- function ParseIP(const aInputString:TRNLRawByteString;out aAddress:TRNLAddress):boolean;
- var Index,Part,StringLength,Value,Base,
-     FirstColonPosition,
-     FirstDotPosition,
-     FirstOpenBracketPosition,
-     FirstCloseBracketPosition,
-     ZeroCompressionLocation:TRNLSizeInt;
-     IsLocalIPv6:boolean;
- begin
-
-  result:=false;
-
-  StringLength:=length(aInputString);
-
-  FirstColonPosition:=0;
-  FirstDotPosition:=0;
-  FirstOpenBracketPosition:=0;
-  FirstCloseBracketPosition:=0;
-
-  for Index:=1 to StringLength do begin
-   case aInputString[Index] of
-    ':':begin
-     if FirstColonPosition=0 then begin
-      FirstColonPosition:=Index;
-     end;
-    end;
-    '.':begin
-     if FirstDotPosition=0 then begin
-      FirstDotPosition:=Index;
-     end;
-    end;
-    '[':begin
-     if FirstOpenBracketPosition=0 then begin
-      FirstOpenBracketPosition:=Index;
-     end;
-    end;
-    ']':begin
-     if FirstCloseBracketPosition=0 then begin
-      FirstCloseBracketPosition:=Index;
-     end;
-    end;
-   end;
-  end;
-
-  IsLocalIPv6:=(FirstOpenBracketPosition>0) or
-               (FirstDotPosition=0) or
-               ((FirstColonPosition>0) and
-                ((FirstDotPosition=0) or
-                 (FirstColonPosition<FirstDotPosition)));
-
-  if IsLocalIPv6 then begin
-
-   if (FirstOpenBracketPosition>0) and
-      ((FirstCloseBracketPosition=0) or
-       (FirstOpenBracketPosition>FirstCloseBracketPosition)) then begin
-    exit;
-   end;
-
-   ZeroCompressionLocation:=-1;
-
-   Index:=FirstOpenBracketPosition+1;
-
-   Part:=0;
-   while Part<16 do begin
-
-    Value:=0;
-
-    if (Index<=StringLength) and (aInputString[Index] in ['0'..'9','a'..'f','A'..'F']) then begin
-
-     Base:=Index;
-
-     while Index<=StringLength do begin
-      case aInputString[Index] of
-       '0'..'9':begin
-        Value:=(Value shl 4) or (ord(aInputString[Index])-ord('0'));
-       end;
-       'a'..'f':begin
-        Value:=(Value shl 4) or ((ord(aInputString[Index])-ord('a'))+$a);
-       end;
-       'A'..'F':begin
-        Value:=(Value shl 4) or ((ord(aInputString[Index])-ord('A'))+$a);
-       end;
-       else begin
-        break;
-       end;
-      end;
-      inc(Index);
-     end;
-
-     if (Index<=StringLength) and (aInputString[Index]='.') then begin
-
-      Index:=Base;
-
-      Base:=Part;
-
-      for Part:=0 to 3 do begin
-
-       if not ((Index<=StringLength) and (aInputString[Index] in ['0'..'9'])) then begin
-        exit;
-       end;
-
-       Value:=0;
-       while (Index<=StringLength) and (aInputString[Index] in ['0'..'9']) do begin
-        Value:=(Value*10)+(ord(aInputString[Index])-ord('0'));
-        inc(Index);
-       end;
-
-       aAddress.Host.Addr[Base+Part]:=Value;
-
-       if Part<>3 then begin
-        if (Index<=StringLength) and (aInputString[Index]='.') then begin
-         inc(Index);
-        end else begin
-         exit;
-        end;
-       end;
-
-      end;
-
-      Part:=Base+4;
-
-      break;
-
-     end else begin
-
-      if Part<14 then begin
-       if (Index<=StringLength) and (aInputString[Index]=':') then begin
-        inc(Index);
-       end else begin
-        exit;
-       end;
-      end;
-
-      aAddress.Host.Addr[Part+0]:=Value shr 8;
-      aAddress.Host.Addr[Part+1]:=Value and $ff;
-
-     end;
-
-    end else begin
-
-     if ZeroCompressionLocation>=0 then begin
-      if Index=(FirstOpenBracketPosition+1) then begin
-       dec(Part);
-       break;
-      end else begin
-       exit;
-      end;
-     end;
-
-     if (Index<=StringLength) and (aInputString[Index]=':') then begin
-      if Part=0 then begin
-       inc(Index);
-       if (not (Index<=StringLength) and (aInputString[Index]=':')) then begin
-        exit;
-       end;
-      end;
-      inc(Index);
-      ZeroCompressionLocation:=Part;
-     end else begin
-      exit;
-     end;
-
-    end;
-
-    inc(Part,2);
-
-   end;
-
-   if FirstCloseBracketPosition>0 then begin
-    Index:=FirstCloseBracketPosition+1;
-   end;
-
-   if ZeroCompressionLocation>=0 then begin
-    System.Move(aAddress.Host.Addr[ZeroCompressionLocation],
-                aAddress.Host.Addr[16-(Part-ZeroCompressionLocation)],
-                Part-ZeroCompressionLocation);
-    FillChar(aAddress.Host.Addr[ZeroCompressionLocation],(16-(Part-ZeroCompressionLocation))-ZeroCompressionLocation,#0);
-   end;
-
-  end else begin
-
-   if (FirstDotPosition=0) or
-      (FirstColonPosition>FirstDotPosition) or
-      (FirstOpenBracketPosition>0) or
-      (FirstCloseBracketPosition>0) then begin
-    exit;
-   end;
-
-   aAddress.Host:=RNL_IPV4MAPPED_PREFIX;
-
-   Index:=1;
-
-   for Part:=0 to 3 do begin
-
-    if not ((Index<=StringLength) and (aInputString[Index] in ['0'..'9'])) then begin
-     exit;
-    end;
-
-    Value:=0;
-    while (Index<=StringLength) and (aInputString[Index] in ['0'..'9']) do begin
-     Value:=(Value*10)+(ord(aInputString[Index])-ord('0'));
-     inc(Index);
-    end;
-
-    aAddress.Host.Addr[RNL_IPV4MAPPED_PREFIX_LEN+Part]:=Value;
-
-    if Part<>3 then begin
-     if (Index<=StringLength) and (aInputString[Index]='.') then begin
-      inc(Index);
-     end else begin
-      exit;
-     end;
-    end;
-
-   end;
-
-  end;
-
-  if (Index<=StringLength) and (aInputString[Index]=':') then begin
-
-   inc(Index);
-
-   if not ((Index<=StringLength) and (aInputString[Index] in ['0'..'9'])) then begin
-    exit;
-   end;
-
-   Value:=0;
-   while (Index<=StringLength) and (aInputString[Index] in ['0'..'9']) do begin
-    Value:=(Value*10)+(ord(aInputString[Index])-ord('0'));
-    inc(Index);
-   end;
-
-   aAddress.Port:=Value;
-
-  end;
-
- end;
 begin
- FillChar(aAddress,SizeOf(TRNLAddress),#0);
- result:=ParseIP(aName,aAddress);
+ aAddress:=TRNLAddress.CreateFromString(aName);
+ result:=aAddress.ScopeID<>TRNLUInt32($deadc0d3);
 end;
 
 function TRNLVirtualNetwork.AddressGetHost(const aAddress:TRNLAddress;out aName;const aNameLength:TRNLInt32;const aFlags:TRNLInt32=0):boolean;
@@ -25899,6 +25728,140 @@ begin
  if assigned(fNetworkEvent) then begin
   fNetworkEvent.SetEvent;
  end;
+end;
+
+constructor TRNLDiscoveryServer.Create(const aInstance:TRNLInstance;const aNetwork:TRNLNetwork;const aPort:TRNLUInt16;const aServiceID:TRNLDiscoveryServiceID;const aServiceVersion:TRNLUInt32;const aServiceAddress:TRNLAddress;const aServicePort:TRNLUInt32;const aFlags:TRNLDiscoveryServerFlags);
+begin
+ fInstance:=aInstance;
+ fNetwork:=aNetwork;
+ fPort:=aPort;
+ fServiceID:=aServiceID;
+ fServiceVersion:=aServiceVersion;
+ fServiceAddress:=aServiceAddress;
+ fServicePort:=aServicePort;
+ fFlags:=aFlags;
+ fSockets[0]:=RNL_INVALID_SOCKET;
+ fSockets[1]:=RNL_INVALID_SOCKET;
+ fSockets[2]:=RNL_INVALID_SOCKET;
+ fSockets[3]:=RNL_INVALID_SOCKET;
+ fActiveSockets:=nil;
+ fEvent:=TRNLNetworkEvent.Create;
+ inherited Create(false);
+end;
+
+destructor TRNLDiscoveryServer.Destroy;
+begin
+ Shutdown;
+ fActiveSockets:=nil;
+ FreeAndNil(fEvent);
+ inherited Destroy;
+end;
+
+procedure TRNLDiscoveryServer.Shutdown;
+begin
+ if not Finished then begin
+  Terminate;
+  fEvent.SetEvent;
+ end;
+end;
+
+procedure TRNLDiscoveryServer.Execute;
+const Families:array[0..1] of TRNLAddressFamily=(RNL_IPV4,RNL_IPV6);
+var Index,Count,BaseIndex,RecvLength:TRNLInt32;
+    Address,ClientAddress:TRNLAddress;
+    Conditions:TRNLSocketWaitConditions;
+    MaxSocket:TRNLSocket;
+    ReadSet,WriteSet:TRNLSocketSet;
+    DiscoveryServerRequestPacket:PRNLDiscoveryServerRequestPacket;
+begin
+
+ for Index:=0 to 3 do begin
+  fSockets[Index]:=RNL_INVALID_SOCKET;
+ end;
+
+ Count:=0;
+ fActiveSockets:=nil;
+ SetLength(fActiveSockets,4);
+ MaxSocket:=0;
+ for Index:=0 to 1 do begin
+  if ((Index=0) and (RNL_DISCOVERY_SERVER_FLAG_IPV4 in fFlags)) or
+     ((Index=1) and (RNL_DISCOVERY_SERVER_FLAG_IPV6 in fFlags)) then begin
+   case Index of
+    0:begin
+     // IPv4
+     Address:=TRNLAddress.CreateFromString('239.255.255.250');
+    end;
+    else begin
+     // IPv6
+     Address:=TRNLAddress.CreateFromString('ff02::c');
+    end;
+   end;
+  end;
+ end;
+ SetLength(fActiveSockets,Count);
+
+ while not Terminated do begin
+
+  MaxSocket:=0;
+  ReadSet.fd_count:=0;
+  for Index:=0 to 1 do begin
+   BaseIndex:=Index shl 1;
+   if fSockets[BaseIndex]<>RNL_INVALID_SOCKET then begin
+    ReadSet.Add(fSockets[Index]);
+    if MaxSocket<fSockets[Index] then begin
+     MaxSocket:=fSockets[Index];
+    end;
+   end;
+  end;
+
+  WriteSet.fd_count:=0;
+
+  if fNetwork.SocketSelect(MaxSocket,
+                           ReadSet,
+                           WriteSet,
+                           1000,
+                           fEvent)>0 then begin
+
+   if Terminated then begin
+    break;
+   end else begin
+
+    for Index:=0 to 1 do begin
+
+     BaseIndex:=Index shl 1;
+
+     if (fSockets[BaseIndex]<>RNL_INVALID_SOCKET) and ReadSet.Check(fSockets[Index]) then begin
+
+      RecvLength:=fNetwork.Receive(fSockets[Index],@ClientAddress,fRecvData[0],SizeOf(fRecvData),Families[Index]);
+      if RecvLength=SizeOf(TRNLDiscoveryServerRequestPacket) then begin
+
+       DiscoveryServerRequestPacket:=Pointer(@fRecvData[0]);
+       if (DiscoveryServerRequestPacket^.Signature=RNLDiscoveryRequestSignature) and (DiscoveryServerRequestPacket^.ServiceID=fServiceID) then begin
+
+
+
+       end;
+
+      end;
+
+     end;
+
+    end;
+
+   end;
+
+  end else begin
+   break;
+  end;
+ end;
+
+ for Index:=0 to 3 do begin
+  if fSockets[Index]<>RNL_INVALID_SOCKET then begin
+   fNetwork.SocketDestroy(fSockets[Index]);
+   fSockets[Index]:=RNL_INVALID_SOCKET;
+  end;
+ end;
+
 end;
 
 {$ifdef RNLWorkInProgress}
