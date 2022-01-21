@@ -26220,7 +26220,7 @@ begin
     WriteSet.fd_count:=0;
 
     NowTime:=aInstance.GetTime;
-    TimeOut:=StopTime-NowTime;
+    TimeOut:=StopTime.Value-NowTime.Value;
     if TimeOut<1 then begin
      TimeOut:=1;
     end else if TimeOut>10 then begin
