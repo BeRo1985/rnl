@@ -497,7 +497,7 @@ uses {$if defined(Posix)}
 {    Generics.Defaults,
      Generics.Collections;}
 
-const RNL_VERSION='1.00.2022.01.20.16.21.0000';
+const RNL_VERSION='1.00.2022.01.21.01.41.0000';
 
 type PPRNLInt8=^PRNLInt8;
      PRNLInt8=^TRNLInt8;
@@ -3878,27 +3878,31 @@ type PRNLVersion=^TRNLVersion;
 
      PRNLDiscoveryServerFlags=^TRNLDiscoveryServerFlags;
 
-     TRNLDiscoveryServerRequestPacket=packed record
+     TRNLDiscoveryMeta=String[255];
+
+     TRNLDiscoveryRequestPacket=packed record
       Signature:TRNLDiscoverySignature;
       ServiceID:TRNLDiscoveryServiceID;
       ClientVersion:TRNLUInt32;
       ClientHost:TRNLHostAddress;
       ClientPort:TRNLUInt16;
+      Meta:TRNLDiscoveryMeta;
      end;
 
-     PRNLDiscoveryServerRequestPacket=^TRNLDiscoveryServerRequestPacket;
+     PRNLDiscoveryRequestPacket=^TRNLDiscoveryRequestPacket;
 
-     TRNLDiscoveryServerAnswerPacket=packed record
+     TRNLDiscoveryAnswerPacket=packed record
       Signature:TRNLDiscoverySignature;
       ServiceID:TRNLDiscoveryServiceID;
       ServerVersion:TRNLUInt32;
       ServerHost:TRNLHostAddress;
       ServerPort:TRNLUInt16;
+      Meta:TRNLDiscoveryMeta;
      end;
 
-     PRNLDiscoveryServerAnswerPacket=^TRNLDiscoveryServerAnswerPacket;
+     PRNLDiscoveryAnswerPacket=^TRNLDiscoveryAnswerPacket;
 
-     TRNLDiscoveryServerOnAccept=function(const aRequestPacket:TRNLDiscoveryServerRequestPacket):boolean of object;
+     TRNLDiscoveryServerOnAccept=function(const aRequestPacket:TRNLDiscoveryRequestPacket):boolean of object;
 
      TRNLDiscoveryServer=class(TThread)
       private
@@ -3910,11 +3914,12 @@ type PRNLVersion=^TRNLVersion;
        fServiceAddressIPv4:TRNLAddress;
        fServiceAddressIPv6:TRNLAddress;
        fFlags:TRNLDiscoveryServerFlags;
+       fOnAccept:TRNLDiscoveryServerOnAccept;
+       fMeta:TRNLDiscoveryMeta;
        fSockets:TRNLHostSockets;
        fActiveSockets:TRNLSocketArray;
        fEvent:TRNLNetworkEvent;
        fRecvData:array[0..$ffff] of TRNLUInt8;
-       fOnAccept:TRNLDiscoveryServerOnAccept;
       protected
        procedure Execute; override;
       public
@@ -3926,7 +3931,8 @@ type PRNLVersion=^TRNLVersion;
                           const aServiceAddressIPv4:TRNLAddress;
                           const aServiceAddressIPv6:TRNLAddress;
                           const aFlags:TRNLDiscoveryServerFlags;
-                          const aOnAccept:TRNLDiscoveryServerOnAccept); reintroduce;
+                          const aOnAccept:TRNLDiscoveryServerOnAccept=nil;
+                          const aMeta:TRNLDiscoveryMeta=''); reintroduce;
        destructor Destroy; override;
        procedure Shutdown;
       public
@@ -3943,6 +3949,7 @@ type PRNLVersion=^TRNLVersion;
      TRNLDiscoveryService=record
       Address:TRNLAddress;
       ServiceVersion:TRNLUInt32;
+      Meta:TRNLDiscoveryMeta;
      end;
 
      PRNLDiscoveryService=^TRNLDiscoveryService;
@@ -3958,6 +3965,7 @@ type PRNLVersion=^TRNLVersion;
                                const aMulticastIPV6Address:TRNLAddress;
                                const aServiceID:TRNLDiscoveryServiceID;
                                const aServiceVersion:TRNLUInt32;
+                               const aMeta:TRNLDiscoveryMeta='';
                                const aMaximumServers:TRNLInt32=1;
                                const aTimeOut:TRNLInt32=1000):TRNLDiscoveryServices; static;
      end;
@@ -25919,7 +25927,8 @@ constructor TRNLDiscoveryServer.Create(const aInstance:TRNLInstance;
                                        const aServiceAddressIPv4:TRNLAddress;
                                        const aServiceAddressIPv6:TRNLAddress;
                                        const aFlags:TRNLDiscoveryServerFlags;
-                                       const aOnAccept:TRNLDiscoveryServerOnAccept);
+                                       const aOnAccept:TRNLDiscoveryServerOnAccept;
+                                       const aMeta:TRNLDiscoveryMeta);
 begin
  fInstance:=aInstance;
  fNetwork:=aNetwork;
@@ -25930,6 +25939,7 @@ begin
  fServiceAddressIPv6:=aServiceAddressIPv6;
  fFlags:=aFlags;
  fOnAccept:=aOnAccept;
+ fMeta:=aMeta;
  fSockets[0]:=RNL_SOCKET_NULL;
  fSockets[1]:=RNL_SOCKET_NULL;
  fActiveSockets:=nil;
@@ -25961,8 +25971,8 @@ var Index,Count,RecvLength:TRNLInt32;
 //  Conditions:TRNLSocketWaitConditions;
     MaxSocket:TRNLSocket;
     ReadSet,WriteSet:TRNLSocketSet;
-    DiscoveryServerRequestPacket:PRNLDiscoveryServerRequestPacket;
-    DiscoveryServerAnswerPacket:TRNLDiscoveryServerAnswerPacket;
+    DiscoveryRequestPacket:PRNLDiscoveryRequestPacket;
+    DiscoveryAnswerPacket:TRNLDiscoveryAnswerPacket;
 begin
 
  for Index:=Low(TRNLHostSockets) to High(TRNLHostSockets) do begin
@@ -26039,34 +26049,35 @@ begin
                                     SizeOf(fRecvData),
                                     Families[Index]);
 
-       if RecvLength=SizeOf(TRNLDiscoveryServerRequestPacket) then begin
+       if RecvLength=SizeOf(TRNLDiscoveryRequestPacket) then begin
 
-        DiscoveryServerRequestPacket:=Pointer(@fRecvData[0]);
-        if (DiscoveryServerRequestPacket^.Signature=RNLDiscoveryRequestSignature) and
-           (DiscoveryServerRequestPacket^.ServiceID=fServiceID) then begin
+        DiscoveryRequestPacket:=Pointer(@fRecvData[0]);
+        if (DiscoveryRequestPacket^.Signature=RNLDiscoveryRequestSignature) and
+           (DiscoveryRequestPacket^.ServiceID=fServiceID) then begin
 
-         DiscoveryServerRequestPacket^.ClientVersion:=TRNLEndianness.LittleEndianToHost32(DiscoveryServerRequestPacket^.ClientVersion);
-         DiscoveryServerRequestPacket^.ClientPort:=TRNLEndianness.LittleEndianToHost16(DiscoveryServerRequestPacket^.ClientPort);
+         DiscoveryRequestPacket^.ClientVersion:=TRNLEndianness.LittleEndianToHost32(DiscoveryRequestPacket^.ClientVersion);
+         DiscoveryRequestPacket^.ClientPort:=TRNLEndianness.LittleEndianToHost16(DiscoveryRequestPacket^.ClientPort);
 
-         if (assigned(fOnAccept) and fOnAccept(DiscoveryServerRequestPacket^)) or not assigned(fOnAccept) then begin
+         if (assigned(fOnAccept) and fOnAccept(DiscoveryRequestPacket^)) or not assigned(fOnAccept) then begin
 
-          DiscoveryServerAnswerPacket.Signature:=RNLDiscoveryAnswerSignature;
-          DiscoveryServerAnswerPacket.ServiceID:=fServiceID;
-          DiscoveryServerAnswerPacket.ServerVersion:=TRNLEndianness.HostToLittleEndian32(fServiceVersion);
+          DiscoveryAnswerPacket.Signature:=RNLDiscoveryAnswerSignature;
+          DiscoveryAnswerPacket.ServiceID:=fServiceID;
+          DiscoveryAnswerPacket.ServerVersion:=TRNLEndianness.HostToLittleEndian32(fServiceVersion);
           if Index=0 then begin
-           DiscoveryServerAnswerPacket.ServerHost:=fServiceAddressIPv4.Host;
-           DiscoveryServerAnswerPacket.ServerPort:=TRNLEndianness.HostToLittleEndian16(fServiceAddressIPv4.Port);
+           DiscoveryAnswerPacket.ServerHost:=fServiceAddressIPv4.Host;
+           DiscoveryAnswerPacket.ServerPort:=TRNLEndianness.HostToLittleEndian16(fServiceAddressIPv4.Port);
           end else begin
-           DiscoveryServerAnswerPacket.ServerHost:=fServiceAddressIPv6.Host;
-           DiscoveryServerAnswerPacket.ServerPort:=TRNLEndianness.HostToLittleEndian16(fServiceAddressIPv6.Port);
+           DiscoveryAnswerPacket.ServerHost:=fServiceAddressIPv6.Host;
+           DiscoveryAnswerPacket.ServerPort:=TRNLEndianness.HostToLittleEndian16(fServiceAddressIPv6.Port);
           end;
+          DiscoveryAnswerPacket.Meta:=fMeta;
 
-          ClientAddress.Port:=DiscoveryServerRequestPacket^.ClientPort;
+          ClientAddress.Port:=DiscoveryRequestPacket^.ClientPort;
 
           fNetwork.Send(fSockets[Index],
                         @ClientAddress,
-                        DiscoveryServerAnswerPacket,
-                        SizeOf(TRNLDiscoveryServerAnswerPacket),
+                        DiscoveryAnswerPacket,
+                        SizeOf(TRNLDiscoveryAnswerPacket),
                         Families[Index]);
 
          end;
@@ -26105,6 +26116,7 @@ class function TRNLDiscoveryClient.Discover(const aInstance:TRNLInstance;
                                             const aMulticastIPV6Address:TRNLAddress;
                                             const aServiceID:TRNLDiscoveryServiceID;
                                             const aServiceVersion:TRNLUInt32;
+                                            const aMeta:TRNLDiscoveryMeta='';
                                             const aMaximumServers:TRNLInt32=1;
                                             const aTimeOut:TRNLInt32=1000):TRNLDiscoveryServices;
 const Families:array[0..1] of TRNLAddressFamily=(RNL_IPV4,RNL_IPV6);
@@ -26112,8 +26124,8 @@ var Index,Count,RecvLength,OtherIndex:TRNLInt32;
     Address,ClientAddress:TRNLAddress;
     MaxSocket:TRNLSocket;
     ReadSet,WriteSet:TRNLSocketSet;
-    DiscoveryServerRequestPacket:TRNLDiscoveryServerRequestPacket;
-    DiscoveryServerAnswerPacket:TRNLDiscoveryServerAnswerPacket;
+    DiscoveryRequestPacket:TRNLDiscoveryRequestPacket;
+    DiscoveryAnswerPacket:TRNLDiscoveryAnswerPacket;
     Sockets:TRNLHostSockets;
     NowTime,StartTime,StopTime:TRNLTime;
     TimeOut:TRNLInt64;
@@ -26125,11 +26137,12 @@ begin
  Count:=0;
  try
 
-  DiscoveryServerRequestPacket.Signature:=RNLDiscoveryRequestSignature;
-  DiscoveryServerRequestPacket.ServiceID:=aServiceID;
-  DiscoveryServerRequestPacket.ClientVersion:=TRNLEndianness.HostToLittleEndian32(aServiceVersion);
-  DiscoveryServerRequestPacket.ClientHost:=RNL_HOST_NONE;
-  DiscoveryServerRequestPacket.ClientPort:=TRNLEndianness.HostToLittleEndian16(aPort);
+  DiscoveryRequestPacket.Signature:=RNLDiscoveryRequestSignature;
+  DiscoveryRequestPacket.ServiceID:=aServiceID;
+  DiscoveryRequestPacket.ClientVersion:=TRNLEndianness.HostToLittleEndian32(aServiceVersion);
+  DiscoveryRequestPacket.ClientHost:=RNL_HOST_NONE;
+  DiscoveryRequestPacket.ClientPort:=TRNLEndianness.HostToLittleEndian16(aPort);
+  DiscoveryRequestPacket.Meta:=aMeta;
 
   for Index:=Low(TRNLHostSockets) to High(TRNLHostSockets) do begin
    Sockets[Index]:=RNL_SOCKET_NULL;
@@ -26178,15 +26191,15 @@ begin
        0:begin
         aNetwork.Send(Sockets[Index],
                       @aMulticastIPV4Address,
-                      DiscoveryServerRequestPacket,
-                      SizeOf(TRNLDiscoveryServerRequestPacket),
+                      DiscoveryRequestPacket,
+                      SizeOf(TRNLDiscoveryRequestPacket),
                       Families[Index]);
        end;
        1:begin
         aNetwork.Send(Sockets[Index],
                       @aMulticastIPV6Address,
-                      DiscoveryServerRequestPacket,
-                      SizeOf(TRNLDiscoveryServerRequestPacket),
+                      DiscoveryRequestPacket,
+                      SizeOf(TRNLDiscoveryRequestPacket),
                       Families[Index]);
        end;
       end;
@@ -26225,23 +26238,24 @@ begin
 
        RecvLength:=aNetwork.Receive(Sockets[Index],
                                     @ClientAddress,
-                                    DiscoveryServerAnswerPacket,
-                                    SizeOf(TRNLDiscoveryServerAnswerPacket),
+                                    DiscoveryAnswerPacket,
+                                    SizeOf(TRNLDiscoveryAnswerPacket),
                                     Families[Index]);
 
-       if RecvLength=SizeOf(TRNLDiscoveryServerAnswerPacket) then begin
+       if RecvLength=SizeOf(TRNLDiscoveryAnswerPacket) then begin
 
-        if (DiscoveryServerAnswerPacket.Signature=RNLDiscoveryAnswerSignature) and
-           (DiscoveryServerAnswerPacket.ServiceID=aServiceID) then begin
+        if (DiscoveryAnswerPacket.Signature=RNLDiscoveryAnswerSignature) and
+           (DiscoveryAnswerPacket.ServiceID=aServiceID) then begin
 
-         if DiscoveryServerAnswerPacket.ServerHost.Equals(RNL_HOST_NONE) then begin
+         if DiscoveryAnswerPacket.ServerHost.Equals(RNL_HOST_NONE) then begin
           DiscoveryService.Address.Host:=ClientAddress.Host;
          end else begin
-          DiscoveryService.Address.Host:=DiscoveryServerAnswerPacket.ServerHost;
+          DiscoveryService.Address.Host:=DiscoveryAnswerPacket.ServerHost;
          end;
          DiscoveryService.Address.ScopeID:=ClientAddress.ScopeID;
-         DiscoveryService.Address.Port:=DiscoveryServerAnswerPacket.ServerPort;
-         DiscoveryService.ServiceVersion:=DiscoveryServerAnswerPacket.ServerVersion;
+         DiscoveryService.Address.Port:=DiscoveryAnswerPacket.ServerPort;
+         DiscoveryService.ServiceVersion:=DiscoveryAnswerPacket.ServerVersion;
+         DiscoveryService.Meta:=DiscoveryAnswerPacket.Meta;
 
          Found:=false;
          for OtherIndex:=0 to Count-1 do begin

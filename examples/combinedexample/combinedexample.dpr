@@ -457,7 +457,8 @@ begin
                                                      OwnAddressIPV6,
                                                      [RNL_DISCOVERY_SERVER_FLAG_IPV4,
                                                       RNL_DISCOVERY_SERVER_FLAG_IPV6],
-                                                     nil
+                                                     nil,
+                                                     ''
                                                     );
          try
           DiscoveryServices:=TRNLDiscoveryClient.Discover(RNLInstance,
@@ -467,6 +468,7 @@ begin
                                                           TRNLAddress.CreateFromString('[ff02::1]:1901'),
                                                           DiscoveryServiceID,
                                                           0,
+                                                          '',
                                                           1,
                                                           1000
                                                          );
