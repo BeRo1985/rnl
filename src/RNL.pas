@@ -497,7 +497,7 @@ uses {$if defined(Posix)}
 {    Generics.Defaults,
      Generics.Collections;}
 
-const RNL_VERSION='1.00.2022.01.21.01.41.0000';
+const RNL_VERSION='1.00.2022.01.29.07.59.0000';
 
 type PPRNLInt8=^PRNLInt8;
      PRNLInt8=^TRNLInt8;
@@ -1359,6 +1359,7 @@ type PRNLVersion=^TRNLVersion;
      TRNLSocketSetHelper=record helper for TRNLSocketSet
       public
        class function Empty:TRNLSocketSet; static;
+       procedure Clear;
        procedure Add(const aSocket:TRNLSocket);
        procedure Remove(const aSocket:TRNLSocket);
        function Check(const aSocket:TRNLSocket):boolean;
@@ -13222,6 +13223,17 @@ begin
  fpFD_ZERO(result);
 {$else}
  FD_ZERO(result);
+{$ifend}
+end;
+
+procedure TRNLSocketSetHelper.Clear;
+begin
+{$if defined(Posix)}
+ __FD_ZERO(self);
+{$elseif defined(Unix)}
+ fpFD_ZERO(self);
+{$else}
+ FD_ZERO(self);
 {$ifend}
 end;
 
@@ -26017,7 +26029,7 @@ begin
   while not Terminated do begin
 
    MaxSocket:=0;
-   ReadSet.fd_count:=0;
+   ReadSet.Clear;
    for Index:=Low(TRNLHostSockets) to High(TRNLHostSockets) do begin
     if fSockets[Index]<>RNL_SOCKET_NULL then begin
      ReadSet.Add(fSockets[Index]);
@@ -26027,7 +26039,7 @@ begin
     end;
    end;
 
-   WriteSet.fd_count:=0;
+   WriteSet.Clear;
 
    if fNetwork.SocketSelect(MaxSocket,
                             ReadSet,
@@ -26207,7 +26219,7 @@ begin
     end;
 
     MaxSocket:=0;
-    ReadSet.fd_count:=0;
+    ReadSet.Clear;
     for Index:=Low(TRNLHostSockets) to High(TRNLHostSockets) do begin
      if Sockets[Index]<>RNL_SOCKET_NULL then begin
       ReadSet.Add(Sockets[Index]);
@@ -26217,7 +26229,7 @@ begin
      end;
     end;
 
-    WriteSet.fd_count:=0;
+    WriteSet.Clear;
 
     NowTime:=aInstance.GetTime;
     TimeOut:=StopTime.Value-NowTime.Value;
