@@ -497,7 +497,7 @@ uses {$if defined(Posix)}
 {    Generics.Defaults,
      Generics.Collections;}
 
-const RNL_VERSION='1.00.2022.01.29.07.59.0000';
+const RNL_VERSION='1.00.2022.02.11.05.12.0000';
 
 type PPRNLInt8=^PRNLInt8;
      PRNLInt8=^TRNLInt8;
@@ -4132,6 +4132,23 @@ const RNLDiscoveryRequestSignature:TRNLDiscoverySignature=('R','N','L','D','R',#
 {$endif}
 
 {$if defined(RNL_DEBUG)}
+{$if defined(fpc) and defined(Android)}
+const ANDROID_LOG_UNKNOWN=0;
+      ANDROID_LOG_DEFAULT=1;
+      ANDROID_LOG_VERBOSE=2;
+      ANDROID_LOG_DEBUG=3;
+      ANDROID_LOG_INFO=4;
+      ANDROID_LOG_WARN=5;
+      ANDROID_LOG_ERROR=6;
+      ANDROID_LOG_FATAL=7;
+      ANDROID_LOG_SILENT=8;
+
+      LibLogName='liblog.so';
+
+function __android_log_write(prio:cint;tag,text:PAnsiChar):cint; cdecl; external LibLogName name '__android_log_write';
+function LOGI(prio:longint;tag,text:PAnsiChar):cint; cdecl; varargs; external LibLogName name '__android_log_print';
+{$ifend}
+
 function RNLDebugFormatFloat(const aValue:TRNLDouble;const aWidth,aWidth2:TRNLInt32):string;
 {$ifdef NextGen}
 begin
@@ -4146,7 +4163,14 @@ end;
 {$endif}
 
 procedure RNLDebugOutputString(const aMessage:string);
-{$if defined(Posix) and defined(Android)}
+{$if defined(fpc) and defined(Android)}
+const Tag:TRNLRawByteString='RNL';
+var TemporaryString:TRNLRawByteString;
+begin
+ TemporaryString:=aMessage;
+ __android_log_write(ANDROID_LOG_INFO, PAnsiChar(Tag), PAnsiChar(TemporaryString));
+end;
+{$elseif defined(Posix) and defined(Android)}
 var TemporaryString:TRNLRawByteString;
 begin
  TemporaryString:=aMessage;
