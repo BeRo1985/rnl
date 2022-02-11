@@ -497,7 +497,7 @@ uses {$if defined(Posix)}
 {    Generics.Defaults,
      Generics.Collections;}
 
-const RNL_VERSION='1.00.2022.02.11.05.12.0000';
+const RNL_VERSION='1.00.2022.02.11.07.39.0000';
 
 type PPRNLInt8=^PRNLInt8;
      PRNLInt8=^TRNLInt8;
@@ -17382,7 +17382,7 @@ begin
   result:=RecvLength;
  end else begin
   case SocketError of
-   EsockEWOULDBLOCK{,EsockECONNRESET},EsockEMSGSIZE:begin
+   EsockEWOULDBLOCK{,EsockECONNRESET},EsockEMSGSIZE{$ifdef Android},0{$endif}:begin
     result:=0;
    end;
    else begin
@@ -25935,7 +25935,8 @@ begin
    TimeoutInterval:=aTimeout;
   end;
   result:=Service(aEvent,TimeoutInterval);
- until (result in [RNL_HOST_SERVICE_STATUS_EVENT,RNL_HOST_SERVICE_STATUS_ERROR]) or ((aTimeout>0) and (fInstance.Time>=Timeout)) or (aTimeout<0);
+ until (result in [RNL_HOST_SERVICE_STATUS_EVENT,RNL_HOST_SERVICE_STATUS_ERROR]) or
+       ((aTimeout>0) and (fInstance.Time>=Timeout)) or (aTimeout<0);
 end;
 
 function TRNLHost.CheckEvents(var aEvent:TRNLHostEvent):boolean;
