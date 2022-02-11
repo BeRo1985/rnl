@@ -497,7 +497,7 @@ uses {$if defined(Posix)}
 {    Generics.Defaults,
      Generics.Collections;}
 
-const RNL_VERSION='1.00.2022.02.11.07.39.0000';
+const RNL_VERSION='1.00.2022.02.11.23.19.0000';
 
 type PPRNLInt8=^PRNLInt8;
      PRNLInt8=^TRNLInt8;
@@ -17382,7 +17382,7 @@ begin
   result:=RecvLength;
  end else begin
   case SocketError of
-   EsockEWOULDBLOCK{,EsockECONNRESET},EsockEMSGSIZE{$ifdef Android},0{$endif}:begin
+   EsockEWOULDBLOCK{,EsockECONNRESET},EsockEMSGSIZE{$if defined(fpc) and defined(Android)},0{$ifend}:begin
     result:=0;
    end;
    else begin
