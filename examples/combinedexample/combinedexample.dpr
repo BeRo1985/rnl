@@ -400,10 +400,18 @@ begin
  ConsoleOutput('Client: Thread stopped');
 end;
 
+const DiscoveryServiceID:TRNLDiscoveryServiceID='123456789012345';
+
 var Server:TServer;
     Client:TClient;
+    DiscoveryServer:TRNLDiscoveryServer;
+    DiscoveryServices:TRNLDiscoveryServices;
+    OwnAddressIPV4:TRNLAddress;
+    OwnAddressIPV6:TRNLAddress;
     s:string;
 begin
+// TRNLAddress.CreateFromString('[ff02::c]:1901');
+// exit;
  s:=ParamStr(1);
  RNLInstance:=TRNLInstance.Create;
  try
@@ -433,7 +441,43 @@ begin
       try
        ConsoleOutputThread:=TConsoleOutputThread.Create(false);
        try
-        if s='server' then begin
+        if s='discovery' then begin
+         RNLMainNetwork.AddressGetPrimaryInterfaceHostIP(OwnAddressIPV4,RNL_IPV4,RNL_INTERFACE_HOST_ADDRESS_UNICAST);
+         RNLMainNetwork.AddressGetPrimaryInterfaceHostIP(OwnAddressIPV6,RNL_IPV6,RNL_INTERFACE_HOST_ADDRESS_UNICAST);
+         OwnAddressIPV4.ScopeID:=0;
+         OwnAddressIPV6.ScopeID:=0;
+         OwnAddressIPV4.Port:=1902;
+         OwnAddressIPV6.Port:=1902;
+         DiscoveryServer:=TRNLDiscoveryServer.Create(RNLInstance,
+                                                     RNLNetwork,
+                                                     1901,
+                                                     DiscoveryServiceID,
+                                                     0,
+                                                     OwnAddressIPV4,
+                                                     OwnAddressIPV6,
+                                                     [RNL_DISCOVERY_SERVER_FLAG_IPV4,
+                                                      RNL_DISCOVERY_SERVER_FLAG_IPV6],
+                                                     nil,
+                                                     ''
+                                                    );
+         try
+          DiscoveryServices:=TRNLDiscoveryClient.Discover(RNLInstance,
+                                                          RNLNetwork,
+                                                          1903,
+                                                          TRNLAddress.CreateFromString('255.255.255.255:1901'),
+                                                          TRNLAddress.CreateFromString('[ff02::1]:1901'),
+                                                          DiscoveryServiceID,
+                                                          0,
+                                                          '',
+                                                          1,
+                                                          1000
+                                                         );
+          writeln('Found services: ',length(DiscoveryServices));
+          readln;
+         finally
+          FreeAndNil(DiscoveryServer);
+         end;
+        end else if s='server' then begin
          Server:=TServer.Create(false);
          try
           readln;
