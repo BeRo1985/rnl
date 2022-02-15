@@ -471,7 +471,9 @@ uses {$if defined(Posix)}
       Unix,
       UnixType,
       Sockets,
-      cnetdb,
+      {$if not defined(Darwin)}
+       cnetdb,
+      {$ifend}
       termio,
       {$if defined(linux) or defined(android)}
        linux,
@@ -497,7 +499,7 @@ uses {$if defined(Posix)}
 {    Generics.Defaults,
      Generics.Collections;}
 
-const RNL_VERSION='1.00.2022.02.11.23.19.0000';
+const RNL_VERSION='1.00.2022.02.15.23.00.0000';
 
 type PPRNLInt8=^PRNLInt8;
      PRNLInt8=^TRNLInt8;
@@ -15786,6 +15788,34 @@ begin
 end;
 {$ifend}
 
+{$if defined(fpc) and defined(Darwin)}
+const NI_NUMERICHOST=1;
+      NI_NUMERICSERV=2;
+      NI_NOFQDN=4;
+      NI_NAMEREQD=8;
+      NI_DGRAM=16;
+
+{$if not declared(TAddrInfo)}
+type PAddrInfo=^TAddrInfo;
+     TAddrInfo=record
+      ai_flags:cint;
+      ai_family:cint;
+      ai_socktype:cint;
+      ai_protocol:cint;
+      ai_addrlen:TSockLen;
+      ai_canonname:PAnsiChar;
+      ai_addr:psockaddr;
+      ai_next:PAddrInfo;
+     end;
+     PPAddrInfo=^PAddrInfo;
+{$ifend}
+
+function  getaddrinfo(name,service:PAnsiChar;hints:PAddrInfo;res:PPAddrInfo):cInt; cdecl; external 'c' name 'getaddrinfo';
+function  getnameinfo(sa:PSockAddr;salen:TSockLen;host:PAnsiChar;hostlen:TSize;serv:PChar;servlen:TSize;flags:cInt):cInt; cdecl; external 'c' name 'getnameinfo';
+procedure freeaddrinfo(ai:PAddrInfo); cdecl; external 'c' name 'freeaddrinfo';
+
+{$ifend}
+
 constructor TRNLNetwork.Create(const aInstance:TRNLInstance);
 begin
  inherited Create;
@@ -16375,6 +16405,9 @@ begin
  end;
 end;
 {$else}
+{$if defined(fpc) and defined(Darwin)}
+const TemporaryInt32:TRNLInt32=1;
+{$ifend}
 begin
 {$ifdef fpc}
  if aType=RNL_SOCKET_TYPE_DATAGRAM then begin
@@ -16382,6 +16415,9 @@ begin
  end else begin
   result:=fpsocket(aFamily.GetAddressFamily,SOCK_STREAM{$if defined(Linux) or defined(Android)}or SOCK_CLOEXEC{$ifend},0);
  end;
+{$ifdef Darwin}
+ fpsetsockopt(result,SOL_SOCKET,SO_NOSIGPIPE,TRNLPointer(@TemporaryInt32),SizeOf(TRNLInt32));
+{$endif}
 {$else}
  if aType=RNL_SOCKET_TYPE_DATAGRAM then begin
   result:=Posix.SysSocket.socket(aFamily.GetAddressFamily,SOCK_DGRAM{$if defined(Linux) or defined(Android)}or SOCK_CLOEXEC{$ifend},0);
@@ -17285,9 +17321,9 @@ var SIN:TSockaddrStorage;
 begin
  if assigned(aAddress) then begin
   aAddress^.SetSIN(@SIN,aFamily);
-  SentLength:=fpSendTo(aSocket,@aData,aDataLength,MSG_NOSIGNAL,TRNLPointer(@SIN),aFamily.GetSockAddrSize);
+  SentLength:=fpSendTo(aSocket,@aData,aDataLength,{$if defined(fpc) and defined(Darwin)}0{$else}MSG_NOSIGNAL{$ifend},TRNLPointer(@SIN),aFamily.GetSockAddrSize);
  end else begin
-  SentLength:=fpSendTo(aSocket,@aData,aDataLength,MSG_NOSIGNAL,nil,0);
+  SentLength:=fpSendTo(aSocket,@aData,aDataLength,{$if defined(fpc) and defined(Darwin)}0{$else}MSG_NOSIGNAL{$ifend},nil,0);
  end;
  if SentLength<>SOCKET_ERROR then begin
   result:=SentLength;
@@ -17308,9 +17344,9 @@ var SIN:TSockaddrStorage;
 begin
  if assigned(aAddress) then begin
   aAddress^.SetSIN(@SIN,aFamily);
-  SentLength:=Posix.SysSocket.SendTo(aSocket,aData,aDataLength,MSG_NOSIGNAL,sockaddr(TRNLPointer(@SIN)^),aFamily.GetSockAddrSize);
+  SentLength:=Posix.SysSocket.SendTo(aSocket,aData,aDataLength,{$if defined(fpc) and defined(Darwin)}0{$else}MSG_NOSIGNAL{$ifend},sockaddr(TRNLPointer(@SIN)^),aFamily.GetSockAddrSize);
  end else begin
-  SentLength:=Posix.SysSocket.SendTo(aSocket,aData,aDataLength,MSG_NOSIGNAL,sockaddr(TRNLPointer(nil)^),0);
+  SentLength:=Posix.SysSocket.SendTo(aSocket,aData,aDataLength,{$if defined(fpc) and defined(Darwin)}0{$else}MSG_NOSIGNAL{$ifend},sockaddr(TRNLPointer(nil)^),0);
  end;
  if SentLength<>SOCKET_ERROR then begin
   result:=SentLength;
@@ -17371,9 +17407,9 @@ var SIN:TSockaddrStorage;
 begin
  SINLength:=aFamily.GetSockAddrSize;
  if assigned(aAddress) then begin
-  RecvLength:=fpRecvFrom(aSocket,@aData,aDataLength,MSG_NOSIGNAL,TRNLPointer(@SIN),@SINLength);
+  RecvLength:=fpRecvFrom(aSocket,@aData,aDataLength,{$if defined(fpc) and defined(Darwin)}0{$else}MSG_NOSIGNAL{$ifend},TRNLPointer(@SIN),@SINLength);
  end else begin
-  RecvLength:=fpRecvFrom(aSocket,@aData,aDataLength,MSG_NOSIGNAL,nil,nil);
+  RecvLength:=fpRecvFrom(aSocket,@aData,aDataLength,{$if defined(fpc) and defined(Darwin)}0{$else}MSG_NOSIGNAL{$ifend},nil,nil);
  end;
  if RecvLength<>SOCKET_ERROR then begin
   if assigned(aAddress) then begin
@@ -17400,15 +17436,15 @@ begin
  RecvLength:=0;
 {$if (defined(NextGen) or defined(Android) or defined(iOS)) and not defined(fpc)}
  if assigned(aAddress) then begin
-  RecvLength:=Posix.SysSocket.RecvFrom(aSocket,aData,aDataLength,MSG_NOSIGNAL,sockaddr(TRNLPointer(@SIN)^),{$ifdef cpu64}Cardinal{$else}Integer{$endif}(TRNLPointer(@SINLength)^));
+  RecvLength:=Posix.SysSocket.RecvFrom(aSocket,aData,aDataLength,{$if defined(fpc) and defined(Darwin)}0{$else}MSG_NOSIGNAL{$ifend},sockaddr(TRNLPointer(@SIN)^),{$ifdef cpu64}Cardinal{$else}Integer{$endif}(TRNLPointer(@SINLength)^));
  end else begin
-  RecvLength:=Posix.SysSocket.RecvFrom(aSocket,aData,aDataLength,MSG_NOSIGNAL,sockaddr(TRNLPointer(nil)^),{$ifdef cpu64}Cardinal{$else}Integer{$endif}(TRNLPointer(@SIN)^));
+  RecvLength:=Posix.SysSocket.RecvFrom(aSocket,aData,aDataLength,{$if defined(fpc) and defined(Darwin)}0{$else}MSG_NOSIGNAL{$ifend},sockaddr(TRNLPointer(nil)^),{$ifdef cpu64}Cardinal{$else}Integer{$endif}(TRNLPointer(@SIN)^));
  end;
 {$else}
  if assigned(aAddress) then begin
-  RecvLength:=Posix.SysSocket.RecvFrom(aSocket,aData,aDataLength,MSG_NOSIGNAL,sockaddr(TRNLPointer(@SIN)^),TRNLUInt32(SINLength));
+  RecvLength:=Posix.SysSocket.RecvFrom(aSocket,aData,aDataLength,{$if defined(fpc) and defined(Darwin)}0{$else}MSG_NOSIGNAL{$ifend},sockaddr(TRNLPointer(@SIN)^),TRNLUInt32(SINLength));
  end else begin
-  RecvLength:=Posix.SysSocket.RecvFrom(aSocket,aData,aDataLength,MSG_NOSIGNAL,sockaddr(TRNLPointer(nil)^),TRNLUInt32(TRNLPointer(@SIN)^));
+  RecvLength:=Posix.SysSocket.RecvFrom(aSocket,aData,aDataLength,{$if defined(fpc) and defined(Darwin)}0{$else}MSG_NOSIGNAL{$ifend},sockaddr(TRNLPointer(nil)^),TRNLUInt32(TRNLPointer(@SIN)^));
  end;
 {$ifend}
  if RecvLength<>SOCKET_ERROR then begin
