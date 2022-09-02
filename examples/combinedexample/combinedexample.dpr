@@ -27,6 +27,8 @@ const SimulatedIncomingPacketLossProbabilityFactor=TRNLUInt32($00000000);
       SimulatedOutgoingPacketLossProbabilityFactor=TRNLUInt32($00000000);
       SimulatedIncomingDuplicatePacketProbabilityFactor=TRNLUInt32($00000000);
       SimulatedOutgoingDuplicatePacketProbabilityFactor=TRNLUInt32($00000000);
+      SimulatedIncomingOutOfOrderPacketProbabilityFactor=TRNLUInt32($00000000);
+      SimulatedOutgoingOutOfOrderPacketProbabilityFactor=TRNLUInt32($00000000);
       SimulatedIncomingBitFlippingProbabilityFactor=TRNLUInt32($00000000);
       SimulatedOutgoingBitFlippingProbabilityFactor=TRNLUInt32($00000000);
       SimulatedIncomingMinimumFlippingBits=1;
@@ -37,6 +39,8 @@ const SimulatedIncomingPacketLossProbabilityFactor=TRNLUInt32($00000000);
       SimulatedOutgoingLatency=0;
       SimulatedIncomingJitter=0;
       SimulatedOutgoingJitter=0;
+
+      Port=2321;
 
 type TConsoleOutputThread=class(TThread)
       protected
@@ -188,9 +192,9 @@ begin
   Server:=TRNLHost.Create(RNLInstance,RNLNetwork);
   try
    Server.Address.Host:=RNL_HOST_ANY;
-   Server.Address.Port:=64242;
+   Server.Address.Port:=Port;
 {  RNLNetwork.AddressSetHost(Server.Address^,'127.0.0.1');
-   Server.Address.Port:=64242;{}
+   Server.Address.Port:=Port;{}
    Server.Compressor:=RNLCompressorClass.Create;
    Server.MaximumCountChannels:=4;
    Server.ChannelTypes[0]:=RNL_PEER_RELIABLE_ORDERED_CHANNEL;
@@ -280,13 +284,13 @@ begin
    Client.ChannelTypes[3]:=RNL_PEER_UNRELIABLE_UNORDERED_CHANNEL;
    Client.Start(RNL_HOST_ADDRESS_FAMILY_WORK_MODE_IPV4_AND_IPV6);
    ConsoleOutput('Client: Connecting');
-   Address.Port:=64242;
+   Address.Port:=Port;
    if ParamCount>1 then begin
     RNLNetwork.AddressSetHost(Address,TRNLRawByteString(ParamStr(2)));
    end else begin
     RNLNetwork.AddressSetHost(Address,'127.0.0.1');
    end;
-   Address.Port:=64242;
+   Address.Port:=Port;
    Peer:=Client.Connect(Address,4,0);
    if assigned(Peer) then begin
     Peer.IncRef; // Protect it for the Peer.Free call at the end (increase ReferenceCounter from 1 to 2, so that correct-used DecRef calls never will free this peer class instance)
@@ -423,6 +427,8 @@ begin
     TRNLNetworkInterferenceSimulator(RNLNetwork).SimulatedOutgoingPacketLossProbabilityFactor:=SimulatedOutgoingPacketLossProbabilityFactor;
     TRNLNetworkInterferenceSimulator(RNLNetwork).SimulatedIncomingDuplicatePacketProbabilityFactor:=SimulatedIncomingDuplicatePacketProbabilityFactor;
     TRNLNetworkInterferenceSimulator(RNLNetwork).SimulatedOutgoingDuplicatePacketProbabilityFactor:=SimulatedOutgoingDuplicatePacketProbabilityFactor;
+    TRNLNetworkInterferenceSimulator(RNLNetwork).SimulatedIncomingOutOfOrderPacketProbabilityFactor:=SimulatedIncomingOutOfOrderPacketProbabilityFactor;
+    TRNLNetworkInterferenceSimulator(RNLNetwork).SimulatedOutgoingOutOfOrderPacketProbabilityFactor:=SimulatedOutgoingOutOfOrderPacketProbabilityFactor;
     TRNLNetworkInterferenceSimulator(RNLNetwork).SimulatedIncomingBitFlippingProbabilityFactor:=SimulatedIncomingBitFlippingProbabilityFactor;
     TRNLNetworkInterferenceSimulator(RNLNetwork).SimulatedOutgoingBitFlippingProbabilityFactor:=SimulatedOutgoingBitFlippingProbabilityFactor;
     TRNLNetworkInterferenceSimulator(RNLNetwork).SimulatedIncomingMinimumFlippingBits:=SimulatedIncomingMinimumFlippingBits;

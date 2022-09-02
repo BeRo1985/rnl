@@ -499,7 +499,7 @@ uses {$if defined(Posix)}
 {    Generics.Defaults,
      Generics.Collections;}
 
-const RNL_VERSION='1.00.2022.02.15.23.00.0000';
+const RNL_VERSION='1.00.2022.09.03.01.25.0000';
 
 type PPRNLInt8=^PRNLInt8;
      PRNLInt8=^TRNLInt8;
@@ -2793,6 +2793,8 @@ type PRNLVersion=^TRNLVersion;
        fSimulatedOutgoingPacketLossProbabilityFactor:TRNLUInt32;
        fSimulatedIncomingDuplicatePacketProbabilityFactor:TRNLUInt32;
        fSimulatedOutgoingDuplicatePacketProbabilityFactor:TRNLUInt32;
+       fSimulatedIncomingOutOfOrderPacketProbabilityFactor:TRNLUInt32;
+       fSimulatedOutgoingOutOfOrderPacketProbabilityFactor:TRNLUInt32;
        fSimulatedIncomingBitFlippingProbabilityFactor:TRNLUInt32;
        fSimulatedOutgoingBitFlippingProbabilityFactor:TRNLUInt32;
        fSimulatedIncomingMinimumFlippingBits:TRNLUInt32;
@@ -2807,6 +2809,8 @@ type PRNLVersion=^TRNLVersion;
        function SimulateOutgoingPacketLoss:boolean;
        function SimulateIncomingDuplicatePacket:boolean;
        function SimulateOutgoingDuplicatePacket:boolean;
+       function SimulateIncomingOutOfOrderPacket:boolean;
+       function SimulateOutgoingOutOfOrderPacket:boolean;
        function SimulateIncomingBitFlipping:boolean;
        function SimulateOutgoingBitFlipping:boolean;
        procedure SimulateBitFlipping(var aData;
@@ -2839,6 +2843,8 @@ type PRNLVersion=^TRNLVersion;
        property SimulatedOutgoingPacketLossProbabilityFactor:TRNLUInt32 read fSimulatedOutgoingPacketLossProbabilityFactor write fSimulatedOutgoingPacketLossProbabilityFactor;
        property SimulatedIncomingDuplicatePacketProbabilityFactor:TRNLUInt32 read fSimulatedIncomingDuplicatePacketProbabilityFactor write fSimulatedIncomingDuplicatePacketProbabilityFactor;
        property SimulatedOutgoingDuplicatePacketProbabilityFactor:TRNLUInt32 read fSimulatedOutgoingDuplicatePacketProbabilityFactor write fSimulatedOutgoingDuplicatePacketProbabilityFactor;
+       property SimulatedIncomingOutOfOrderPacketProbabilityFactor:TRNLUInt32 read fSimulatedIncomingOutOfOrderPacketProbabilityFactor write fSimulatedIncomingOutOfOrderPacketProbabilityFactor;
+       property SimulatedOutgoingOutOfOrderPacketProbabilityFactor:TRNLUInt32 read fSimulatedOutgoingOutOfOrderPacketProbabilityFactor write fSimulatedOutgoingOutOfOrderPacketProbabilityFactor;
        property SimulatedIncomingBitFlippingProbabilityFactor:TRNLUInt32 read fSimulatedIncomingBitFlippingProbabilityFactor write fSimulatedIncomingBitFlippingProbabilityFactor;
        property SimulatedOutgoingBitFlippingProbabilityFactor:TRNLUInt32 read fSimulatedOutgoingBitFlippingProbabilityFactor write fSimulatedOutgoingBitFlippingProbabilityFactor;
        property SimulatedIncomingMinimumFlippingBits:TRNLUInt32 read fSimulatedIncomingMinimumFlippingBits write fSimulatedIncomingMinimumFlippingBits;
@@ -18019,6 +18025,10 @@ begin
 
  fSimulatedOutgoingDuplicatePacketProbabilityFactor:=0;
 
+ fSimulatedIncomingOutOfOrderPacketProbabilityFactor:=0;
+
+ fSimulatedOutgoingOutOfOrderPacketProbabilityFactor:=0;
+
  fSimulatedIncomingBitFlippingProbabilityFactor:=0;
 
  fSimulatedOutgoingBitFlippingProbabilityFactor:=0;
@@ -18137,6 +18147,46 @@ begin
    fLock.Acquire;
    try
     result:=fRandomGenerator.GetUInt32<fSimulatedOutgoingDuplicatePacketProbabilityFactor;
+   finally
+    fLock.Release;
+   end;
+  end;
+ end;
+end;
+
+function TRNLNetworkInterferenceSimulator.SimulateIncomingOutOfOrderPacket:boolean;
+begin
+ case fSimulatedIncomingOutOfOrderPacketProbabilityFactor of
+  0:begin
+   result:=false;
+  end;
+  TRNLUInt32($ffffffff):begin
+   result:=true;
+  end;
+  else begin
+   fLock.Acquire;
+   try
+    result:=fRandomGenerator.GetUInt32<fSimulatedIncomingOutOfOrderPacketProbabilityFactor;
+   finally
+    fLock.Release;
+   end;
+  end;
+ end;
+end;
+
+function TRNLNetworkInterferenceSimulator.SimulateOutgoingOutOfOrderPacket:boolean;
+begin
+ case fSimulatedOutgoingOutOfOrderPacketProbabilityFactor of
+  0:begin
+   result:=false;
+  end;
+  TRNLUInt32($ffffffff):begin
+   result:=true;
+  end;
+  else begin
+   fLock.Acquire;
+   try
+    result:=fRandomGenerator.GetUInt32<fSimulatedOutgoingOutOfOrderPacketProbabilityFactor;
    finally
     fLock.Release;
    end;
@@ -18455,6 +18505,12 @@ begin
     try
      Time:=fInstance.Time;
      Delay:=(fSimulatedOutgoingLatency+(fRandomGenerator.GetUniformBoundedUInt32(fSimulatedOutgoingJitter*2)))-fSimulatedOutgoingJitter;
+     if SimulateOutgoingOutOfOrderPacket then begin
+      Delay:=Delay+fRandomGenerator.GetUniformBoundedUInt32(999)+1;
+      if fOutgoingPacketList.IsNotEmpty then begin
+       Delay:=Delay+Max(0,TRNLNetworkInterferenceSimulatorPacket(fOutgoingPacketList.Back).fTime.fValue-Time.fValue);
+      end;
+     end;
      if Delay>0 then begin
       Packet:=TRNLNetworkInterferenceSimulatorPacket.Create(self);
       try
@@ -18580,6 +18636,12 @@ begin
    try
     Time:=fInstance.Time;
     Delay:=(fSimulatedIncomingLatency+(fRandomGenerator.GetUniformBoundedUInt32(fSimulatedIncomingJitter*2)))-fSimulatedIncomingJitter;
+    if SimulateIncomingOutOfOrderPacket then begin
+     Delay:=Delay+fRandomGenerator.GetUniformBoundedUInt32(999)+1;
+     if fIncomingPacketList.IsNotEmpty then begin
+      Delay:=Delay+Max(0,TRNLNetworkInterferenceSimulatorPacket(fIncomingPacketList.Back).fTime.fValue-Time.fValue);
+     end;
+    end;
     DelayPacket:=Delay>0;
     if DelayPacket then begin
      Packet:=TRNLNetworkInterferenceSimulatorPacket.Create(self);
