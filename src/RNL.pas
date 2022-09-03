@@ -499,7 +499,7 @@ uses {$if defined(Posix)}
 {    Generics.Defaults,
      Generics.Collections;}
 
-const RNL_VERSION='1.00.2022.09.03.01.25.0000';
+const RNL_VERSION='1.00.2022.09.03.03.01.0000';
 
 type PPRNLInt8=^PRNLInt8;
      PRNLInt8=^TRNLInt8;
@@ -1382,6 +1382,7 @@ type PRNLVersion=^TRNLVersion;
               function MoveNext:boolean; inline;
               property Current:T read GetCurrent;
             end;
+            TCompareFunc=function(const a,b:TObject):TRNLInt32 of object;
       private
        fNext:TRNLCircularDoublyLinkedListNode<T>;
        fPrevious:TRNLCircularDoublyLinkedListNode<T>;
@@ -1402,6 +1403,7 @@ type PRNLVersion=^TRNLVersion;
        function MoveFrom(const aDataFirst,aDataLast:TRNLCircularDoublyLinkedListNode<T>):TRNLCircularDoublyLinkedListNode<T>; inline;
        function PopFromFront(out aData):boolean; inline;
        function PopFromBack(out aData):boolean; inline;
+       function SortedInserted(const aData:TRNLCircularDoublyLinkedListNode<T>;const aCompareFunc:TCompareFunc):TRNLCircularDoublyLinkedListNode<T>;
        function ListSize:TRNLSizeUInt;
        function GetEnumerator:TValueEnumerator;
       published
@@ -2817,6 +2819,7 @@ type PRNLVersion=^TRNLVersion;
                                      const aDataLength:TRNLUInt32;
                                      const aMinimumFlippingBits:TRNLUInt32;
                                      const aMaximumFlippingBits:TRNLUInt32);
+       function TRNLNetworkInterferenceSimulatorPacketCompare(const a,b:TObject):TRNLInt32;
        procedure Update;
       public
        constructor Create(const aInstance:TRNLInstance;const aNetwork:TRNLNetwork); reintroduce;
@@ -12307,6 +12310,33 @@ begin
  end;
 end;
 
+function TRNLCircularDoublyLinkedListNode<T>.SortedInserted(const aData:TRNLCircularDoublyLinkedListNode<T>;const aCompareFunc:TRNLCircularDoublyLinkedListNode<T>.TCompareFunc):TRNLCircularDoublyLinkedListNode<T>;
+var Current:TRNLCircularDoublyLinkedListNode<T>;
+begin
+ if assigned(self) then begin
+  if IsEmpty then begin
+   result:=Add(aData);
+  end else if aCompareFunc(fPrevious,aData)<=0 then begin
+   result:=fPrevious.fNext.Insert(aData);
+  end else begin
+   Current:=fNext;
+   while (Current<>self) and (aCompareFunc(Current,aData)<=0) do begin
+    Current:=Current.fNext;
+   end;
+   result:=Current.Insert(aData);
+  end;
+{ Current:=fNext;
+  while Current<>self do begin
+   if (Current.fNext<>self) and (aCompareFunc(Current,Current.fNext)>0) then begin
+    write('!');
+   end;
+   Current:=Current.fNext;
+  end;}
+ end else begin
+  result:=nil;
+ end;
+end;
+
 function TRNLCircularDoublyLinkedListNode<T>.ListSize:TRNLSizeUInt;
 var Position:TRNLCircularDoublyLinkedListNode<T>;
 begin
@@ -18257,6 +18287,11 @@ begin
  end;
 end;
 
+function TRNLNetworkInterferenceSimulator.TRNLNetworkInterferenceSimulatorPacketCompare(const a,b:TObject):TRNLInt32;
+begin
+ result:=Sign(TRNLTime.RelativeDifference(TRNLNetworkInterferenceSimulatorPacket(a).fTime,TRNLNetworkInterferenceSimulatorPacket(b).fTime));
+end;
+
 procedure TRNLNetworkInterferenceSimulator.Update;
 var PacketListNode,NextPacketListNode:TRNLNetworkInterferenceSimulatorPacketListNode;
     Packet:TRNLNetworkInterferenceSimulatorPacket;
@@ -18521,7 +18556,7 @@ begin
        Move(Data^,Packet.fData[0],aDataLength);
        Packet.fFamily:=aFamily;
       finally
-       fOutgoingPacketList.Add(Packet);
+       fOutgoingPacketList.SortedInserted(Packet,TRNLNetworkInterferenceSimulatorPacketCompare);
       end;
       result:=aDataLength;
      end else begin
@@ -18539,7 +18574,7 @@ begin
        Move(Data^,Packet.fData[0],aDataLength);
        Packet.fFamily:=aFamily;
       finally
-       fOutgoingPacketList.Add(Packet);
+       fOutgoingPacketList.SortedInserted(Packet,TRNLNetworkInterferenceSimulatorPacketCompare);
       end;
      end;
     finally
@@ -18653,7 +18688,7 @@ begin
       Move(aData,Packet.fData[0],result);
       Packet.fFamily:=aFamily;
      finally
-      fIncomingPacketList.Add(Packet);
+      fIncomingPacketList.SortedInserted(Packet,TRNLNetworkInterferenceSimulatorPacketCompare);
      end;
     end else begin
      Delay:=0;
@@ -18669,7 +18704,7 @@ begin
       Move(aData,Packet.fData[0],result);
       Packet.fFamily:=aFamily;
      finally
-      fIncomingPacketList.Add(Packet);
+      fIncomingPacketList.SortedInserted(Packet,TRNLNetworkInterferenceSimulatorPacketCompare);
      end;
     end;
    finally

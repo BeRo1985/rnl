@@ -241,7 +241,7 @@ begin
         ConsoleOutput('Server: A client '+IntToStr(TRNLPtrUInt(Event.Peer))+' has new MTU '+IntToStr(TRNLPtrUInt(Event.MTU)));
        end;
        RNL_HOST_EVENT_TYPE_PEER_RECEIVE:begin
-        ConsoleOutput('Server: A message received');
+        ConsoleOutput('Server: A message received on channel '+IntToStr(Event.Channel)+': "'+String(Event.Message.AsString)+'"');
        end;
       end;
      finally
@@ -346,6 +346,7 @@ begin
            finally
             Event.Free;
            end;
+           //Peer.Channels[0].SendMessageString('Hello another world in an world!');
           end;
           if not Disconnected then begin
            ConsoleOutput('Client: Disconnecting');
