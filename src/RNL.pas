@@ -499,7 +499,7 @@ uses {$if defined(Posix)}
 {    Generics.Defaults,
      Generics.Collections;}
 
-const RNL_VERSION='1.00.2022.09.03.03.01.0000';
+const RNL_VERSION='1.00.2022.09.04.22.38.0000';
 
 type PPRNLInt8=^PRNLInt8;
      PRNLInt8=^TRNLInt8;
@@ -16127,7 +16127,7 @@ begin
     FillChar(NetworkEvents,SizeOf(TWSANETWORKEVENTS),#0);
    end;
 
-   WSAEventSelect(Events[Index],PollFD^.fd,0);
+   WSAEventSelect(PollFD^.fd,Events[Index],0);
    WSACloseEvent(Events[Index]);
 
    if (NetworkEvents.lNetworkEvents and FD_CONNECT)<>0 then begin
