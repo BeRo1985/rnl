@@ -471,7 +471,9 @@ uses {$if defined(Posix)}
       Unix,
       UnixType,
       Sockets,
-      cnetdb,
+      {$if not defined(Darwin)}
+       cnetdb,
+      {$ifend}
       termio,
       {$if defined(linux) or defined(android)}
        linux,
@@ -497,7 +499,7 @@ uses {$if defined(Posix)}
 {    Generics.Defaults,
      Generics.Collections;}
 
-const RNL_VERSION='1.00.2022.02.11.23.19.0000';
+const RNL_VERSION='1.00.2022.09.04.22.38.0000';
 
 type PPRNLInt8=^PRNLInt8;
      PRNLInt8=^TRNLInt8;
@@ -1380,6 +1382,7 @@ type PRNLVersion=^TRNLVersion;
               function MoveNext:boolean; inline;
               property Current:T read GetCurrent;
             end;
+            TCompareFunc=function(const a,b:TObject):TRNLInt32 of object;
       private
        fNext:TRNLCircularDoublyLinkedListNode<T>;
        fPrevious:TRNLCircularDoublyLinkedListNode<T>;
@@ -1400,6 +1403,7 @@ type PRNLVersion=^TRNLVersion;
        function MoveFrom(const aDataFirst,aDataLast:TRNLCircularDoublyLinkedListNode<T>):TRNLCircularDoublyLinkedListNode<T>; inline;
        function PopFromFront(out aData):boolean; inline;
        function PopFromBack(out aData):boolean; inline;
+       function SortedInserted(const aData:TRNLCircularDoublyLinkedListNode<T>;const aCompareFunc:TCompareFunc):TRNLCircularDoublyLinkedListNode<T>;
        function ListSize:TRNLSizeUInt;
        function GetEnumerator:TValueEnumerator;
       published
@@ -2791,6 +2795,8 @@ type PRNLVersion=^TRNLVersion;
        fSimulatedOutgoingPacketLossProbabilityFactor:TRNLUInt32;
        fSimulatedIncomingDuplicatePacketProbabilityFactor:TRNLUInt32;
        fSimulatedOutgoingDuplicatePacketProbabilityFactor:TRNLUInt32;
+       fSimulatedIncomingOutOfOrderPacketProbabilityFactor:TRNLUInt32;
+       fSimulatedOutgoingOutOfOrderPacketProbabilityFactor:TRNLUInt32;
        fSimulatedIncomingBitFlippingProbabilityFactor:TRNLUInt32;
        fSimulatedOutgoingBitFlippingProbabilityFactor:TRNLUInt32;
        fSimulatedIncomingMinimumFlippingBits:TRNLUInt32;
@@ -2805,12 +2811,15 @@ type PRNLVersion=^TRNLVersion;
        function SimulateOutgoingPacketLoss:boolean;
        function SimulateIncomingDuplicatePacket:boolean;
        function SimulateOutgoingDuplicatePacket:boolean;
+       function SimulateIncomingOutOfOrderPacket:boolean;
+       function SimulateOutgoingOutOfOrderPacket:boolean;
        function SimulateIncomingBitFlipping:boolean;
        function SimulateOutgoingBitFlipping:boolean;
        procedure SimulateBitFlipping(var aData;
                                      const aDataLength:TRNLUInt32;
                                      const aMinimumFlippingBits:TRNLUInt32;
                                      const aMaximumFlippingBits:TRNLUInt32);
+       function TRNLNetworkInterferenceSimulatorPacketCompare(const a,b:TObject):TRNLInt32;
        procedure Update;
       public
        constructor Create(const aInstance:TRNLInstance;const aNetwork:TRNLNetwork); reintroduce;
@@ -2837,6 +2846,8 @@ type PRNLVersion=^TRNLVersion;
        property SimulatedOutgoingPacketLossProbabilityFactor:TRNLUInt32 read fSimulatedOutgoingPacketLossProbabilityFactor write fSimulatedOutgoingPacketLossProbabilityFactor;
        property SimulatedIncomingDuplicatePacketProbabilityFactor:TRNLUInt32 read fSimulatedIncomingDuplicatePacketProbabilityFactor write fSimulatedIncomingDuplicatePacketProbabilityFactor;
        property SimulatedOutgoingDuplicatePacketProbabilityFactor:TRNLUInt32 read fSimulatedOutgoingDuplicatePacketProbabilityFactor write fSimulatedOutgoingDuplicatePacketProbabilityFactor;
+       property SimulatedIncomingOutOfOrderPacketProbabilityFactor:TRNLUInt32 read fSimulatedIncomingOutOfOrderPacketProbabilityFactor write fSimulatedIncomingOutOfOrderPacketProbabilityFactor;
+       property SimulatedOutgoingOutOfOrderPacketProbabilityFactor:TRNLUInt32 read fSimulatedOutgoingOutOfOrderPacketProbabilityFactor write fSimulatedOutgoingOutOfOrderPacketProbabilityFactor;
        property SimulatedIncomingBitFlippingProbabilityFactor:TRNLUInt32 read fSimulatedIncomingBitFlippingProbabilityFactor write fSimulatedIncomingBitFlippingProbabilityFactor;
        property SimulatedOutgoingBitFlippingProbabilityFactor:TRNLUInt32 read fSimulatedOutgoingBitFlippingProbabilityFactor write fSimulatedOutgoingBitFlippingProbabilityFactor;
        property SimulatedIncomingMinimumFlippingBits:TRNLUInt32 read fSimulatedIncomingMinimumFlippingBits write fSimulatedIncomingMinimumFlippingBits;
@@ -12299,6 +12310,33 @@ begin
  end;
 end;
 
+function TRNLCircularDoublyLinkedListNode<T>.SortedInserted(const aData:TRNLCircularDoublyLinkedListNode<T>;const aCompareFunc:TRNLCircularDoublyLinkedListNode<T>.TCompareFunc):TRNLCircularDoublyLinkedListNode<T>;
+var Current:TRNLCircularDoublyLinkedListNode<T>;
+begin
+ if assigned(self) then begin
+  if IsEmpty then begin
+   result:=Add(aData);
+  end else if aCompareFunc(fPrevious,aData)<=0 then begin
+   result:=fPrevious.fNext.Insert(aData);
+  end else begin
+   Current:=fNext;
+   while (Current<>self) and (aCompareFunc(Current,aData)<=0) do begin
+    Current:=Current.fNext;
+   end;
+   result:=Current.Insert(aData);
+  end;
+{ Current:=fNext;
+  while Current<>self do begin
+   if (Current.fNext<>self) and (aCompareFunc(Current,Current.fNext)>0) then begin
+    write('!');
+   end;
+   Current:=Current.fNext;
+  end;}
+ end else begin
+  result:=nil;
+ end;
+end;
+
 function TRNLCircularDoublyLinkedListNode<T>.ListSize:TRNLSizeUInt;
 var Position:TRNLCircularDoublyLinkedListNode<T>;
 begin
@@ -15786,6 +15824,34 @@ begin
 end;
 {$ifend}
 
+{$if defined(fpc) and defined(Darwin)}
+const NI_NUMERICHOST=1;
+      NI_NUMERICSERV=2;
+      NI_NOFQDN=4;
+      NI_NAMEREQD=8;
+      NI_DGRAM=16;
+
+{$if not declared(TAddrInfo)}
+type PAddrInfo=^TAddrInfo;
+     TAddrInfo=record
+      ai_flags:cint;
+      ai_family:cint;
+      ai_socktype:cint;
+      ai_protocol:cint;
+      ai_addrlen:TSockLen;
+      ai_canonname:PAnsiChar;
+      ai_addr:psockaddr;
+      ai_next:PAddrInfo;
+     end;
+     PPAddrInfo=^PAddrInfo;
+{$ifend}
+
+function  getaddrinfo(name,service:PAnsiChar;hints:PAddrInfo;res:PPAddrInfo):cInt; cdecl; external 'c' name 'getaddrinfo';
+function  getnameinfo(sa:PSockAddr;salen:TSockLen;host:PAnsiChar;hostlen:TSize;serv:PChar;servlen:TSize;flags:cInt):cInt; cdecl; external 'c' name 'getnameinfo';
+procedure freeaddrinfo(ai:PAddrInfo); cdecl; external 'c' name 'freeaddrinfo';
+
+{$ifend}
+
 constructor TRNLNetwork.Create(const aInstance:TRNLInstance);
 begin
  inherited Create;
@@ -16061,7 +16127,7 @@ begin
     FillChar(NetworkEvents,SizeOf(TWSANETWORKEVENTS),#0);
    end;
 
-   WSAEventSelect(Events[Index],PollFD^.fd,0);
+   WSAEventSelect(PollFD^.fd,Events[Index],0);
    WSACloseEvent(Events[Index]);
 
    if (NetworkEvents.lNetworkEvents and FD_CONNECT)<>0 then begin
@@ -16375,6 +16441,9 @@ begin
  end;
 end;
 {$else}
+{$if defined(fpc) and defined(Darwin)}
+const TemporaryInt32:TRNLInt32=1;
+{$ifend}
 begin
 {$ifdef fpc}
  if aType=RNL_SOCKET_TYPE_DATAGRAM then begin
@@ -16382,6 +16451,9 @@ begin
  end else begin
   result:=fpsocket(aFamily.GetAddressFamily,SOCK_STREAM{$if defined(Linux) or defined(Android)}or SOCK_CLOEXEC{$ifend},0);
  end;
+{$ifdef Darwin}
+ fpsetsockopt(result,SOL_SOCKET,SO_NOSIGPIPE,TRNLPointer(@TemporaryInt32),SizeOf(TRNLInt32));
+{$endif}
 {$else}
  if aType=RNL_SOCKET_TYPE_DATAGRAM then begin
   result:=Posix.SysSocket.socket(aFamily.GetAddressFamily,SOCK_DGRAM{$if defined(Linux) or defined(Android)}or SOCK_CLOEXEC{$ifend},0);
@@ -17285,9 +17357,9 @@ var SIN:TSockaddrStorage;
 begin
  if assigned(aAddress) then begin
   aAddress^.SetSIN(@SIN,aFamily);
-  SentLength:=fpSendTo(aSocket,@aData,aDataLength,MSG_NOSIGNAL,TRNLPointer(@SIN),aFamily.GetSockAddrSize);
+  SentLength:=fpSendTo(aSocket,@aData,aDataLength,{$if defined(fpc) and defined(Darwin)}0{$else}MSG_NOSIGNAL{$ifend},TRNLPointer(@SIN),aFamily.GetSockAddrSize);
  end else begin
-  SentLength:=fpSendTo(aSocket,@aData,aDataLength,MSG_NOSIGNAL,nil,0);
+  SentLength:=fpSendTo(aSocket,@aData,aDataLength,{$if defined(fpc) and defined(Darwin)}0{$else}MSG_NOSIGNAL{$ifend},nil,0);
  end;
  if SentLength<>SOCKET_ERROR then begin
   result:=SentLength;
@@ -17308,9 +17380,9 @@ var SIN:TSockaddrStorage;
 begin
  if assigned(aAddress) then begin
   aAddress^.SetSIN(@SIN,aFamily);
-  SentLength:=Posix.SysSocket.SendTo(aSocket,aData,aDataLength,MSG_NOSIGNAL,sockaddr(TRNLPointer(@SIN)^),aFamily.GetSockAddrSize);
+  SentLength:=Posix.SysSocket.SendTo(aSocket,aData,aDataLength,{$if defined(fpc) and defined(Darwin)}0{$else}MSG_NOSIGNAL{$ifend},sockaddr(TRNLPointer(@SIN)^),aFamily.GetSockAddrSize);
  end else begin
-  SentLength:=Posix.SysSocket.SendTo(aSocket,aData,aDataLength,MSG_NOSIGNAL,sockaddr(TRNLPointer(nil)^),0);
+  SentLength:=Posix.SysSocket.SendTo(aSocket,aData,aDataLength,{$if defined(fpc) and defined(Darwin)}0{$else}MSG_NOSIGNAL{$ifend},sockaddr(TRNLPointer(nil)^),0);
  end;
  if SentLength<>SOCKET_ERROR then begin
   result:=SentLength;
@@ -17371,9 +17443,9 @@ var SIN:TSockaddrStorage;
 begin
  SINLength:=aFamily.GetSockAddrSize;
  if assigned(aAddress) then begin
-  RecvLength:=fpRecvFrom(aSocket,@aData,aDataLength,MSG_NOSIGNAL,TRNLPointer(@SIN),@SINLength);
+  RecvLength:=fpRecvFrom(aSocket,@aData,aDataLength,{$if defined(fpc) and defined(Darwin)}0{$else}MSG_NOSIGNAL{$ifend},TRNLPointer(@SIN),@SINLength);
  end else begin
-  RecvLength:=fpRecvFrom(aSocket,@aData,aDataLength,MSG_NOSIGNAL,nil,nil);
+  RecvLength:=fpRecvFrom(aSocket,@aData,aDataLength,{$if defined(fpc) and defined(Darwin)}0{$else}MSG_NOSIGNAL{$ifend},nil,nil);
  end;
  if RecvLength<>SOCKET_ERROR then begin
   if assigned(aAddress) then begin
@@ -17400,15 +17472,15 @@ begin
  RecvLength:=0;
 {$if (defined(NextGen) or defined(Android) or defined(iOS)) and not defined(fpc)}
  if assigned(aAddress) then begin
-  RecvLength:=Posix.SysSocket.RecvFrom(aSocket,aData,aDataLength,MSG_NOSIGNAL,sockaddr(TRNLPointer(@SIN)^),{$ifdef cpu64}Cardinal{$else}Integer{$endif}(TRNLPointer(@SINLength)^));
+  RecvLength:=Posix.SysSocket.RecvFrom(aSocket,aData,aDataLength,{$if defined(fpc) and defined(Darwin)}0{$else}MSG_NOSIGNAL{$ifend},sockaddr(TRNLPointer(@SIN)^),{$ifdef cpu64}Cardinal{$else}Integer{$endif}(TRNLPointer(@SINLength)^));
  end else begin
-  RecvLength:=Posix.SysSocket.RecvFrom(aSocket,aData,aDataLength,MSG_NOSIGNAL,sockaddr(TRNLPointer(nil)^),{$ifdef cpu64}Cardinal{$else}Integer{$endif}(TRNLPointer(@SIN)^));
+  RecvLength:=Posix.SysSocket.RecvFrom(aSocket,aData,aDataLength,{$if defined(fpc) and defined(Darwin)}0{$else}MSG_NOSIGNAL{$ifend},sockaddr(TRNLPointer(nil)^),{$ifdef cpu64}Cardinal{$else}Integer{$endif}(TRNLPointer(@SIN)^));
  end;
 {$else}
  if assigned(aAddress) then begin
-  RecvLength:=Posix.SysSocket.RecvFrom(aSocket,aData,aDataLength,MSG_NOSIGNAL,sockaddr(TRNLPointer(@SIN)^),TRNLUInt32(SINLength));
+  RecvLength:=Posix.SysSocket.RecvFrom(aSocket,aData,aDataLength,{$if defined(fpc) and defined(Darwin)}0{$else}MSG_NOSIGNAL{$ifend},sockaddr(TRNLPointer(@SIN)^),TRNLUInt32(SINLength));
  end else begin
-  RecvLength:=Posix.SysSocket.RecvFrom(aSocket,aData,aDataLength,MSG_NOSIGNAL,sockaddr(TRNLPointer(nil)^),TRNLUInt32(TRNLPointer(@SIN)^));
+  RecvLength:=Posix.SysSocket.RecvFrom(aSocket,aData,aDataLength,{$if defined(fpc) and defined(Darwin)}0{$else}MSG_NOSIGNAL{$ifend},sockaddr(TRNLPointer(nil)^),TRNLUInt32(TRNLPointer(@SIN)^));
  end;
 {$ifend}
  if RecvLength<>SOCKET_ERROR then begin
@@ -17983,6 +18055,10 @@ begin
 
  fSimulatedOutgoingDuplicatePacketProbabilityFactor:=0;
 
+ fSimulatedIncomingOutOfOrderPacketProbabilityFactor:=0;
+
+ fSimulatedOutgoingOutOfOrderPacketProbabilityFactor:=0;
+
  fSimulatedIncomingBitFlippingProbabilityFactor:=0;
 
  fSimulatedOutgoingBitFlippingProbabilityFactor:=0;
@@ -18108,6 +18184,46 @@ begin
  end;
 end;
 
+function TRNLNetworkInterferenceSimulator.SimulateIncomingOutOfOrderPacket:boolean;
+begin
+ case fSimulatedIncomingOutOfOrderPacketProbabilityFactor of
+  0:begin
+   result:=false;
+  end;
+  TRNLUInt32($ffffffff):begin
+   result:=true;
+  end;
+  else begin
+   fLock.Acquire;
+   try
+    result:=fRandomGenerator.GetUInt32<fSimulatedIncomingOutOfOrderPacketProbabilityFactor;
+   finally
+    fLock.Release;
+   end;
+  end;
+ end;
+end;
+
+function TRNLNetworkInterferenceSimulator.SimulateOutgoingOutOfOrderPacket:boolean;
+begin
+ case fSimulatedOutgoingOutOfOrderPacketProbabilityFactor of
+  0:begin
+   result:=false;
+  end;
+  TRNLUInt32($ffffffff):begin
+   result:=true;
+  end;
+  else begin
+   fLock.Acquire;
+   try
+    result:=fRandomGenerator.GetUInt32<fSimulatedOutgoingOutOfOrderPacketProbabilityFactor;
+   finally
+    fLock.Release;
+   end;
+  end;
+ end;
+end;
+
 function TRNLNetworkInterferenceSimulator.SimulateIncomingBitFlipping:boolean;
 begin
  case fSimulatedIncomingBitFlippingProbabilityFactor of
@@ -18169,6 +18285,11 @@ begin
    fLock.Release;
   end;
  end;
+end;
+
+function TRNLNetworkInterferenceSimulator.TRNLNetworkInterferenceSimulatorPacketCompare(const a,b:TObject):TRNLInt32;
+begin
+ result:=Sign(TRNLTime.RelativeDifference(TRNLNetworkInterferenceSimulatorPacket(a).fTime,TRNLNetworkInterferenceSimulatorPacket(b).fTime));
 end;
 
 procedure TRNLNetworkInterferenceSimulator.Update;
@@ -18419,6 +18540,12 @@ begin
     try
      Time:=fInstance.Time;
      Delay:=(fSimulatedOutgoingLatency+(fRandomGenerator.GetUniformBoundedUInt32(fSimulatedOutgoingJitter*2)))-fSimulatedOutgoingJitter;
+     if SimulateOutgoingOutOfOrderPacket then begin
+      Delay:=Delay+fRandomGenerator.GetUniformBoundedUInt32(999)+1;
+      if fOutgoingPacketList.IsNotEmpty then begin
+       Delay:=Delay+Max(0,TRNLNetworkInterferenceSimulatorPacket(fOutgoingPacketList.Back).fTime.fValue-Time.fValue);
+      end;
+     end;
      if Delay>0 then begin
       Packet:=TRNLNetworkInterferenceSimulatorPacket.Create(self);
       try
@@ -18429,7 +18556,7 @@ begin
        Move(Data^,Packet.fData[0],aDataLength);
        Packet.fFamily:=aFamily;
       finally
-       fOutgoingPacketList.Add(Packet);
+       fOutgoingPacketList.SortedInserted(Packet,TRNLNetworkInterferenceSimulatorPacketCompare);
       end;
       result:=aDataLength;
      end else begin
@@ -18447,7 +18574,7 @@ begin
        Move(Data^,Packet.fData[0],aDataLength);
        Packet.fFamily:=aFamily;
       finally
-       fOutgoingPacketList.Add(Packet);
+       fOutgoingPacketList.SortedInserted(Packet,TRNLNetworkInterferenceSimulatorPacketCompare);
       end;
      end;
     finally
@@ -18544,6 +18671,12 @@ begin
    try
     Time:=fInstance.Time;
     Delay:=(fSimulatedIncomingLatency+(fRandomGenerator.GetUniformBoundedUInt32(fSimulatedIncomingJitter*2)))-fSimulatedIncomingJitter;
+    if SimulateIncomingOutOfOrderPacket then begin
+     Delay:=Delay+fRandomGenerator.GetUniformBoundedUInt32(999)+1;
+     if fIncomingPacketList.IsNotEmpty then begin
+      Delay:=Delay+Max(0,TRNLNetworkInterferenceSimulatorPacket(fIncomingPacketList.Back).fTime.fValue-Time.fValue);
+     end;
+    end;
     DelayPacket:=Delay>0;
     if DelayPacket then begin
      Packet:=TRNLNetworkInterferenceSimulatorPacket.Create(self);
@@ -18555,7 +18688,7 @@ begin
       Move(aData,Packet.fData[0],result);
       Packet.fFamily:=aFamily;
      finally
-      fIncomingPacketList.Add(Packet);
+      fIncomingPacketList.SortedInserted(Packet,TRNLNetworkInterferenceSimulatorPacketCompare);
      end;
     end else begin
      Delay:=0;
@@ -18571,7 +18704,7 @@ begin
       Move(aData,Packet.fData[0],result);
       Packet.fFamily:=aFamily;
      finally
-      fIncomingPacketList.Add(Packet);
+      fIncomingPacketList.SortedInserted(Packet,TRNLNetworkInterferenceSimulatorPacketCompare);
      end;
     end;
    finally
