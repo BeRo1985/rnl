@@ -18653,7 +18653,8 @@ begin
       (not assigned(aAddress)) or
       ((fSimulatedOutgoingLatency=0) and
        (fSimulatedOutgoingJitter=0) and
-       (fSimulatedOutgoingDuplicatePacketProbabilityFactor=0)) then begin
+       (fSimulatedOutgoingDuplicatePacketProbabilityFactor=0) and
+       (fSimulatedOutgoingOutOfOrderPacketProbabilityFactor=0)) then begin
     result:=fNetwork.Send(aSocket,aAddress,Data^,aDataLength,aFamily);
    end else begin
     fLock.Acquire;
@@ -18785,7 +18786,8 @@ begin
      assigned(aAddress) and
      ((fSimulatedIncomingLatency<>0) or
       (fSimulatedIncomingJitter<>0) or
-      (fSimulatedIncomingDuplicatePacketProbabilityFactor<>0)) then begin
+      (fSimulatedIncomingDuplicatePacketProbabilityFactor<>0) or
+      (fSimulatedIncomingOutOfOrderPacketProbabilityFactor<>0)) then begin
 
    fLock.Acquire;
    try
