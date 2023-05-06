@@ -6,7 +6,7 @@
  *                                zlib license                                *
  *============================================================================*
  *                                                                            *
- * Copyright (C) 2016-2022, Benjamin Rosseaux (benjamin@rosseaux.de)          *
+ * Copyright (C) 2016-2023, Benjamin Rosseaux (benjamin@rosseaux.de)          *
  *                                                                            *
  * This software is provided 'as-is', without any express or implied          *
  * warranty. In no event will the authors be held liable for any damages      *
@@ -499,7 +499,7 @@ uses {$if defined(Posix)}
 {    Generics.Defaults,
      Generics.Collections;}
 
-const RNL_VERSION='1.00.2022.09.04.22.38.0000';
+const RNL_VERSION='1.00.2023.05.06.04.30.0000';
 
 type PPRNLInt8=^PRNLInt8;
      PRNLInt8=^TRNLInt8;
@@ -1370,6 +1370,16 @@ type PRNLVersion=^TRNLVersion;
      PRNLProtocolFlags=^TRNLProtocolFlags;
      TRNLProtocolFlags=TRNLInt32;
 
+     TRNLSpinLock=class(TSynchroObject)
+      private
+       fState:TRNLInt32;
+      public
+       constructor Create; reintroduce;
+       destructor Destroy; override;
+       procedure Acquire; override;
+       procedure Release; override;
+     end;
+
      TRNLCircularDoublyLinkedListNode<T>=class
       public
        type TValueEnumerator=record
@@ -1422,6 +1432,7 @@ type PRNLVersion=^TRNLVersion;
        fTail:TRNLSizeInt;
        fCount:TRNLSizeInt;
        fSize:TRNLSizeInt;
+       fSpinLock:TRNLSpinLock;
        function GetCount:TRNLSizeInt; inline;
        procedure GrowResize(const aSize:TRNLSizeInt);
       public
@@ -1447,6 +1458,7 @@ type PRNLVersion=^TRNLVersion;
       private
        fItems:TRNLStackArray;
        fCount:TRNLSizeInt;
+       fSpinLock:TRNLSpinLock;
        function GetCount:TRNLSizeInt; inline;
       public
        constructor Create; reintroduce;
@@ -3626,6 +3638,8 @@ type PRNLVersion=^TRNLVersion;
 
        fPendingSendNewBandwidthLimitsSendTimeout:TRNLUInt64;
 
+       fDefaultRoundTripTime:TRNLInt64;
+
        fMinimumRetransmissionTimeout:TRNLInt64;
 
        fMaximumRetransmissionTimeout:TRNLInt64;
@@ -3830,6 +3844,7 @@ type PRNLVersion=^TRNLVersion;
        property PendingDisconnectionTimeout:TRNLUInt64 read fPendingDisconnectionTimeout write fPendingDisconnectionTimeout;
        property PendingDisconnectionSendTimeout:TRNLUInt64 read fPendingDisconnectionSendTimeout write fPendingDisconnectionSendTimeout;
        property PendingSendNewBandwidthLimitsSendTimeout:TRNLUInt64 read fPendingSendNewBandwidthLimitsSendTimeout write fPendingSendNewBandwidthLimitsSendTimeout;
+       property DefaultRoundTripTime:TRNLInt64 read fDefaultRoundTripTime write fDefaultRoundTripTime;
        property MinimumRetransmissionTimeout:TRNLInt64 read fMinimumRetransmissionTimeout write fMinimumRetransmissionTimeout;
        property MaximumRetransmissionTimeout:TRNLInt64 read fMaximumRetransmissionTimeout write fMaximumRetransmissionTimeout;
        property MinimumRetransmissionTimeoutLimit:TRNLInt64 read fMinimumRetransmissionTimeoutLimit write fMinimumRetransmissionTimeoutLimit;
@@ -12172,6 +12187,55 @@ begin
  result:=Decrypt(aPlainText,aKey,aNonce,aMac,TRNLPointer(nil)^,0,aCipherText,aCipherTextSize);
 end;
 
+constructor TRNLSpinLock.Create;
+begin
+ inherited Create;
+ fState:=0;
+end;
+
+destructor TRNLSpinLock.Destroy;
+begin
+ inherited Destroy;
+end;
+
+procedure TRNLSpinLockCPURelax;
+{$if defined(cpu386) or defined(cpuamd64) or defined(cpux64)}assembler; register; {$ifdef fpc}nostackframe;{$endif}
+asm
+{$if not (defined(fpc) or defined(cpu386))}
+ .noframe
+{$ifend}
+ rep nop // pause
+end;
+{$else}
+begin
+end;
+{$ifend}
+
+procedure TRNLSpinLock.Acquire;
+var Wait,Index:TRNLSizeUInt;
+begin
+ Wait:=1;
+ while {$ifdef fpc}InterlockedCompareExchange{$else}AtomicCmpExchange{$endif}(fState,-1,0)<>0 do begin
+//while {$ifdef fpc}InterlockedExchange{$else}AtomicExchange{$endif}(fState,-1)<>0 do begin
+  for Index:=1 to Wait do begin
+   TRNLSpinLockCPURelax;
+  end;
+  while fState<>0 do begin
+   if Wait<1024 then begin
+    inc(Wait,Wait);
+   end;
+   for Index:=1 to Wait do begin
+    TRNLSpinLockCPURelax;
+   end;
+  end;
+ end;
+end;
+
+procedure TRNLSpinLock.Release;
+begin
+ {$ifdef fpc}InterlockedExchange{$else}AtomicExchange{$endif}(fState,0);
+end;
+
 constructor TRNLCircularDoublyLinkedListNode<T>.TValueEnumerator.Create(const aCircularDoublyLinkedList:TRNLCircularDoublyLinkedListNode<T>);
 begin
  fCircularDoublyLinkedList:=aCircularDoublyLinkedList;
@@ -12363,10 +12427,13 @@ begin
  fTail:=0;
  fCount:=0;
  fSize:=0;
+ fSpinLock:=TRNLSpinLock.Create;
 end;
 
 destructor TRNLQueue<T>.Destroy;
 begin
+ FreeAndNil(fSpinLock);
+ fItems:=nil;
  inherited Destroy;
 end;
 
@@ -12377,19 +12444,24 @@ end;
 
 procedure TRNLQueue<T>.Clear;
 begin
- while fCount>0 do begin
-  dec(fCount);
-  Finalize(fItems[fHead]);
-  inc(fHead);
-  if fHead>=fSize then begin
-   fHead:=0;
+ fSpinLock.Acquire;
+ try
+  while fCount>0 do begin
+   dec(fCount);
+   Finalize(fItems[fHead]);
+   inc(fHead);
+   if fHead>=fSize then begin
+    fHead:=0;
+   end;
   end;
+  fItems:=nil;
+  fHead:=0;
+  fTail:=0;
+  fCount:=0;
+  fSize:=0;
+ finally
+  fSpinLock.Release;
  end;
- fItems:=nil;
- fHead:=0;
- fTail:=0;
- fCount:=0;
- fSize:=0;
 end;
 
 function TRNLQueue<T>.IsEmpty:boolean;
@@ -12424,77 +12496,102 @@ end;
 procedure TRNLQueue<T>.EnqueueAtFront(const aItem:T);
 var Index:TRNLSizeInt;
 begin
- if fSize<=fCount then begin
-  GrowResize(fCount+1);
+ fSpinLock.Acquire;
+ try
+  if fSize<=fCount then begin
+   GrowResize(fCount+1);
+  end;
+  dec(fHead);
+  if fHead<0 then begin
+   inc(fHead,fSize);
+  end;
+  Index:=fHead;
+  fItems[Index]:=aItem;
+  {$ifdef fpc}InterlockedIncrement{$else}AtomicIncrement{$endif}(fCount);
+ finally
+  fSpinLock.Release;
  end;
- dec(fHead);
- if fHead<0 then begin
-  inc(fHead,fSize);
- end;
- Index:=fHead;
- fItems[Index]:=aItem;
- inc(fCount);
 end;
 
 procedure TRNLQueue<T>.Enqueue(const aItem:T);
 var Index:TRNLSizeInt;
 begin
- if fSize<=fCount then begin
-  GrowResize(fCount+1);
+ fSpinLock.Acquire;
+ try
+  if fSize<=fCount then begin
+   GrowResize(fCount+1);
+  end;
+  Index:=fTail;
+  inc(fTail);
+  if fTail>=fSize then begin
+   fTail:=0;
+  end;
+  fItems[Index]:=aItem;
+  {$ifdef fpc}InterlockedIncrement{$else}AtomicIncrement{$endif}(fCount);
+ finally
+  fSpinLock.Release;
  end;
- Index:=fTail;
- inc(fTail);
- if fTail>=fSize then begin
-  fTail:=0;
- end;
- fItems[Index]:=aItem;
- inc(fCount);
 end;
 
 function TRNLQueue<T>.Dequeue(out aItem:T):boolean;
 begin
- result:=fCount>0;
- if result then begin
-  dec(fCount);
-  aItem:=fItems[fHead];
-  Finalize(fItems[fHead]);
-  FillChar(fItems[fHead],SizeOf(T),#0);
-  if fCount=0 then begin
-   fHead:=0;
-   fTail:=0;
-  end else begin
-   inc(fHead);
-   if fHead>=fSize then begin
+ fSpinLock.Acquire;
+ try
+  result:=fCount>0;
+  if result then begin
+   {$ifdef fpc}InterlockedDecrement{$else}AtomicDecrement{$endif}(fCount);
+   aItem:=fItems[fHead];
+   Finalize(fItems[fHead]);
+   FillChar(fItems[fHead],SizeOf(T),#0);
+   if fCount=0 then begin
     fHead:=0;
+    fTail:=0;
+   end else begin
+    inc(fHead);
+    if fHead>=fSize then begin
+     fHead:=0;
+    end;
    end;
   end;
+ finally
+  fSpinLock.Release;
  end;
 end;
 
 function TRNLQueue<T>.Dequeue:boolean;
 begin
- result:=fCount>0;
- if result then begin
-  dec(fCount);
-  Finalize(fItems[fHead]);
-  FillChar(fItems[fHead],SizeOf(T),#0);
-  if fCount=0 then begin
-   fHead:=0;
-   fTail:=0;
-  end else begin
-   inc(fHead);
-   if fHead>=fSize then begin
+ fSpinLock.Acquire;
+ try
+  result:=fCount>0;
+  if result then begin
+   {$ifdef fpc}InterlockedDecrement{$else}AtomicDecrement{$endif}(fCount);
+   Finalize(fItems[fHead]);
+   FillChar(fItems[fHead],SizeOf(T),#0);
+   if fCount=0 then begin
     fHead:=0;
+    fTail:=0;
+   end else begin
+    inc(fHead);
+    if fHead>=fSize then begin
+     fHead:=0;
+    end;
    end;
   end;
+ finally
+  fSpinLock.Release;
  end;
 end;
 
 function TRNLQueue<T>.Peek(out aItem:T):boolean;
 begin
- result:=fCount>0;
- if result then begin
-  aItem:=fItems[fHead];
+ fSpinLock.Acquire;
+ try
+  result:=fCount>0;
+  if result then begin
+   aItem:=fItems[fHead];
+  end;
+ finally
+  fSpinLock.Release;
  end;
 end;
 
@@ -12503,10 +12600,13 @@ begin
  inherited Create;
  fItems:=nil;
  fCount:=0;
+ fSpinLock:=TRNLSpinLock.Create;
 end;
 
 destructor TRNLStack<T>.Destroy;
 begin
+ FreeAndNil(fSpinLock);
+ fItems:=nil;
  inherited Destroy;
 end;
 
@@ -12517,9 +12617,14 @@ end;
 
 procedure TRNLStack<T>.Clear;
 begin
- while fCount>0 do begin
-  dec(fCount);
-  Finalize(fItems[fCount]);
+ fSpinLock.Acquire;
+ try
+  while fCount>0 do begin
+   {$ifdef fpc}InterlockedDecrement{$else}AtomicDecrement{$endif}(fCount);
+   Finalize(fItems[fCount]);
+  end;
+ finally
+  fSpinLock.Release;
  end;
 end;
 
@@ -12536,29 +12641,44 @@ end;
 procedure TRNLStack<T>.Push(const aItem:T);
 var Index:TRNLSizeInt;
 begin
- Index:=fCount;
- inc(fCount);
- if length(fItems)<fCount then begin
-  SetLength(fItems,fCount+fCount);
+ fSpinLock.Acquire;
+ try
+  Index:=fCount;
+  {$ifdef fpc}InterlockedIncrement{$else}AtomicIncrement{$endif}(fCount);
+  if length(fItems)<fCount then begin
+   SetLength(fItems,fCount+fCount);
+  end;
+  fItems[Index]:=aItem;
+ finally
+  fSpinLock.Release;
  end;
- fItems[Index]:=aItem;
 end;
 
 function TRNLStack<T>.Pop(out aItem:T):boolean;
 begin
- result:=fCount>0;
- if result then begin
-  dec(fCount);
-  aItem:=fItems[fCount];
-  Finalize(fItems[fCount]);
+ fSpinLock.Acquire;
+ try
+  result:=fCount>0;
+  if result then begin
+   {$ifdef fpc}InterlockedDecrement{$else}AtomicDecrement{$endif}(fCount);
+   aItem:=fItems[fCount];
+   Finalize(fItems[fCount]);
+  end;
+ finally
+  fSpinLock.Release;
  end;
 end;
 
 function TRNLStack<T>.Peek(out aItem:T):boolean;
 begin
- result:=fCount>0;
- if result then begin
-  aItem:=fItems[fCount-1];
+ fSpinLock.Acquire;
+ try
+  result:=fCount>0;
+  if result then begin
+   aItem:=fItems[fCount-1];
+  end;
+ finally
+  fSpinLock.Release;
  end;
 end;
 
@@ -22048,11 +22168,11 @@ begin
 
  fRoundTripTimeFirst:=true;
 
- fRoundTripTime:=TRNLUInt64(500) shl 32;
+ fRoundTripTime:=TRNLUInt64(aHost.fDefaultRoundTripTime) shl 32;
 
  fRoundTripTimeVariance:=0;
 
- fRetransmissionTimeout:=TRNLUInt64(500) shl 32;
+ fRetransmissionTimeout:=TRNLUInt64(aHost.fDefaultRoundTripTime) shl 32;
 
  fPacketLoss:=0;
 
@@ -23862,13 +23982,15 @@ begin
 
  fPendingSendNewBandwidthLimitsSendTimeout:=50;
 
- fMinimumRetransmissionTimeout:=1;
+ fDefaultRoundTripTime:=500;
 
- fMaximumRetransmissionTimeout:=500;
+ fMinimumRetransmissionTimeout:=5000;
 
- fMinimumRetransmissionTimeoutLimit:=4;
+ fMaximumRetransmissionTimeout:=30000;
 
- fMaximumRetransmissionTimeoutLimit:=5000;
+ fMinimumRetransmissionTimeoutLimit:=32;
+
+ fMaximumRetransmissionTimeoutLimit:=320;
 
  fRateLimiterHostAddressBurst:=20;
 
@@ -26661,3 +26783,4 @@ initialization
  InitializeCRC32C;
 finalization
 end.
+
