@@ -224,7 +224,7 @@ begin
      NowTime:=RNLInstance.Time;
      if TRNLTime.Difference(NowTime,LastTime)>=10 then begin
       LastTime:=NowTime;
-      Server.BroadcastMessageData(0,@TestBuf0,SizeOf(TestBuf0));
+//    Server.BroadcastMessageData(0,@TestBuf0,SizeOf(TestBuf0));
 {     writeln(c);
       inc(c);}
      end;
