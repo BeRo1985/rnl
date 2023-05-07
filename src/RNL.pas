@@ -18662,7 +18662,7 @@ begin
      Time:=fInstance.Time;
      Delay:=(fSimulatedOutgoingLatency+(fRandomGenerator.GetUniformBoundedUInt32(fSimulatedOutgoingJitter*2)))-fSimulatedOutgoingJitter;
      if SimulateOutgoingOutOfOrderPacket then begin
-      Delay:=Delay+fRandomGenerator.GetUniformBoundedUInt32(50)+1;
+      Delay:=Delay+fRandomGenerator.GetUniformBoundedUInt32(99)+1;
       if fOutgoingPacketList.IsNotEmpty then begin
        Delay:=Delay+Max(0,TRNLNetworkInterferenceSimulatorPacket(fOutgoingPacketList.Back).fTime.fValue-Time.fValue);
       end;
@@ -18685,7 +18685,7 @@ begin
       result:=fNetwork.Send(aSocket,aAddress,Data^,aDataLength,aFamily);
      end;
      if (result=aDataLength) and SimulateOutgoingDuplicatePacket then begin
-      inc(Delay,fRandomGenerator.GetUniformBoundedUInt32(50)+1);
+      inc(Delay,fRandomGenerator.GetUniformBoundedUInt32(99)+1);
       Packet:=TRNLNetworkInterferenceSimulatorPacket.Create(self);
       try
        Packet.fTime.fValue:=Time.fValue+TRNLUInt64(Delay);
@@ -18794,7 +18794,7 @@ begin
     Time:=fInstance.Time;
     Delay:=(fSimulatedIncomingLatency+(fRandomGenerator.GetUniformBoundedUInt32(fSimulatedIncomingJitter*2)))-fSimulatedIncomingJitter;
     if SimulateIncomingOutOfOrderPacket then begin
-     Delay:=Delay+fRandomGenerator.GetUniformBoundedUInt32(50)+1;
+     Delay:=Delay+fRandomGenerator.GetUniformBoundedUInt32(99)+1;
      if fIncomingPacketList.IsNotEmpty then begin
       Delay:=Delay+Max(0,TRNLNetworkInterferenceSimulatorPacket(fIncomingPacketList.Back).fTime.fValue-Time.fValue);
      end;
@@ -18816,7 +18816,7 @@ begin
      Delay:=0;
     end;
     if SimulateIncomingDuplicatePacket then begin
-     inc(Delay,fRandomGenerator.GetUniformBoundedUInt32(50)+1);
+     inc(Delay,fRandomGenerator.GetUniformBoundedUInt32(99)+1);
      Packet:=TRNLNetworkInterferenceSimulatorPacket.Create(self);
      try
       Packet.fTime.fValue:=Time.fValue+TRNLUInt64(Delay);

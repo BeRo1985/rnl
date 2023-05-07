@@ -25,14 +25,14 @@ uses
   SyncObjs,
   RNL in '..\..\src\RNL.pas';
 
-const SimulatedIncomingPacketLossProbabilityFactor=TRNLUInt32($00000000);
-      SimulatedOutgoingPacketLossProbabilityFactor=TRNLUInt32($00000000);
-      SimulatedIncomingDuplicatePacketProbabilityFactor=TRNLUInt32($00000000);
-      SimulatedOutgoingDuplicatePacketProbabilityFactor=TRNLUInt32($00000000);
-      SimulatedIncomingOutOfOrderPacketProbabilityFactor=TRNLUInt32($10000000);
-      SimulatedOutgoingOutOfOrderPacketProbabilityFactor=TRNLUInt32($10000000);
-      SimulatedIncomingBitFlippingProbabilityFactor=TRNLUInt32($00000000);
-      SimulatedOutgoingBitFlippingProbabilityFactor=TRNLUInt32($00000000);
+const SimulatedIncomingPacketLossProbabilityFactor=TRNLUInt32($00001000);
+      SimulatedOutgoingPacketLossProbabilityFactor=TRNLUInt32($00001000);
+      SimulatedIncomingDuplicatePacketProbabilityFactor=TRNLUInt32($00100000);
+      SimulatedOutgoingDuplicatePacketProbabilityFactor=TRNLUInt32($00100000);
+      SimulatedIncomingOutOfOrderPacketProbabilityFactor=TRNLUInt32($00100000);
+      SimulatedOutgoingOutOfOrderPacketProbabilityFactor=TRNLUInt32($00100000);
+      SimulatedIncomingBitFlippingProbabilityFactor=TRNLUInt32($00000800);
+      SimulatedOutgoingBitFlippingProbabilityFactor=TRNLUInt32($00000800);
       SimulatedIncomingMinimumFlippingBits=1;
       SimulatedOutgoingMinimumFlippingBits=1;
       SimulatedIncomingMaximumFlippingBits=4;
@@ -82,7 +82,7 @@ var RNLInstance:TRNLInstance=nil;
 
     RNLNetwork:TRNLNetwork=nil;
 
-    TestBuf0:array[0..65] of UInt8;
+    TestBuf0:array[0..16383] of UInt8;
 
 procedure ConsoleOutput(const s:string);
 begin
