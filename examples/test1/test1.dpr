@@ -12,7 +12,7 @@ program test1;
  {$apptype console}
 {$ifend}
 
-{-$define VirtualNetwork}
+{$define VirtualNetwork}
 
 // Hint: FPC has yet no TMonitor support
 
@@ -82,7 +82,7 @@ var RNLInstance:TRNLInstance=nil;
 
     RNLNetwork:TRNLNetwork=nil;
 
-    TestBuf0:array[0..65535] of UInt8;
+    TestBuf0:array[0..65] of UInt8;
 
 procedure ConsoleOutput(const s:string);
 begin
@@ -188,6 +188,7 @@ var //Address:TRNLAddress;
     Server:TRNLHost;
     Event:TRNLHostEvent;
     Index:Int32;
+    LastTime,NowTime:TRNLTime;
 begin
 {$ifndef fpc}
  NameThreadForDebugging('Server');
@@ -212,6 +213,7 @@ begin
    fReadyEvent.SetEvent;
    Event.Initialize;
    try
+    LastTime:=RNLInstance.Time;
     while (not Terminated) and (Server.Service(Event,1000)<>RNL_HOST_SERVICE_STATUS_ERROR) do begin
 //   Server.BroadcastMessageData(0,@TestBuf0,SizeOf(TestBuf0));
 {    for Index:=1 to 2 do begin
@@ -219,6 +221,13 @@ begin
       Server.BroadcastMessageString(2,'sdmkrtgj54zji4ow3eui6z 4uj3r uzjh3uj35tvj3tzv34');
       Server.BroadcastMessageString(3,'sdmkrtgj54zji4ow3eui6z 4uj3r uzjh3uj35tvj3tzv34');
      end;}
+     NowTime:=RNLInstance.Time;
+     if TRNLTime.Difference(NowTime,LastTime)>=10 then begin
+      LastTime:=NowTime;
+      Server.BroadcastMessageData(0,@TestBuf0,SizeOf(TestBuf0));
+{     writeln(c);
+      inc(c);}
+     end;
      try
       case Event.Type_ of
        RNL_HOST_EVENT_TYPE_PEER_CHECK_CONNECTION_TOKEN:begin
@@ -282,7 +291,9 @@ var Address:TRNLAddress;
     Index:TRNLInt32;
     CanSendBig:boolean;
     LastTime,NowTime:TRNLTime;
+    c:TRNLUInt64;
 begin
+ c:=0;
 {$ifndef fpc}
  NameThreadForDebugging('Client');
 {$endif}
@@ -331,6 +342,8 @@ begin
             if CanSendBig then begin
              CanSendBig:=false;
              Peer.Channels[0].SendMessageData(@TestBuf0,SizeOf(TestBuf0));
+             writeln(c);
+             inc(c);
             end;
             for Index:=1 to 2 do begin
 //            Peer.Channels[0].SendMessageString('sdmkrtgj54zji4ow3eui6z 4uj3r uzjh3uj35tvj3tzv34');

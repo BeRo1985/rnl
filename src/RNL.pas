@@ -499,7 +499,7 @@ uses {$if defined(Posix)}
 {    Generics.Defaults,
      Generics.Collections;}
 
-const RNL_VERSION='1.00.2023.05.06.04.30.0000';
+const RNL_VERSION='1.00.2023.05.07.09.35.0000';
 
 type PPRNLInt8=^PRNLInt8;
      PRNLInt8=^TRNLInt8;
@@ -18662,7 +18662,7 @@ begin
      Time:=fInstance.Time;
      Delay:=(fSimulatedOutgoingLatency+(fRandomGenerator.GetUniformBoundedUInt32(fSimulatedOutgoingJitter*2)))-fSimulatedOutgoingJitter;
      if SimulateOutgoingOutOfOrderPacket then begin
-      Delay:=Delay+fRandomGenerator.GetUniformBoundedUInt32(999)+1;
+      Delay:=Delay+fRandomGenerator.GetUniformBoundedUInt32(50)+1;
       if fOutgoingPacketList.IsNotEmpty then begin
        Delay:=Delay+Max(0,TRNLNetworkInterferenceSimulatorPacket(fOutgoingPacketList.Back).fTime.fValue-Time.fValue);
       end;
@@ -18685,7 +18685,7 @@ begin
       result:=fNetwork.Send(aSocket,aAddress,Data^,aDataLength,aFamily);
      end;
      if (result=aDataLength) and SimulateOutgoingDuplicatePacket then begin
-      inc(Delay,fRandomGenerator.GetUniformBoundedUInt32(999)+1);
+      inc(Delay,fRandomGenerator.GetUniformBoundedUInt32(50)+1);
       Packet:=TRNLNetworkInterferenceSimulatorPacket.Create(self);
       try
        Packet.fTime.fValue:=Time.fValue+TRNLUInt64(Delay);
@@ -18794,7 +18794,7 @@ begin
     Time:=fInstance.Time;
     Delay:=(fSimulatedIncomingLatency+(fRandomGenerator.GetUniformBoundedUInt32(fSimulatedIncomingJitter*2)))-fSimulatedIncomingJitter;
     if SimulateIncomingOutOfOrderPacket then begin
-     Delay:=Delay+fRandomGenerator.GetUniformBoundedUInt32(999)+1;
+     Delay:=Delay+fRandomGenerator.GetUniformBoundedUInt32(50)+1;
      if fIncomingPacketList.IsNotEmpty then begin
       Delay:=Delay+Max(0,TRNLNetworkInterferenceSimulatorPacket(fIncomingPacketList.Back).fTime.fValue-Time.fValue);
      end;
@@ -18816,7 +18816,7 @@ begin
      Delay:=0;
     end;
     if SimulateIncomingDuplicatePacket then begin
-     inc(Delay,fRandomGenerator.GetUniformBoundedUInt32(999)+1);
+     inc(Delay,fRandomGenerator.GetUniformBoundedUInt32(50)+1);
      Packet:=TRNLNetworkInterferenceSimulatorPacket.Create(self);
      try
       Packet.fTime.fValue:=Time.fValue+TRNLUInt64(Delay);
@@ -20516,6 +20516,33 @@ begin
                                           SizeOf(TRNLProtocolBlockPacketChannel)+
                                           SizeOf(TRNLPeerReliableChannelAcknowledgementPacketHeader))) shl 3;
 
+ while fOutgoingAcknowledgementQueue.Dequeue(BlockPacketSequenceNumber) do begin
+
+  BlockPacket:=TRNLPeerBlockPacket.Create(fPeer);
+  try
+
+   BlockPacket.fBlockPacket.Channel.Header.TypeAndSubtype:=(TRNLInt32(TRNLProtocolBlockPacketType(RNL_PROTOCOL_BLOCK_PACKET_TYPE_CHANNEL)) shl 0) or
+                                                           (TRNLInt32(TRNLPeerReliableChannelCommandType(RNL_PEER_RELIABLE_CHANNEL_COMMAND_TYPE_ACKNOWLEDGEMENT)) shl 4);
+   BlockPacket.fBlockPacket.Channel.ChannelNumber:=fChannelNumber;
+   BlockPacket.fBlockPacket.Channel.PayloadDataLength:=TRNLEndianness.HostToLittleEndian16(SizeOf(TRNLPeerReliableChannelAcknowledgementPacketHeader));
+
+   BlockPacket.fBlockPacketDataLength:=SizeOf(TRNLPeerReliableChannelAcknowledgementPacketHeader);
+
+   SetLength(BlockPacket.fBlockPacketData,BlockPacket.fBlockPacketDataLength);
+
+   AcknowledgementPacketHeader:=TRNLPointer(@BlockPacket.fBlockPacketData[0]);
+   AcknowledgementPacketHeader^.Header.SequenceNumber:=TRNLEndianness.HostToLittleEndian16(BlockPacketSequenceNumber);
+
+   BlockPacket.fPendingResendOutgoingBlockPacketsList:=nil; // No resend timeout
+
+  finally
+   fPeer.fOutgoingBlockPackets.Enqueue(BlockPacket);
+  end;
+
+ end;
+
+ exit;
+
  DoNeedSort:=false;
 
  CountAcknowledgements:=0;
@@ -20626,7 +20653,7 @@ begin
 end;
 
 procedure TRNLPeerReliableChannel.DispatchOutgoingBlockPackets;
-var Index:TRNLSizeUInt;
+var SequenceNumberDifference,MaxPacketsToMove,Index:TRNLSizeUInt;
     BlockPacket:TRNLPeerBlockPacket;
     IndirectBlockPacket:PRNLPeerBlockPacket;
 begin
@@ -20642,25 +20669,50 @@ begin
  // This intermediate step is necessary in order to be able to keep the acknowledgement and
  // sent window sizes, so that the receiver side will not be spammed with too much
  // window-size-technical-early packets.
- for Index:=1 to fHost.fReliableChannelBlockPacketWindowSize-
-                  (((fOutgoingBlockPacketSequenceNumber+fHost.fReliableChannelBlockPacketWindowSize)-
-                    fIncomingAcknowledgementSequenceNumber) and
-                   fHost.fReliableChannelBlockPacketWindowMask) do begin
-  IndirectBlockPacket:=@fOutgoingBlockPackets[fOutgoingBlockPacketSequenceNumber.fValue and fHost.fReliableChannelBlockPacketWindowMask];
-  if (not assigned(IndirectBlockPacket^)) and
-     fOutgoingBlockPacketQueue.Peek(BlockPacket) and
-     (TRNLUInt16(BlockPacket.fSequenceNumber)=fOutgoingBlockPacketSequenceNumber) then begin
-   try
-    IndirectBlockPacket^:=BlockPacket;
-    BlockPacket.fPendingResendOutgoingBlockPacketsList:=fSentOutgoingBlockPackets;
-    fPeer.fOutgoingBlockPackets.Enqueue(BlockPacket);
-   finally
-    fOutgoingBlockPacketQueue.Dequeue;
+
+ // Compute the difference between outgoing and incoming sequence numbers
+ // SequenceNumberDifference:=((fOutgoingBlockPacketSequenceNumber.fValue+fHost.fReliableChannelBlockPacketWindowSize)-fIncomingAcknowledgementSequenceNumber.fValue) and fHost.fReliableChannelBlockPacketWindowMask;
+ SequenceNumberDifference:=TRNLSequenceNumber.Difference(fOutgoingBlockPacketSequenceNumber,fIncomingAcknowledgementSequenceNumber);
+
+ if SequenceNumberDifference<fHost.fReliableChannelBlockPacketWindowSize then begin
+
+  // Compute the maximum allowed number of packets that can be moved in this iteration
+  MaxPacketsToMove:=fHost.fReliableChannelBlockPacketWindowSize-SequenceNumberDifference;
+
+  for Index:=1 to MaxPacketsToMove do begin
+
+   IndirectBlockPacket:=@fOutgoingBlockPackets[fOutgoingBlockPacketSequenceNumber.fValue and fHost.fReliableChannelBlockPacketWindowMask];
+
+   // Move the block packet from the local window to the global queue if it has not yet been allocated
+   if (not assigned(IndirectBlockPacket^)) and
+      fOutgoingBlockPacketQueue.Peek(BlockPacket) and
+      (TRNLUInt16(BlockPacket.fSequenceNumber)=fOutgoingBlockPacketSequenceNumber) then begin
+
+    try
+
+     // Insert into the global queue
+     IndirectBlockPacket^:=BlockPacket;
+     BlockPacket.fPendingResendOutgoingBlockPacketsList:=fSentOutgoingBlockPackets;
+     fPeer.fOutgoingBlockPackets.Enqueue(BlockPacket);
+
+    finally
+
+     // Remove the package from the local queue
+     fOutgoingBlockPacketQueue.Dequeue;
+
+    end;
+
+    inc(fOutgoingBlockPacketSequenceNumber);
+
+   end else begin
+
+    // End the loop if the packet is outside the valid sequence number range
+    break;
+
    end;
-   inc(fOutgoingBlockPacketSequenceNumber);
-  end else begin
-   break;
+
   end;
+
  end;
 
 end;
@@ -20679,7 +20731,7 @@ begin
    if assigned(IndirectBlockPacket^) and
       (IndirectBlockPacket^.fSequenceNumber.fValue=aBlockPacketSequenceNumber.fValue) then begin
     try
-     fIncomingAcknowledgements[aBlockPacketSequenceNumber.fValue and fHost.fReliableChannelBlockPacketWindowMask]:=fIncomingAcknowledgementSequenceNumber.fValue;
+     fIncomingAcknowledgements[aBlockPacketSequenceNumber.fValue and fHost.fReliableChannelBlockPacketWindowMask]:=aBlockPacketSequenceNumber.fValue;//fIncomingAcknowledgementSequenceNumber.fValue;
      fPeer.UpdateRoundTripTime(abs(TRNLInt16(TRNLUInt16(aBlockPacketReceivedTime.fValue-IndirectBlockPacket^.fSentTime.fValue))));
      dec(fPeer.fUnacknowlegmentedBlockPackets);
      IndirectBlockPacket^.Remove;
@@ -20700,6 +20752,8 @@ begin
     break;
    end;
   until false;
+
+//writeln('ACK: ',aBlockPacketSequenceNumber.fValue,' ',fIncomingAcknowledgementSequenceNumber.fValue);
 
  end;
 
@@ -20744,6 +20798,8 @@ begin
 
  ChannelCommandType:=TRNLPeerReliableChannelCommandType(TRNLInt32(aBlockPacket.fBlockPacket.Channel.Header.TypeAndSubtype shr 4));
 
+// writeln(GetCurrentThreadId,' K ',BlockPacketSequenceNumber.fValue,' ',fIncomingBlockPacketSequenceNumber.fValue);
+
  case ChannelCommandType of
   RNL_PEER_RELIABLE_CHANNEL_COMMAND_TYPE_SHORT_MESSAGE,
   RNL_PEER_RELIABLE_CHANNEL_COMMAND_TYPE_LONG_MESSAGE:begin
@@ -20783,8 +20839,7 @@ begin
      // Dequeue (and, if ordered channel, dispatch) so many received block packets as much as possible in a single straight row
      repeat
       IndirectBlockPacket:=@fIncomingBlockPackets[fIncomingBlockPacketSequenceNumber.fValue and fHost.fReliableChannelBlockPacketWindowMask];
-      if assigned(IndirectBlockPacket^) and
-         (IndirectBlockPacket^.fSequenceNumber.fValue=fIncomingBlockPacketSequenceNumber.fValue) then begin
+      if assigned(IndirectBlockPacket^) and (IndirectBlockPacket^.fSequenceNumber.fValue=fIncomingBlockPacketSequenceNumber.fValue) then begin
        try
         if fOrdered then begin
          DispatchIncomingMessageBlockPacket(IndirectBlockPacket^);
@@ -20858,6 +20913,7 @@ var Message:TRNLMessage;
     MaximumLongMessageBlockPacketSize,
     MessagePartLength,
     MessagePosition:TRNLSizeUInt;
+    MaxPacketsToSend:TRNLSizeInt;
     BlockPacket:TRNLPeerBlockPacket;
     ShortMessagePacketHeader:PRNLPeerReliableChannelShortMessagePacketHeader;
     LongMessagePacketHeader:PRNLPeerReliableChannelLongMessagePacketHeader;
@@ -20881,71 +20937,42 @@ begin
                                                 SizeOf(TRNLProtocolBlockPacketChannel)+
                                                 SizeOf(TRNLPeerReliableChannelLongMessagePacketHeader));
 
- while fOutgoingMessageQueue.Dequeue(Message) do begin
+ MaxPacketsToSend:=TRNLSizeInt(fHost.fReliableChannelBlockPacketWindowSize)-TRNLSequenceNumber.Difference(fOutgoingBlockPacketSequenceNumber,fIncomingAcknowledgementSequenceNumber);
 
-  try
+ while fOutgoingMessageQueue.Peek(Message) do begin
 
-   if (Message.fDataLength>0) and (Message.fDataLength<=fHost.fMaximumMessageSize) then begin
+  if assigned(Message) and ((Message.fDataLength>0) and (Message.fDataLength<=fHost.fMaximumMessageSize)) then begin
 
-    if Message.fDataLength<=MaximumShortMessageBlockPacketSize then begin
+   if Message.fDataLength<=MaximumShortMessageBlockPacketSize then begin
 
-     BlockPacket:=TRNLPeerBlockPacket.Create(fPeer);
-     try
+    if MaxPacketsToSend<1 then begin
 
-      BlockPacket.fBlockPacket.Channel.Header.TypeAndSubtype:=(TRNLInt32(TRNLProtocolBlockPacketType(RNL_PROTOCOL_BLOCK_PACKET_TYPE_CHANNEL)) shl 0) or
-                                                              (TRNLInt32(TRNLPeerReliableChannelCommandType(RNL_PEER_RELIABLE_CHANNEL_COMMAND_TYPE_SHORT_MESSAGE)) shl 4);
-      BlockPacket.fBlockPacket.Channel.ChannelNumber:=fChannelNumber;
-      BlockPacket.fBlockPacket.Channel.PayloadDataLength:=TRNLEndianness.HostToLittleEndian16(SizeOf(TRNLPeerReliableChannelShortMessagePacketHeader)+Message.fDataLength);
-
-      BlockPacket.fBlockPacketDataLength:=SizeOf(TRNLPeerReliableChannelShortMessagePacketHeader)+Message.fDataLength;
-
-      SetLength(BlockPacket.fBlockPacketData,BlockPacket.fBlockPacketDataLength);
-
-      ShortMessagePacketHeader:=TRNLPointer(@BlockPacket.fBlockPacketData[0]);
-      ShortMessagePacketHeader^.Header.SequenceNumber:=TRNLEndianness.HostToLittleEndian16(fOutgoingMessageBlockPacketSequenceNumber);
-
-      Move(Message.fData^,
-           BlockPacket.fBlockPacketData[SizeOf(TRNLPeerReliableChannelShortMessagePacketHeader)],
-           Message.fDataLength);
-
-      BlockPacket.fSequenceNumber:=fOutgoingMessageBlockPacketSequenceNumber;
-
-      inc(fOutgoingMessageBlockPacketSequenceNumber);
-
-      inc(fPeer.fUnacknowlegmentedBlockPackets);
-
-     finally
-      fOutgoingBlockPacketQueue.Enqueue(BlockPacket);
-     end;
+     break;
 
     end else begin
 
-     MessagePosition:=0;
-     while MessagePosition<Message.fDataLength do begin
+     try
 
-      MessagePartLength:=Min(Max(TRNLInt64(Message.fDataLength-MessagePosition),TRNLInt64(1)),TRNLInt64(MaximumLongMessageBlockPacketSize));
+      fOutgoingMessageQueue.Dequeue;
 
       BlockPacket:=TRNLPeerBlockPacket.Create(fPeer);
       try
 
        BlockPacket.fBlockPacket.Channel.Header.TypeAndSubtype:=(TRNLInt32(TRNLProtocolBlockPacketType(RNL_PROTOCOL_BLOCK_PACKET_TYPE_CHANNEL)) shl 0) or
-                                                               (TRNLInt32(TRNLPeerReliableChannelCommandType(RNL_PEER_RELIABLE_CHANNEL_COMMAND_TYPE_LONG_MESSAGE)) shl 4);
+                                                               (TRNLInt32(TRNLPeerReliableChannelCommandType(RNL_PEER_RELIABLE_CHANNEL_COMMAND_TYPE_SHORT_MESSAGE)) shl 4);
        BlockPacket.fBlockPacket.Channel.ChannelNumber:=fChannelNumber;
-       BlockPacket.fBlockPacket.Channel.PayloadDataLength:=TRNLEndianness.HostToLittleEndian16(SizeOf(TRNLPeerReliableChannelLongMessagePacketHeader)+MessagePartLength);
+       BlockPacket.fBlockPacket.Channel.PayloadDataLength:=TRNLEndianness.HostToLittleEndian16(SizeOf(TRNLPeerReliableChannelShortMessagePacketHeader)+Message.fDataLength);
 
-       BlockPacket.fBlockPacketDataLength:=SizeOf(TRNLPeerReliableChannelLongMessagePacketHeader)+MessagePartLength;
+       BlockPacket.fBlockPacketDataLength:=SizeOf(TRNLPeerReliableChannelShortMessagePacketHeader)+Message.fDataLength;
 
        SetLength(BlockPacket.fBlockPacketData,BlockPacket.fBlockPacketDataLength);
 
-       LongMessagePacketHeader:=TRNLPointer(@BlockPacket.fBlockPacketData[0]);
-       LongMessagePacketHeader^.Header.SequenceNumber:=TRNLEndianness.HostToLittleEndian16(fOutgoingMessageBlockPacketSequenceNumber);
-       LongMessagePacketHeader^.MessageNumber:=TRNLEndianness.HostToLittleEndian16(fOutgoingMessageNumber);
-       LongMessagePacketHeader^.Offset:=TRNLEndianness.HostToLittleEndian32(MessagePosition);
-       LongMessagePacketHeader^.Length:=TRNLEndianness.HostToLittleEndian32(Message.fDataLength);
+       ShortMessagePacketHeader:=TRNLPointer(@BlockPacket.fBlockPacketData[0]);
+       ShortMessagePacketHeader^.Header.SequenceNumber:=TRNLEndianness.HostToLittleEndian16(fOutgoingMessageBlockPacketSequenceNumber);
 
-       Move(PRNLUInt8Array(TRNLPointer(Message.fData))^[MessagePosition],
-            BlockPacket.fBlockPacketData[SizeOf(TRNLPeerReliableChannelLongMessagePacketHeader)],
-            MessagePartLength);
+       Move(Message.fData^,
+            BlockPacket.fBlockPacketData[SizeOf(TRNLPeerReliableChannelShortMessagePacketHeader)],
+            Message.fDataLength);
 
        BlockPacket.fSequenceNumber:=fOutgoingMessageBlockPacketSequenceNumber;
 
@@ -20957,18 +20984,89 @@ begin
        fOutgoingBlockPacketQueue.Enqueue(BlockPacket);
       end;
 
-      inc(MessagePosition,MessagePartLength);
-
+     finally
+      Message.DecRef;
      end;
 
-     inc(fOutgoingMessageNumber);
+    end;
+
+   end else begin
+
+    if MaxPacketsToSend<((Message.fDataLength+(MaximumLongMessageBlockPacketSize-1)) div MaximumLongMessageBlockPacketSize) then begin
+
+     break;
+
+    end else begin
+
+     try
+
+      fOutgoingMessageQueue.Dequeue;
+
+      MessagePosition:=0;
+      while MessagePosition<Message.fDataLength do begin
+
+       MessagePartLength:=Min(Max(TRNLInt64(Message.fDataLength-MessagePosition),TRNLInt64(1)),TRNLInt64(MaximumLongMessageBlockPacketSize));
+
+       BlockPacket:=TRNLPeerBlockPacket.Create(fPeer);
+       try
+
+        BlockPacket.fBlockPacket.Channel.Header.TypeAndSubtype:=(TRNLInt32(TRNLProtocolBlockPacketType(RNL_PROTOCOL_BLOCK_PACKET_TYPE_CHANNEL)) shl 0) or
+                                                                (TRNLInt32(TRNLPeerReliableChannelCommandType(RNL_PEER_RELIABLE_CHANNEL_COMMAND_TYPE_LONG_MESSAGE)) shl 4);
+        BlockPacket.fBlockPacket.Channel.ChannelNumber:=fChannelNumber;
+        BlockPacket.fBlockPacket.Channel.PayloadDataLength:=TRNLEndianness.HostToLittleEndian16(SizeOf(TRNLPeerReliableChannelLongMessagePacketHeader)+MessagePartLength);
+
+        BlockPacket.fBlockPacketDataLength:=SizeOf(TRNLPeerReliableChannelLongMessagePacketHeader)+MessagePartLength;
+
+        SetLength(BlockPacket.fBlockPacketData,BlockPacket.fBlockPacketDataLength);
+
+        LongMessagePacketHeader:=TRNLPointer(@BlockPacket.fBlockPacketData[0]);
+        LongMessagePacketHeader^.Header.SequenceNumber:=TRNLEndianness.HostToLittleEndian16(fOutgoingMessageBlockPacketSequenceNumber);
+        LongMessagePacketHeader^.MessageNumber:=TRNLEndianness.HostToLittleEndian16(fOutgoingMessageNumber);
+        LongMessagePacketHeader^.Offset:=TRNLEndianness.HostToLittleEndian32(MessagePosition);
+        LongMessagePacketHeader^.Length:=TRNLEndianness.HostToLittleEndian32(Message.fDataLength);
+
+        Move(PRNLUInt8Array(TRNLPointer(Message.fData))^[MessagePosition],
+             BlockPacket.fBlockPacketData[SizeOf(TRNLPeerReliableChannelLongMessagePacketHeader)],
+             MessagePartLength);
+
+        BlockPacket.fSequenceNumber:=fOutgoingMessageBlockPacketSequenceNumber;
+
+        inc(fOutgoingMessageBlockPacketSequenceNumber);
+
+        inc(fPeer.fUnacknowlegmentedBlockPackets);
+
+       finally
+        fOutgoingBlockPacketQueue.Enqueue(BlockPacket);
+       end;
+
+       inc(MessagePosition,MessagePartLength);
+
+      end;
+
+      inc(fOutgoingMessageNumber);
+
+     finally
+      Message.DecRef;
+     end;
 
     end;
 
    end;
 
-  finally
-   Message.DecRef;
+  end else begin
+
+   try
+
+    fOutgoingMessageQueue.Dequeue;
+
+   finally
+
+    if assigned(Message) then begin
+     Message.DecRef;
+    end;
+
+   end;
+
   end;
 
  end;
@@ -21236,6 +21334,7 @@ var Message:TRNLMessage;
     MaximumLongMessageBlockPacketSize,
     MessagePartLength,
     MessagePosition:TRNLSizeUInt;
+    MaxPacketsToSend:TRNLSizeInt;
     BlockPacket:TRNLPeerBlockPacket;
     ShortMessagePacketHeader:PRNLPeerReliableChannelShortMessagePacketHeader;
     LongMessagePacketHeader:PRNLPeerReliableChannelLongMessagePacketHeader;
@@ -21259,71 +21358,42 @@ begin
                                                 SizeOf(TRNLProtocolBlockPacketChannel)+
                                                 SizeOf(TRNLPeerReliableChannelLongMessagePacketHeader));
 
- while fOutgoingMessageQueue.Dequeue(Message) do begin
+ MaxPacketsToSend:=TRNLSizeInt(fHost.fReliableChannelBlockPacketWindowSize)-TRNLSequenceNumber.Difference(fOutgoingBlockPacketSequenceNumber,fIncomingAcknowledgementSequenceNumber);
 
-  try
+ while fOutgoingMessageQueue.Peek(Message) do begin
 
-   if (Message.fDataLength>0) and (Message.fDataLength<=fHost.fMaximumMessageSize) then begin
+  if assigned(Message) and ((Message.fDataLength>0) and (Message.fDataLength<=fHost.fMaximumMessageSize)) then begin
 
-    if Message.fDataLength<=MaximumShortMessageBlockPacketSize then begin
+   if Message.fDataLength<=MaximumShortMessageBlockPacketSize then begin
 
-     BlockPacket:=TRNLPeerBlockPacket.Create(fPeer);
-     try
+    if MaxPacketsToSend<1 then begin
 
-      BlockPacket.fBlockPacket.Channel.Header.TypeAndSubtype:=(TRNLInt32(TRNLProtocolBlockPacketType(RNL_PROTOCOL_BLOCK_PACKET_TYPE_CHANNEL)) shl 0) or
-                                                              (TRNLInt32(TRNLPeerReliableChannelCommandType(RNL_PEER_RELIABLE_CHANNEL_COMMAND_TYPE_SHORT_MESSAGE)) shl 4);
-      BlockPacket.fBlockPacket.Channel.ChannelNumber:=fChannelNumber;
-      BlockPacket.fBlockPacket.Channel.PayloadDataLength:=TRNLEndianness.HostToLittleEndian16(SizeOf(TRNLPeerReliableChannelShortMessagePacketHeader)+Message.fDataLength);
-
-      BlockPacket.fBlockPacketDataLength:=SizeOf(TRNLPeerReliableChannelShortMessagePacketHeader)+Message.fDataLength;
-
-      SetLength(BlockPacket.fBlockPacketData,BlockPacket.fBlockPacketDataLength);
-
-      ShortMessagePacketHeader:=TRNLPointer(@BlockPacket.fBlockPacketData[0]);
-      ShortMessagePacketHeader^.Header.SequenceNumber:=TRNLEndianness.HostToLittleEndian16(fOutgoingMessageBlockPacketSequenceNumber);
-
-      Move(Message.fData^,
-           BlockPacket.fBlockPacketData[SizeOf(TRNLPeerReliableChannelShortMessagePacketHeader)],
-           Message.fDataLength);
-
-      BlockPacket.fSequenceNumber:=fOutgoingMessageBlockPacketSequenceNumber;
-
-      inc(fOutgoingMessageBlockPacketSequenceNumber);
-
-      inc(fPeer.fUnacknowlegmentedBlockPackets);
-
-     finally
-      fOutgoingBlockPacketQueue.Enqueue(BlockPacket);
-     end;
+     break;
 
     end else begin
 
-     MessagePosition:=0;
-     while MessagePosition<Message.fDataLength do begin
+     try
 
-      MessagePartLength:=Min(Max(TRNLInt64(Message.fDataLength-MessagePosition),TRNLInt64(1)),TRNLInt64(MaximumLongMessageBlockPacketSize));
+      fOutgoingMessageQueue.Dequeue;
 
       BlockPacket:=TRNLPeerBlockPacket.Create(fPeer);
       try
 
        BlockPacket.fBlockPacket.Channel.Header.TypeAndSubtype:=(TRNLInt32(TRNLProtocolBlockPacketType(RNL_PROTOCOL_BLOCK_PACKET_TYPE_CHANNEL)) shl 0) or
-                                                               (TRNLInt32(TRNLPeerReliableChannelCommandType(RNL_PEER_RELIABLE_CHANNEL_COMMAND_TYPE_LONG_MESSAGE)) shl 4);
+                                                               (TRNLInt32(TRNLPeerReliableChannelCommandType(RNL_PEER_RELIABLE_CHANNEL_COMMAND_TYPE_SHORT_MESSAGE)) shl 4);
        BlockPacket.fBlockPacket.Channel.ChannelNumber:=fChannelNumber;
-       BlockPacket.fBlockPacket.Channel.PayloadDataLength:=TRNLEndianness.HostToLittleEndian16(SizeOf(TRNLPeerReliableChannelLongMessagePacketHeader)+MessagePartLength);
+       BlockPacket.fBlockPacket.Channel.PayloadDataLength:=TRNLEndianness.HostToLittleEndian16(SizeOf(TRNLPeerReliableChannelShortMessagePacketHeader)+Message.fDataLength);
 
-       BlockPacket.fBlockPacketDataLength:=SizeOf(TRNLPeerReliableChannelLongMessagePacketHeader)+MessagePartLength;
+       BlockPacket.fBlockPacketDataLength:=SizeOf(TRNLPeerReliableChannelShortMessagePacketHeader)+Message.fDataLength;
 
        SetLength(BlockPacket.fBlockPacketData,BlockPacket.fBlockPacketDataLength);
 
-       LongMessagePacketHeader:=TRNLPointer(@BlockPacket.fBlockPacketData[0]);
-       LongMessagePacketHeader^.Header.SequenceNumber:=TRNLEndianness.HostToLittleEndian16(fOutgoingMessageBlockPacketSequenceNumber);
-       LongMessagePacketHeader^.MessageNumber:=TRNLEndianness.HostToLittleEndian16(fOutgoingMessageNumber);
-       LongMessagePacketHeader^.Offset:=TRNLEndianness.HostToLittleEndian32(MessagePosition);
-       LongMessagePacketHeader^.Length:=TRNLEndianness.HostToLittleEndian32(Message.fDataLength);
+       ShortMessagePacketHeader:=TRNLPointer(@BlockPacket.fBlockPacketData[0]);
+       ShortMessagePacketHeader^.Header.SequenceNumber:=TRNLEndianness.HostToLittleEndian16(fOutgoingMessageBlockPacketSequenceNumber);
 
-       Move(PRNLUInt8Array(TRNLPointer(Message.fData))^[MessagePosition],
-            BlockPacket.fBlockPacketData[SizeOf(TRNLPeerReliableChannelLongMessagePacketHeader)],
-            MessagePartLength);
+       Move(Message.fData^,
+            BlockPacket.fBlockPacketData[SizeOf(TRNLPeerReliableChannelShortMessagePacketHeader)],
+            Message.fDataLength);
 
        BlockPacket.fSequenceNumber:=fOutgoingMessageBlockPacketSequenceNumber;
 
@@ -21335,18 +21405,89 @@ begin
        fOutgoingBlockPacketQueue.Enqueue(BlockPacket);
       end;
 
-      inc(MessagePosition,MessagePartLength);
-
+     finally
+      Message.DecRef;
      end;
 
-     inc(fOutgoingMessageNumber);
+    end;
+
+   end else begin
+
+    if MaxPacketsToSend<((Message.fDataLength+(MaximumLongMessageBlockPacketSize-1)) div MaximumLongMessageBlockPacketSize) then begin
+
+     break;
+
+    end else begin
+
+     try
+
+      fOutgoingMessageQueue.Dequeue;
+
+      MessagePosition:=0;
+      while MessagePosition<Message.fDataLength do begin
+
+       MessagePartLength:=Min(Max(TRNLInt64(Message.fDataLength-MessagePosition),TRNLInt64(1)),TRNLInt64(MaximumLongMessageBlockPacketSize));
+
+       BlockPacket:=TRNLPeerBlockPacket.Create(fPeer);
+       try
+
+        BlockPacket.fBlockPacket.Channel.Header.TypeAndSubtype:=(TRNLInt32(TRNLProtocolBlockPacketType(RNL_PROTOCOL_BLOCK_PACKET_TYPE_CHANNEL)) shl 0) or
+                                                                (TRNLInt32(TRNLPeerReliableChannelCommandType(RNL_PEER_RELIABLE_CHANNEL_COMMAND_TYPE_LONG_MESSAGE)) shl 4);
+        BlockPacket.fBlockPacket.Channel.ChannelNumber:=fChannelNumber;
+        BlockPacket.fBlockPacket.Channel.PayloadDataLength:=TRNLEndianness.HostToLittleEndian16(SizeOf(TRNLPeerReliableChannelLongMessagePacketHeader)+MessagePartLength);
+
+        BlockPacket.fBlockPacketDataLength:=SizeOf(TRNLPeerReliableChannelLongMessagePacketHeader)+MessagePartLength;
+
+        SetLength(BlockPacket.fBlockPacketData,BlockPacket.fBlockPacketDataLength);
+
+        LongMessagePacketHeader:=TRNLPointer(@BlockPacket.fBlockPacketData[0]);
+        LongMessagePacketHeader^.Header.SequenceNumber:=TRNLEndianness.HostToLittleEndian16(fOutgoingMessageBlockPacketSequenceNumber);
+        LongMessagePacketHeader^.MessageNumber:=TRNLEndianness.HostToLittleEndian16(fOutgoingMessageNumber);
+        LongMessagePacketHeader^.Offset:=TRNLEndianness.HostToLittleEndian32(MessagePosition);
+        LongMessagePacketHeader^.Length:=TRNLEndianness.HostToLittleEndian32(Message.fDataLength);
+
+        Move(PRNLUInt8Array(TRNLPointer(Message.fData))^[MessagePosition],
+             BlockPacket.fBlockPacketData[SizeOf(TRNLPeerReliableChannelLongMessagePacketHeader)],
+             MessagePartLength);
+
+        BlockPacket.fSequenceNumber:=fOutgoingMessageBlockPacketSequenceNumber;
+
+        inc(fOutgoingMessageBlockPacketSequenceNumber);
+
+        inc(fPeer.fUnacknowlegmentedBlockPackets);
+
+       finally
+        fOutgoingBlockPacketQueue.Enqueue(BlockPacket);
+       end;
+
+       inc(MessagePosition,MessagePartLength);
+
+      end;
+
+      inc(fOutgoingMessageNumber);
+
+     finally
+      Message.DecRef;
+     end;
 
     end;
 
    end;
 
-  finally
-   Message.DecRef;
+  end else begin
+
+   try
+
+    fOutgoingMessageQueue.Dequeue;
+
+   finally
+
+    if assigned(Message) then begin
+     Message.DecRef;
+    end;
+
+   end;
+
   end;
 
  end;
