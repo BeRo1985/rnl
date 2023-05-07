@@ -197,10 +197,18 @@ unit RNL;
  {$ifdef CPU386}
   {$define CPUX86}
   {$asmmode intel}
+  {$undef CPU64}
  {$endif}
  {$ifdef CPUAMD64}
   {$define CPUX64}
   {$asmmode intel}
+  {$define CPU64}
+ {$endif}
+ {$ifdef CPUARM}
+  {$undef CPU64}
+ {$endif}
+ {$ifdef CPUAARCH64}
+  {$define CPU64}
  {$endif}
  {$ifdef FPC_LITTLE_ENDIAN}
   {$define LITTLE_ENDIAN}
@@ -499,7 +507,7 @@ uses {$if defined(Posix)}
 {    Generics.Defaults,
      Generics.Collections;}
 
-const RNL_VERSION='1.00.2023.05.07.09.35.0000';
+const RNL_VERSION='1.00.2023.05.07.16.08.0000';
 
 type PPRNLInt8=^PRNLInt8;
      PRNLInt8=^TRNLInt8;
@@ -12507,7 +12515,7 @@ begin
   end;
   Index:=fHead;
   fItems[Index]:=aItem;
-  {$ifdef fpc}InterlockedIncrement{$else}AtomicIncrement{$endif}(fCount);
+  {$ifdef fpc}{$ifdef CPU64}InterlockedIncrement64{$else}InterlockedIncrement{$endif}{$else}AtomicIncrement{$endif}({$ifdef CPU64}TRNLInt64{$else}TRNLInt32{$endif}(fCount));
  finally
   fSpinLock.Release;
  end;
@@ -12527,7 +12535,7 @@ begin
    fTail:=0;
   end;
   fItems[Index]:=aItem;
-  {$ifdef fpc}InterlockedIncrement{$else}AtomicIncrement{$endif}(fCount);
+  {$ifdef fpc}{$ifdef CPU64}InterlockedIncrement64{$else}InterlockedIncrement{$endif}{$else}AtomicIncrement{$endif}({$ifdef CPU64}TRNLInt64{$else}TRNLInt32{$endif}(fCount));
  finally
   fSpinLock.Release;
  end;
@@ -12539,7 +12547,7 @@ begin
  try
   result:=fCount>0;
   if result then begin
-   {$ifdef fpc}InterlockedDecrement{$else}AtomicDecrement{$endif}(fCount);
+   {$ifdef fpc}{$ifdef CPU64}InterlockedDecrement64{$else}InterlockedDecrement{$endif}{$else}AtomicDecrement{$endif}({$ifdef CPU64}TRNLInt64{$else}TRNLInt32{$endif}(fCount));
    aItem:=fItems[fHead];
    Finalize(fItems[fHead]);
    FillChar(fItems[fHead],SizeOf(T),#0);
@@ -12564,7 +12572,7 @@ begin
  try
   result:=fCount>0;
   if result then begin
-   {$ifdef fpc}InterlockedDecrement{$else}AtomicDecrement{$endif}(fCount);
+   {$ifdef fpc}{$ifdef CPU64}InterlockedDecrement64{$else}InterlockedDecrement{$endif}{$else}AtomicDecrement{$endif}({$ifdef CPU64}TRNLInt64{$else}TRNLInt32{$endif}(fCount));
    Finalize(fItems[fHead]);
    FillChar(fItems[fHead],SizeOf(T),#0);
    if fCount=0 then begin
@@ -12620,7 +12628,7 @@ begin
  fSpinLock.Acquire;
  try
   while fCount>0 do begin
-   {$ifdef fpc}InterlockedDecrement{$else}AtomicDecrement{$endif}(fCount);
+   {$ifdef fpc}{$ifdef CPU64}InterlockedDecrement64{$else}InterlockedDecrement{$endif}{$else}AtomicDecrement{$endif}({$ifdef CPU64}TRNLInt64{$else}TRNLInt32{$endif}(fCount));
    Finalize(fItems[fCount]);
   end;
  finally
@@ -12644,7 +12652,7 @@ begin
  fSpinLock.Acquire;
  try
   Index:=fCount;
-  {$ifdef fpc}InterlockedIncrement{$else}AtomicIncrement{$endif}(fCount);
+  {$ifdef fpc}{$ifdef CPU64}InterlockedIncrement64{$else}InterlockedIncrement{$endif}{$else}AtomicIncrement{$endif}({$ifdef CPU64}TRNLInt64{$else}TRNLInt32{$endif}(fCount));
   if length(fItems)<fCount then begin
    SetLength(fItems,fCount+fCount);
   end;
@@ -12660,7 +12668,7 @@ begin
  try
   result:=fCount>0;
   if result then begin
-   {$ifdef fpc}InterlockedDecrement{$else}AtomicDecrement{$endif}(fCount);
+   {$ifdef fpc}{$ifdef CPU64}InterlockedDecrement64{$else}InterlockedDecrement{$endif}{$else}AtomicDecrement{$endif}({$ifdef CPU64}TRNLInt64{$else}TRNLInt32{$endif}(fCount));
    aItem:=fItems[fCount];
    Finalize(fItems[fCount]);
   end;
@@ -17592,9 +17600,9 @@ begin
  RecvLength:=0;
 {$if (defined(NextGen) or defined(Android) or defined(iOS)) and not defined(fpc)}
  if assigned(aAddress) then begin
-  RecvLength:=Posix.SysSocket.RecvFrom(aSocket,aData,aDataLength,{$if defined(fpc) and defined(Darwin)}0{$else}MSG_NOSIGNAL{$ifend},sockaddr(TRNLPointer(@SIN)^),{$ifdef cpu64}Cardinal{$else}Integer{$endif}(TRNLPointer(@SINLength)^));
+  RecvLength:=Posix.SysSocket.RecvFrom(aSocket,aData,aDataLength,{$if defined(fpc) and defined(Darwin)}0{$else}MSG_NOSIGNAL{$ifend},sockaddr(TRNLPointer(@SIN)^),{$ifdef CPU64}Cardinal{$else}Integer{$endif}(TRNLPointer(@SINLength)^));
  end else begin
-  RecvLength:=Posix.SysSocket.RecvFrom(aSocket,aData,aDataLength,{$if defined(fpc) and defined(Darwin)}0{$else}MSG_NOSIGNAL{$ifend},sockaddr(TRNLPointer(nil)^),{$ifdef cpu64}Cardinal{$else}Integer{$endif}(TRNLPointer(@SIN)^));
+  RecvLength:=Posix.SysSocket.RecvFrom(aSocket,aData,aDataLength,{$if defined(fpc) and defined(Darwin)}0{$else}MSG_NOSIGNAL{$ifend},sockaddr(TRNLPointer(nil)^),{$ifdef CPU64}Cardinal{$else}Integer{$endif}(TRNLPointer(@SIN)^));
  end;
 {$else}
  if assigned(aAddress) then begin
