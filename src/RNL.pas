@@ -20516,7 +20516,7 @@ begin
                                           SizeOf(TRNLProtocolBlockPacketChannel)+
                                           SizeOf(TRNLPeerReliableChannelAcknowledgementPacketHeader))) shl 3;
 
- while fOutgoingAcknowledgementQueue.Dequeue(BlockPacketSequenceNumber) do begin
+{while fOutgoingAcknowledgementQueue.Dequeue(BlockPacketSequenceNumber) do begin
 
   BlockPacket:=TRNLPeerBlockPacket.Create(fPeer);
   try
@@ -20541,7 +20541,7 @@ begin
 
  end;
 
- exit;
+ exit;//}
 
  DoNeedSort:=false;
 
@@ -20731,7 +20731,7 @@ begin
    if assigned(IndirectBlockPacket^) and
       (IndirectBlockPacket^.fSequenceNumber.fValue=aBlockPacketSequenceNumber.fValue) then begin
     try
-     fIncomingAcknowledgements[aBlockPacketSequenceNumber.fValue and fHost.fReliableChannelBlockPacketWindowMask]:=aBlockPacketSequenceNumber.fValue;//fIncomingAcknowledgementSequenceNumber.fValue;
+     fIncomingAcknowledgements[aBlockPacketSequenceNumber.fValue and fHost.fReliableChannelBlockPacketWindowMask]:=aBlockPacketSequenceNumber.fValue;
      fPeer.UpdateRoundTripTime(abs(TRNLInt16(TRNLUInt16(aBlockPacketReceivedTime.fValue-IndirectBlockPacket^.fSentTime.fValue))));
      dec(fPeer.fUnacknowlegmentedBlockPackets);
      IndirectBlockPacket^.Remove;
