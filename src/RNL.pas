@@ -19738,11 +19738,16 @@ begin
       Step:=BestMatchLength;
      end;
      Offset:=0;
-     while (Offset<Step) and (({%H-}TRNLPtrUInt(CurrentPointer)+Offset)<{%H-}TRNLPtrUInt(EndSearchPointer)) do begin
-      EncodeBit(FlagModel+TRNLUInt8(ord(LastWasMatch) and 1),5,0);
-      EncodeTree(LiteralModel,8,4,PRNLUInt8Array(CurrentPointer)^[Offset]);
-      LastWasMatch:=false;
-      inc(Offset);
+     while Offset<Step do begin
+      if (({%H-}TRNLPtrUInt(CurrentPointer)+Offset)<{%H-}TRNLPtrUInt(EndSearchPointer)) the begin
+       EncodeBit(FlagModel+TRNLUInt8(ord(LastWasMatch) and 1),5,0);
+       EncodeTree(LiteralModel,8,4,PRNLUInt8Array(CurrentPointer)^[Offset]);
+       LastWasMatch:=false;
+       inc(Offset);
+      end else begin
+       BestMatchLength:=Offset;
+       break;
+      end;
      end;
      if BestMatchLength=1 then begin
       BestMatchLength:=Offset;
