@@ -19739,7 +19739,7 @@ begin
      end;
      Offset:=0;
      while Offset<Step do begin
-      if (({%H-}TRNLPtrUInt(CurrentPointer)+Offset)<{%H-}TRNLPtrUInt(EndSearchPointer)) the begin
+      if (({%H-}TRNLPtrUInt(CurrentPointer)+Offset)<{%H-}TRNLPtrUInt(EndSearchPointer)) then begin
        EncodeBit(FlagModel+TRNLUInt8(ord(LastWasMatch) and 1),5,0);
        EncodeTree(LiteralModel,8,4,PRNLUInt8Array(CurrentPointer)^[Offset]);
        LastWasMatch:=false;
