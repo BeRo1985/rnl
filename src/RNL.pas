@@ -14043,6 +14043,8 @@ const GetAddrInfo:TGetAddrInfo=nil;
       QueryPerformanceFrequencyBase:TRNLUInt64=0;
       QueryPerformanceFrequencyShift:TRNLInt32=0;
 
+      SD_SEND=1;
+
 function GetTickCount64:TRNLUInt64; stdcall; external 'kernel32.dll' name 'GetTickCount64';
 
 function WSAStartup(wVersionRequired:TRNLUInt16;var WSData:TWSAData):TRNLInt32; stdcall; external 'ws2_32.dll' name 'WSAStartup';
@@ -14077,8 +14079,14 @@ function WSARecvFrom(s:TRNLSocket;
                      lpOverlapped:LPWSAOVERLAPPED;
                      lpCompletionRoutine:LPWSAOVERLAPPED_COMPLETION_ROUTINE):TRNLInt32; stdcall; external 'ws2_32.dll' name 'WSARecvFrom';
 function _select(nfds:TRNLInt32;readfds,writefds,exceptfds:PRNLSocketSet;timeout:PTimeVal):TRNLInt32; stdcall; external 'ws2_32.dll' name 'select';
-
-function WSACreateEvent:TWSAEvent; stdcall; external 'ws2_32.dll' name 'WSACreateEvent';
+function getsockopt(s:TRNLSocket;level,optname:TRNLInt32;optval:TRNLPointer;optlen:TRNLInt32):TRNLInt32; stdcall; external 'ws2_32.dll' name 'getsockopt';
+function WSASend(s:TRNLSocket;lpBuffers:LPWSABUF;dwBufferCount:TRNLUInt32;var lpNumberOfBytesSent:TRNLUInt32;dwFlags:TRNLUInt32;lpOverlapped:LPWSAOVERLAPPED;lpCompletionRoutine:LPWSAOVERLAPPED_COMPLETION_ROUTINE):TRNLInt32; stdcall; external 'ws2_32.dll' name 'WSASend';
+function WSARecv(s:TRNLSocket;lpBuffers:LPWSABUF;dwBufferCount:TRNLUInt32;var lpNumberOfBytesRecvd:TRNLUInt32;var lpFlags:TRNLUInt32;lpOverlapped:LPWSAOVERLAPPED;lpCompletionRoutine:LPWSAOVERLAPPED_COMPLETION_ROUTINE):TRNLInt32; stdcall; external 'ws2_32.dll' name 'WSARecv';
+function _sendto(s:TRNLSocket;const buf;len,flags:TRNLInt32;const addrto:TSockAddr;tolen:TRNLInt32):TRNLInt32; stdcall; external 'ws2_32.dll' name 'sendto';
+function _send(s:TRNLSocket;const buf;len,flags:TRNLInt32):TRNLInt32; stdcall; external 'ws2_32.dll' name 'send';
+function _recvfrom(s:TRNLSocket;var buf;len,flags:TRNLInt32;var from:TSockAddr;var fromlen:TRNLInt32):TRNLInt32; stdcall; external 'ws2_32.dll' name 'recvfrom';
+function _recv(s:TRNLSocket;var buf;len,flags:TRNLInt32):TRNLInt32; stdcall; external 'ws2_32.dll' name 'recv';
+function WSACreateEvent:TWSAEvent;stdcall; external 'ws2_32.dll' name 'WSACreateEvent';
 function WSACloseEvent(hEvent:TWSAEvent):bool; stdcall; external 'ws2_32.dll' name 'WSACloseEvent';
 function WSAResetEvent(hEvent:TWSAEvent):bool;stdcall; external 'ws2_32.dll' name 'WSAResetEvent';
 function WSASetEvent(hEvent:TWSAEvent):bool;stdcall; external 'ws2_32.dll' name 'WSASetEvent';
