@@ -507,7 +507,7 @@ uses {$if defined(Posix)}
 {    Generics.Defaults,
      Generics.Collections;}
 
-const RNL_VERSION='1.00.2026.05.02.00.54.0000';
+const RNL_VERSION='1.00.2026.05.05.02.07.0000';
 
 type PPRNLInt8=^PRNLInt8;
      PRNLInt8=^TRNLInt8;
@@ -14079,7 +14079,7 @@ function WSARecvFrom(s:TRNLSocket;
                      lpOverlapped:LPWSAOVERLAPPED;
                      lpCompletionRoutine:LPWSAOVERLAPPED_COMPLETION_ROUTINE):TRNLInt32; stdcall; external 'ws2_32.dll' name 'WSARecvFrom';
 function _select(nfds:TRNLInt32;readfds,writefds,exceptfds:PRNLSocketSet;timeout:PTimeVal):TRNLInt32; stdcall; external 'ws2_32.dll' name 'select';
-function getsockopt(s:TRNLSocket;level,optname:TRNLInt32;optval:TRNLPointer;optlen:TRNLInt32):TRNLInt32; stdcall; external 'ws2_32.dll' name 'getsockopt';
+function getsockopt(s:TRNLSocket;level,optname:TRNLInt32;optval:TRNLPointer;var optlen:TRNLInt32):TRNLInt32; stdcall; external 'ws2_32.dll' name 'getsockopt';
 function WSASend(s:TRNLSocket;lpBuffers:LPWSABUF;dwBufferCount:TRNLUInt32;var lpNumberOfBytesSent:TRNLUInt32;dwFlags:TRNLUInt32;lpOverlapped:LPWSAOVERLAPPED;lpCompletionRoutine:LPWSAOVERLAPPED_COMPLETION_ROUTINE):TRNLInt32; stdcall; external 'ws2_32.dll' name 'WSASend';
 function WSARecv(s:TRNLSocket;lpBuffers:LPWSABUF;dwBufferCount:TRNLUInt32;var lpNumberOfBytesRecvd:TRNLUInt32;var lpFlags:TRNLUInt32;lpOverlapped:LPWSAOVERLAPPED;lpCompletionRoutine:LPWSAOVERLAPPED_COMPLETION_ROUTINE):TRNLInt32; stdcall; external 'ws2_32.dll' name 'WSARecv';
 function _sendto(s:TRNLSocket;const buf;len,flags:TRNLInt32;const addrto:TSockAddr;tolen:TRNLInt32):TRNLInt32; stdcall; external 'ws2_32.dll' name 'sendto';
@@ -16923,7 +16923,7 @@ begin
 {$ifdef fpc}
    r:=fpgetsockopt(aSocket,SOL_SOCKET,SO_ERROR,TRNLPointer(@aValue),@SockLen);
 {$else}
-   r:=getsockopt(aSocket,SOL_SOCKET,SO_ERROR,aValue,SockLen);
+   r:=getsockopt(aSocket,SOL_SOCKET,SO_ERROR,TRNLPointer(@aValue),SockLen);
 {$endif}
   end;
  end;
@@ -27281,8 +27281,10 @@ end;
 
 function RNLSocketGetError(const aSocket:TRNLSocket;out aError:TRNLInt32):Boolean;
 {$if defined(Windows)}
+var OptLen:TRNLInt32;
 begin
- result:=getsockopt(aSocket,SOL_SOCKET,SO_ERROR,TRNLPointer(@aError),SizeOf(TRNLInt32))<>SOCKET_ERROR;
+ OptLen:=SizeOf(TRNLInt32);
+ result:=getsockopt(aSocket,SOL_SOCKET,SO_ERROR,TRNLPointer(@aError),OptLen)<>SOCKET_ERROR;
 end;
 {$elseif defined(fpc)}
 var SockLen:socklen_t;
