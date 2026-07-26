@@ -2629,7 +2629,13 @@ type PRNLVersion=^TRNLVersion;
       (
        RNL_NETWORK_SEND_RESULT_ERROR,
        RNL_NETWORK_SEND_RESULT_OK,
-       RNL_NETWORK_SEND_RESULT_BANDWIDTH_RATE_LIMITER_DROP
+       RNL_NETWORK_SEND_RESULT_BANDWIDTH_RATE_LIMITER_DROP,
+       // A transient condition of the underlying socket (send buffer full, EWOULDBLOCK,
+       // ENOBUFS, EMSGSIZE, and so on). The packet was not sent, but this is explicitly
+       // not an error, because it is indistinguishable from ordinary packet loss from the
+       // protocol point of view, and the reliable layer will retransmit it anyway. It must
+       // never terminate the host service loop.
+       RNL_NETWORK_SEND_RESULT_WOULD_BLOCK
       );
 
      TRNLNetworkEvent=class
@@ -3709,6 +3715,12 @@ type PRNLVersion=^TRNLVersion;
 
        fTotalReceivedPackets:TRNLUInt64;
 
+       fTotalSoftSendFailures:TRNLUInt64;
+
+       fTotalHardSendFailures:TRNLUInt64;
+
+       fTotalHardReceiveFailures:TRNLUInt64;
+
        fConnectionChallengeDifficultyLevel:TRNLUInt32;
 
        fConnectionAttemptsPerSecondChallengeDifficultyFactor:TRNLUInt32;
@@ -3874,6 +3886,15 @@ type PRNLVersion=^TRNLVersion;
        property Peers:TRNLPeerListNode read fPeerList;
 {$ifend}
        property CountPeers:TRNLUInt32 read fCountPeers;
+       property TotalReceivedData:TRNLUInt64 read fTotalReceivedData;
+       property TotalReceivedPackets:TRNLUInt64 read fTotalReceivedPackets;
+       // Number of outgoing datagrams, which the underlying socket did not accept because of
+       // a transient condition, and which were therefore dropped like lost packets
+       property TotalSoftSendFailures:TRNLUInt64 read fTotalSoftSendFailures;
+       // Number of hard send and receive errors, each of which did terminate the host
+       // service loop with RNL_HOST_SERVICE_STATUS_ERROR
+       property TotalHardSendFailures:TRNLUInt64 read fTotalHardSendFailures;
+       property TotalHardReceiveFailures:TRNLUInt64 read fTotalHardReceiveFailures;
       published
        property Instance:TRNLInstance read fInstance;
        property Network:TRNLNetwork read fNetwork;
@@ -17367,7 +17388,18 @@ begin
  PollCount:=fppoll(@PollFDs[0],CountPollFDs,aTimeout);
 
  if PollCount<0 then begin
-  result:=false;
+  // A signal is not a reason to give up the whole host, just report it as an interrupted
+  // wait, in the same way as the select-based fallback branch below does it
+  if fpgeterrno=ESysEINTR then begin
+   if RNL_SOCKET_WAIT_CONDITION_IO_INTERRUPT in aConditions then begin
+    aConditions:=[RNL_SOCKET_WAIT_CONDITION_IO_INTERRUPT];
+   end else begin
+    aConditions:=[];
+   end;
+   result:=true;
+  end else begin
+   result:=false;
+  end;
   exit;
  end;
 
@@ -17377,9 +17409,15 @@ begin
 
  for Index:=0 to CountPollFDs-1 do begin
   if assigned(aEvent) and (PollFDs[Index].fd=aEvent.fEventPipeFDs[0]) then begin
-   aEvent.ResetEvent;
-   if ServiceInterrupt then begin
-    Include(aConditions,RNL_SOCKET_WAIT_CONDITION_SERVICE_INTERRUPT);
+   // The revents check must not be omitted here, otherwise every single wait, including
+   // every plain timeout, would report a service interrupt, which in turn would make
+   // TRNLHost.DispatchIteration return RNL_HOST_SERVICE_STATUS_INTERRUPT immediately and
+   // every single time, so that the host would never block and just busy-spin instead
+   if (PollFDs[Index].revents and POLLIN)<>0 then begin
+    aEvent.ResetEvent;
+    if ServiceInterrupt then begin
+     Include(aConditions,RNL_SOCKET_WAIT_CONDITION_SERVICE_INTERRUPT);
+    end;
    end;
   end else begin
    if (PollFDs[Index].revents and POLLIN)<>0 then begin
@@ -17664,12 +17702,13 @@ begin
    result:=RecvLength;
   end;
  end else begin
+  // See the note in the FreePascal branch below about the inverted error classification
   case WSAGetLastError of
-   WSAEWOULDBLOCK,WSAECONNRESET,WSAEMSGSIZE:begin
-    result:=0;
+   WSAEBADF,WSAENOTSOCK:begin
+    result:=-1;
    end;
    else begin
-    result:=-1;
+    result:=0;
    end;
   end;
  end;
@@ -17691,12 +17730,20 @@ begin
   end;
   result:=RecvLength;
  end else begin
+  // The error classification is deliberately inverted here, so that only a structurally
+  // broken socket is a hard error. A connectionless UDP socket can report a whole bunch
+  // of transient conditions, which all just mean "no datagram for you right now":
+  // EWOULDBLOCK/EAGAIN, EMSGSIZE, EINTR from any signal, ENOBUFS under memory pressure,
+  // and ECONNRESET/ECONNREFUSED/EHOSTUNREACH/ENETUNREACH/ENETDOWN whenever an ICMP error
+  // for a previously sent datagram gets queued onto the socket. Treating any of them as a
+  // hard error would tear down the whole host including all of its other peers, which is
+  // never the right reaction to one lost datagram.
   case SocketError of
-   EsockEWOULDBLOCK{,EsockECONNRESET},EsockEMSGSIZE{$if defined(fpc) and defined(Android)},0{$ifend}:begin
-    result:=0;
+   EsockEBADF,EsockENOTSOCK:begin
+    result:=-1;
    end;
    else begin
-    result:=-1;
+    result:=0;
    end;
   end;
  end;
@@ -17727,12 +17774,13 @@ begin
   end;
   result:=RecvLength;
  end else begin
+  // See the note in the FreePascal branch above about the inverted error classification
   case GetLastError of
-   EWOULDBLOCK{,ECONNRESET},EMSGSIZE:begin
-    result:=0;
+   EBADF,ENOTSOCK:begin
+    result:=-1;
    end;
    else begin
-    result:=-1;
+    result:=0;
    end;
   end;
  end;
@@ -18871,8 +18919,10 @@ begin
    if (aDataLength>0) and SimulateOutgoingBitFlipping then begin
     GetMem(Data,aDataLength);
     Move(aData,Data^,aDataLength);
+    // This must be aDataLength and not result, because result is still zero at this point,
+    // so that the outgoing bit flipping simulation did never actually flip anything at all
     SimulateBitFlipping(Data^,
-                        result,
+                        aDataLength,
                         fSimulatedOutgoingMinimumFlippingBits,
                         fSimulatedOutgoingMaximumFlippingBits);
    end;
@@ -20778,8 +20828,11 @@ begin
  DoNeedSort:=false;
 
  CountAcknowledgements:=0;
- while fOutgoingAcknowledgementQueue.Dequeue(BlockPacketSequenceNumber) and
-       (CountAcknowledgements<length(fOutgoingAcknowledgementArray)) do begin
+ // The capacity check must come first, because Pascal evaluates this short-circuited, so
+ // that with the other order the Dequeue would still consume one sequence number when the
+ // array is already full, and that acknowledgement would then be silently thrown away
+ while (CountAcknowledgements<length(fOutgoingAcknowledgementArray)) and
+       fOutgoingAcknowledgementQueue.Dequeue(BlockPacketSequenceNumber) do begin
   DoNeedSort:=DoNeedSort or
               ((CountAcknowledgements>0) and
                (fOutgoingAcknowledgementArray[CountAcknowledgements-1]>BlockPacketSequenceNumber));
@@ -23319,36 +23372,77 @@ end;
 
 function TRNLPeer.DispatchOutgoingMTUProbeBlockPackets(var aOutgoingPacketBuffer:TRNLOutgoingPacketBuffer):boolean;
 var OutgoingBlockPacket:TRNLPeerBlockPacket;
+    MTUProbeSize:TRNLSizeUInt;
 begin
 
  result:=false;
 
+ // Every path through this loop body must either dequeue the peeked block packet or leave
+ // the loop, otherwise the next Peek would just hand out the very same block packet again
+ // and this loop would spin forever
+
  while fOutgoingMTUProbeBlockPackets.Peek(OutgoingBlockPacket) do begin
 
-  if OutgoingBlockPacket.fBlockPacket.Header.TypeAndSubtype=TRNLInt32(TRNLProtocolBlockPacketType(RNL_PROTOCOL_BLOCK_PACKET_TYPE_MTU_PROBE)) then begin
+  if OutgoingBlockPacket.fBlockPacket.Header.TypeAndSubtype<>TRNLInt32(TRNLProtocolBlockPacketType(RNL_PROTOCOL_BLOCK_PACKET_TYPE_MTU_PROBE)) then begin
 
-   aOutgoingPacketBuffer.Reset(SizeOf(TRNLProtocolNormalPacketHeader),
-                               TRNLEndianness.LittleEndianToHost16(OutgoingBlockPacket.fBlockPacket.MTUProbe.Size)-
-                               (RNL_IP_HEADER_SIZE+
-                                RNL_UDP_HEADER_SIZE));
-
-   if aOutgoingPacketBuffer.HasSpaceFor(OutgoingBlockPacket.Size) and
-      fOutgoingMTUProbeBlockPackets.Dequeue then begin
-
-    OutgoingBlockPacket.AppendTo(aOutgoingPacketBuffer);
-    inc(fCountSentPackets);
-
-    result:=true;
-
-    break;
-
+   // Not a MTU probe block packet at all, so it can't be sent from here
+   if fOutgoingMTUProbeBlockPackets.Dequeue then begin
+    OutgoingBlockPacket.DecRef;
    end;
 
-  end else begin
-
-   fOutgoingMTUProbeBlockPackets.Dequeue;
+   continue;
 
   end;
+
+  MTUProbeSize:=TRNLEndianness.LittleEndianToHost16(OutgoingBlockPacket.fBlockPacket.MTUProbe.Size);
+
+  // The MTU probe size of a echoed-back probe originates from the counter side, so it must
+  // be validated before it is used for any size arithmetic, since a too small value would
+  // underflow the unsigned buffer length calculation below
+  if (MTUProbeSize<RNL_MINIMUM_MTU) or (MTUProbeSize>RNL_MAXIMUM_MTU) then begin
+
+   if fOutgoingMTUProbeBlockPackets.Dequeue then begin
+    OutgoingBlockPacket.DecRef;
+   end;
+
+   continue;
+
+  end;
+
+  aOutgoingPacketBuffer.Reset(SizeOf(TRNLProtocolNormalPacketHeader),
+                              MTUProbeSize-
+                              (RNL_IP_HEADER_SIZE+
+                               RNL_UDP_HEADER_SIZE));
+
+  if not aOutgoingPacketBuffer.HasSpaceFor(OutgoingBlockPacket.Size) then begin
+
+   // Not sendable within its own announced MTU probe size, so drop it instead of blocking
+   // the whole MTU probe queue with it forever
+   if fOutgoingMTUProbeBlockPackets.Dequeue then begin
+    OutgoingBlockPacket.DecRef;
+   end;
+
+   continue;
+
+  end;
+
+  if not fOutgoingMTUProbeBlockPackets.Dequeue then begin
+   break;
+  end;
+
+  try
+
+   OutgoingBlockPacket.AppendTo(aOutgoingPacketBuffer);
+   inc(fCountSentPackets);
+
+   result:=true;
+
+  finally
+   // MTU probe block packets have no resend list, so this is their last owner
+   OutgoingBlockPacket.DecRef;
+  end;
+
+  break;
 
  end;
 
@@ -23378,8 +23472,16 @@ begin
     inc(OutgoingBlockPacket.fCountSendAttempts);
 
     if OutgoingBlockPacket.fRoundTripTimeout=0 then begin
-     OutgoingBlockPacket.fRoundTripTimeout:=Min(Max(fRetransmissionTimeout shr 32,fHost.fMinimumRetransmissionTimeout),fHost.fMaximumRetransmissionTimeout);
-     OutgoingBlockPacket.fRoundTripTimeoutLimit:=Min(Max(fRetransmissionTimeout shr 30,fHost.fMinimumRetransmissionTimeoutLimit),fHost.fMaximumRetransmissionTimeoutLimit);
+     // fRoundTripTimeout is the initial retransmission timeout, derived from the smoothed
+     // round trip time (fRetransmissionTimeout is a 32.32 bit fixed point value, so shr 32
+     // yields milliseconds), and fRoundTripTimeoutLimit is the ceiling for the exponential
+     // backoff in DispatchOutgoingBlockPacketsTimeout. The former must therefore be clamped
+     // into the ...TimeoutLimit range and the latter into the ...Timeout range, and not the
+     // other way around, because otherwise the ceiling would always end up far below the
+     // initial value, which would both delay the very first retransmission by seconds and
+     // defeat the backoff entirely, since every doubling would immediately be clamped back
+     OutgoingBlockPacket.fRoundTripTimeout:=Min(Max(fRetransmissionTimeout shr 32,fHost.fMinimumRetransmissionTimeoutLimit),fHost.fMaximumRetransmissionTimeoutLimit);
+     OutgoingBlockPacket.fRoundTripTimeoutLimit:=Min(Max(fRetransmissionTimeout shr 30,fHost.fMinimumRetransmissionTimeout),fHost.fMaximumRetransmissionTimeout);
     end;
 
     if (fNextReliableBlockPacketTimeout.Value=0) or
@@ -23426,7 +23528,12 @@ begin
    OutgoingBlockPacket.fBlockPacket.BandwidthLimits.IncomingBandwidthLimit:=TRNLEndianness.HostToLittleEndian32(fHost.IncomingBandwidthLimit);
    OutgoingBlockPacket.fBlockPacket.BandwidthLimits.OutgoingBandwidthLimit:=TRNLEndianness.HostToLittleEndian32(fHost.OutgoingBandwidthLimit);
   finally
-   fOutgoingMTUProbeBlockPackets.Enqueue(OutgoingBlockPacket);
+   // This must go into the ordinary outgoing block packet queue and not into the MTU probe
+   // queue, since DispatchOutgoingMTUProbeBlockPackets only ever sends MTU probes and
+   // discards everything else, so that the bandwidth limits would never reach the counter
+   // side, its acknowledgement would never arrive, fSendNewHostBandwidthLimits would never
+   // be cleared again, and this whole block would therefore re-run every interval forever
+   fOutgoingBlockPackets.Enqueue(OutgoingBlockPacket);
   end;
 
   fSendNewHostBandwidthLimitsNextTimeout:=fHost.fTime+fSendNewHostBandwidthLimitsInterval;
@@ -24001,6 +24108,7 @@ var OutgoingPacketData,OutgoingPayloadData:TRNLPointer;
     CipherNonce:TRNLCipherNonce;
     OutgoingPacketBuffer:PRNLOutgoingPacketBuffer;
     IsMTUProbe:boolean;
+    SendResult:TRNLNetworkSendResult;
 begin
 
  result:=true;
@@ -24103,9 +24211,15 @@ begin
     continue;
    end;
 
-   result:=SendPacket(OutgoingPacketData^,OutgoingPacketDataLength)<>RNL_NETWORK_SEND_RESULT_ERROR;
+   SendResult:=SendPacket(OutgoingPacketData^,OutgoingPacketDataLength);
 
-   if result then begin
+   // Only a hard send error aborts the whole host service loop here, everything else, and
+   // in particular RNL_NETWORK_SEND_RESULT_WOULD_BLOCK and the bandwidth rate limiter drop,
+   // just means that this one datagram did not go out, which the reliable layer handles in
+   // exactly the same way as it handles ordinary packet loss
+   result:=SendResult<>RNL_NETWORK_SEND_RESULT_ERROR;
+
+   if SendResult=RNL_NETWORK_SEND_RESULT_OK then begin
     fLastSentDataTime:=fHost.fTime;
    end;
 
@@ -24397,6 +24511,12 @@ begin
 
  fTotalReceivedPackets:=0;
 
+ fTotalSoftSendFailures:=0;
+
+ fTotalHardSendFailures:=0;
+
+ fTotalHardReceiveFailures:=0;
+
  fConnectionCandidateHashTable:=nil;
 
  fConnectionKnownCandidateHostAddressHashTable:=nil;
@@ -24633,6 +24753,7 @@ function TRNLHost.SendPacket(const aAddress:TRNLAddress;const aData;const aDataL
 var Index:TRNLInt32;
     Socket:TRNLSocket;
     Family:TRNLInt64;
+    SentLength:TRNLSizeInt;
 begin
  Socket:=RNL_SOCKET_NULL;
  Family:=aAddress.GetAddressFamily;
@@ -24648,11 +24769,23 @@ begin
   result:=RNL_NETWORK_SEND_RESULT_ERROR;
  end else begin
   if fOutgoingBandwidthRateLimiter.CanProceed(aDataLength shl 3,fTime) then begin
-   if fNetwork.Send(Socket,@aAddress,aData,aDataLength,Family)=TRNLSizeInt(aDataLength) then begin
+   SentLength:=fNetwork.Send(Socket,@aAddress,aData,aDataLength,Family);
+   if SentLength=TRNLSizeInt(aDataLength) then begin
     fOutgoingBandwidthRateLimiter.AddAmount(aDataLength shl 3,fTime);
     fOutgoingBandwidthRateTracker.AddUnits(aDataLength shl 3);
     result:=RNL_NETWORK_SEND_RESULT_OK;
+   end else if SentLength>=0 then begin
+    // A non-negative but short result means that the socket did not accept the datagram
+    // right now (send buffer full, EWOULDBLOCK, ENOBUFS, EMSGSIZE, and so on). On a real
+    // network under burst load this is an everyday occurrence and not an error at all, it
+    // is indistinguishable from ordinary packet loss, so it must not be escalated up
+    // through DispatchOutgoingPackets, DispatchPeer and DispatchPeers into a
+    // RNL_HOST_SERVICE_STATUS_ERROR, which would terminate the whole host service loop
+    // including all of its other peers over a single dropped datagram
+    inc(fTotalSoftSendFailures);
+    result:=RNL_NETWORK_SEND_RESULT_WOULD_BLOCK;
    end else begin
+    inc(fTotalHardSendFailures);
     result:=RNL_NETWORK_SEND_RESULT_ERROR;
    end;
   end else begin
@@ -26300,6 +26433,11 @@ begin
 
     if (fReceivedBufferLength<0){or
        ((fReceivedBufferLength>0) and (fReceivedAddress.GetAddressFamily<>Family))} then begin
+
+     // TRNLNetwork.Receive only reports a negative length for a structurally broken socket,
+     // every transient condition is reported as zero instead, so reaching this point really
+     // does mean that this host can not continue
+     inc(fTotalHardReceiveFailures);
 
      result:=false;
      exit;
