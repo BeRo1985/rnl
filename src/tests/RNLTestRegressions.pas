@@ -2929,6 +2929,388 @@ begin
  end;
 end;
 
+procedure TestTranscriptBindingCoversTheCleartextHandshakeFields;
+const FIRST_PORT=18320;
+      THROTTLED_TO_BITS_PER_SECOND=1;
+var PortOffset:TRNLSizeInt;
+    Watchdog:TRNLTestWatchdog;
+
+ // Runs one handshake in one mode while one field of the connection request is being overwritten,
+ // and reports whether it came up and what the server ended up believing about the client's limit
+ procedure RunScenario(const aMode:TRNLProtocolTranscriptBindingMode;
+                       const aOffset:TRNLSizeUInt;
+                       const aValue;
+                       const aValueLength:TRNLSizeUInt;
+                       out aConnected:boolean;
+                       out aServerSeenIncomingBandwidthLimit:TRNLUInt32);
+ var Instance:TRNLInstance;
+     VirtualNetwork:TRNLVirtualNetwork;
+     FaultInjector:TRNLNetworkFaultInjector;
+     HostPair:TRNLTestHostPair;
+ begin
+  aConnected:=false;
+  aServerSeenIncomingBandwidthLimit:=0;
+  Instance:=TRNLInstance.Create;
+  try
+   VirtualNetwork:=TRNLVirtualNetwork.Create(Instance);
+   try
+    FaultInjector:=TRNLNetworkFaultInjector.Create(Instance,VirtualNetwork);
+    try
+     FaultInjector.RewriteOutgoingHandshakeField(HandshakePacketType(RNL_PROTOCOL_HANDSHAKE_PACKET_TYPE_CONNECTION_REQUEST),
+                                                 aOffset,
+                                                 aValue,
+                                                 aValueLength);
+     HostPair:=TRNLTestHostPair.Create(Instance,
+                                       FaultInjector,
+                                       FIRST_PORT+(PortOffset*2),
+                                       FIRST_PORT+(PortOffset*2)+1);
+     try
+      HostPair.Client.TranscriptBindingMode:=aMode;
+      HostPair.Server.TranscriptBindingMode:=aMode;
+      if aMode=RNL_PROTOCOL_TRANSCRIPT_BINDING_OFF then begin
+       aConnected:=HostPair.Connect(5000);
+      end else begin
+       // Nothing to wait for once the signature check has turned it down
+       aConnected:=HostPair.Connect(2000);
+      end;
+      if aConnected and assigned(HostPair.ServerPeer) then begin
+       aServerSeenIncomingBandwidthLimit:=HostPair.ServerPeer.RemoteIncomingBandwidthLimit;
+      end;
+     finally
+      FreeAndNil(HostPair);
+     end;
+    finally
+     FreeAndNil(FaultInjector);
+    end;
+   finally
+    FreeAndNil(VirtualNetwork);
+   end;
+  finally
+   FreeAndNil(Instance);
+  end;
+  inc(PortOffset);
+ end;
+
+var Probe:TRNLProtocolHandshakePacketConnectionRequest;
+    ThrottleValue:TRNLUInt32;
+    TokenFiller:array[0..15] of TRNLUInt8;
+    Index:TRNLSizeInt;
+    Connected:boolean;
+    SeenLimit:TRNLUInt32;
+begin
+
+ TestBegin('the transcript binding covers the cleartext handshake fields');
+ Watchdog:=TRNLTestWatchdog.Create('transcript binding coverage',180000);
+ try
+
+  PortOffset:=0;
+  ThrottleValue:=TRNLEndianness.HostToLittleEndian32(THROTTLED_TO_BITS_PER_SECOND);
+  for Index:=Low(TokenFiller) to High(TokenFiller) do begin
+   TokenFiller[Index]:=TRNLUInt8($5a);
+  end;
+
+  // The bandwidth limit, which is the field that makes this more than a formality. It is not
+  // decoration: the server hands it straight to the rate limiter which paces everything it sends
+  // to that peer, so whoever can rewrite it decides how fast the connection may go.
+
+  RunScenario(RNL_PROTOCOL_TRANSCRIPT_BINDING_OFF,
+              HandshakeFieldOffset(Probe,Probe.IncomingBandwidthLimit),
+              ThrottleValue,SizeOf(ThrottleValue),Connected,SeenLimit);
+
+  Info('bandwidth limit rewritten, binding off: connected '+
+       TRNLRawByteString(BoolToStr(Connected,true))+
+       ', server believes the limit is '+TRNLRawByteString(IntToStr(SeenLimit))+' bit/s');
+
+  Check(Connected,'without the binding the handshake completes although the request was altered');
+
+  CheckEqualsInt64(SeenLimit,THROTTLED_TO_BITS_PER_SECOND,
+                   'and the altered value is what the server ends up pacing that peer by, which '+
+                   'is a connection throttled to nothing without a single check complaining');
+
+  RunScenario(RNL_PROTOCOL_TRANSCRIPT_BINDING_REQUIRED,
+              HandshakeFieldOffset(Probe,Probe.IncomingBandwidthLimit),
+              ThrottleValue,SizeOf(ThrottleValue),Connected,SeenLimit);
+
+  Info('bandwidth limit rewritten, binding required: connected '+
+       TRNLRawByteString(BoolToStr(Connected,true)));
+
+  Check(not Connected,'with the binding required the same alteration breaks the signature check '+
+                      'and the handshake fails instead of quietly degrading');
+
+  // The connection token, which nothing looks at while token checking is off. That makes it the
+  // clean measure of coverage on its own: with the binding off nothing at all notices the change,
+  // so a failure with the binding on can only come from the transcript.
+
+  RunScenario(RNL_PROTOCOL_TRANSCRIPT_BINDING_OFF,
+              HandshakeFieldOffset(Probe,Probe.ConnectionToken),
+              TokenFiller,SizeOf(TokenFiller),Connected,SeenLimit);
+
+  Info('connection token rewritten, binding off: connected '+
+       TRNLRawByteString(BoolToStr(Connected,true)));
+
+  Check(Connected,'an unchecked connection token can be rewritten freely without the binding');
+
+  RunScenario(RNL_PROTOCOL_TRANSCRIPT_BINDING_REQUIRED,
+              HandshakeFieldOffset(Probe,Probe.ConnectionToken),
+              TokenFiller,SizeOf(TokenFiller),Connected,SeenLimit);
+
+  Info('connection token rewritten, binding required: connected '+
+       TRNLRawByteString(BoolToStr(Connected,true)));
+
+  Check(not Connected,'and with the binding it cannot, which shows the transcript really covers '+
+                      'the field and not merely something else that happens to change with it');
+
+ finally
+  FreeAndNil(Watchdog);
+  TestEnd;
+ end;
+
+end;
+
+procedure TestRemoteLongTermPublicKeyIsVisibleAndPinnable;
+const SERVER_PORT=18360;
+      CLIENT_PORT=18361;
+var Instance:TRNLInstance;
+    Network:TRNLVirtualNetwork;
+    Server,Client:TRNLHost;
+    ServerAddress:TRNLAddress;
+    Event:TRNLHostEvent;
+    Peer:TRNLPeer;
+    ExpectedKey,WrongKey:TRNLKey;
+    StartTime:TRNLTime;
+    Approved,Denied,SawIdentity:boolean;
+    ObservedKey:TRNLKey;
+    Watchdog:TRNLTestWatchdog;
+
+ // Connects once with the given expectation and reports what came of it
+ procedure RunScenario(const aExpectedKey:PRNLKey;out aApproved,aDenied,aSawIdentity:boolean;
+                       out aObservedKey:TRNLKey);
+ begin
+  aApproved:=false;
+  aDenied:=false;
+  aSawIdentity:=false;
+  FillChar(aObservedKey,SizeOf(TRNLKey),#0);
+  Peer:=Client.Connect(ServerAddress,1,0,nil,nil,aExpectedKey);
+  if not assigned(Peer) then begin
+   exit;
+  end;
+  Peer.IncRef;
+  try
+   StartTime:=Instance.Time;
+   Event.Initialize;
+   try
+    repeat
+     while Server.Service(Event,0)=RNL_HOST_SERVICE_STATUS_EVENT do begin
+      Event.Free;
+     end;
+     Event.Free;
+     while Client.Service(Event,0)=RNL_HOST_SERVICE_STATUS_EVENT do begin
+      case Event.Type_ of
+       RNL_HOST_EVENT_TYPE_PEER_APPROVAL:begin
+        aApproved:=true;
+        if assigned(Event.Peer) then begin
+         aObservedKey:=Event.Peer.RemoteLongTermPublicKey;
+         aSawIdentity:=true;
+        end;
+       end;
+       RNL_HOST_EVENT_TYPE_PEER_DENIAL:begin
+        aDenied:=true;
+       end;
+       else begin
+       end;
+      end;
+      Event.Free;
+     end;
+     Event.Free;
+     Sleep(1);
+    until aApproved or aDenied or (TRNLTime.RelativeDifference(Instance.Time,StartTime)>=2500);
+   finally
+    Event.Free;
+   end;
+  finally
+   Peer.Disconnect;
+   Peer.DecRef;
+  end;
+ end;
+
+begin
+
+ TestBegin('the remote long term public key is visible and can be pinned');
+ Watchdog:=TRNLTestWatchdog.Create('long term key pinning',120000);
+ try
+
+  Instance:=TRNLInstance.Create;
+  try
+   Network:=TRNLVirtualNetwork.Create(Instance);
+   try
+    Server:=TRNLHost.Create(Instance,Network);
+    try
+     Server.Address.Host:=RNL_HOST_ANY;
+     Server.Address.Port:=SERVER_PORT;
+     Server.Start(RNL_HOST_ADDRESS_FAMILY_WORK_MODE_IPV4_ONLY);
+
+     Client:=TRNLHost.Create(Instance,Network);
+     try
+      Client.Address.Host:=RNL_HOST_ANY;
+      Client.Address.Port:=CLIENT_PORT;
+      Client.Start(RNL_HOST_ADDRESS_FAMILY_WORK_MODE_IPV4_ONLY);
+
+      Network.AddressSetHost(ServerAddress,'127.0.0.1');
+      ServerAddress.Port:=SERVER_PORT;
+
+      // Every host generates a fresh key pair unless the application sets one, so the server's own
+      // public key is what a client would have to be told out of band
+      ExpectedKey:=Server.LongTermPublicKey;
+      WrongKey:=ExpectedKey;
+      WrongKey.ui8[0]:=WrongKey.ui8[0] xor $ff;
+
+      // Without any expectation, which is how everything behaved before, and the identity has to be
+      // observable all the same
+      RunScenario(nil,Approved,Denied,SawIdentity,ObservedKey);
+
+      Check(Approved,'a connection without any expectation still comes up');
+
+      Check(SawIdentity,'and the peer of the approval event carries the identity of the counter side');
+
+      Check(TRNLMemory.SecureIsEqual(ObservedKey,ExpectedKey,SizeOf(TRNLKey)),
+            'which is the long term public key of the server, so an application can log it or '+
+            'remember it without any further help');
+
+      // Pinned to the right key
+      RunScenario(@ExpectedKey,Approved,Denied,SawIdentity,ObservedKey);
+
+      Check(Approved,'pinning to the key the server really holds changes nothing about the outcome');
+
+      // Pinned to a key nobody holds
+      RunScenario(@WrongKey,Approved,Denied,SawIdentity,ObservedKey);
+
+      Info('rejected long term public keys: '+
+           TRNLRawByteString(IntToStr(Client.TotalRejectedRemoteLongTermPublicKeys)));
+
+      Check(not Approved,'pinning to a different key does not let the connection come up');
+
+      CheckAtLeastInt64(Client.TotalRejectedRemoteLongTermPublicKeys,1,
+                        'and the reason is the identity check, not a timeout somewhere else');
+
+     finally
+      FreeAndNil(Client);
+     end;
+    finally
+     FreeAndNil(Server);
+    end;
+   finally
+    FreeAndNil(Network);
+   end;
+  finally
+   FreeAndNil(Instance);
+  end;
+
+ finally
+  FreeAndNil(Watchdog);
+  TestEnd;
+ end;
+
+end;
+
+procedure TestTranscriptBindingDowngrade;
+const FIRST_PORT=18340;
+var PortOffset:TRNLSizeInt;
+    Watchdog:TRNLTestWatchdog;
+
+ procedure RunScenario(const aMode:TRNLProtocolTranscriptBindingMode;
+                       out aConnected,aBound:boolean);
+ var Instance:TRNLInstance;
+     VirtualNetwork:TRNLVirtualNetwork;
+     FaultInjector:TRNLNetworkFaultInjector;
+     HostPair:TRNLTestHostPair;
+     Probe:TRNLProtocolHandshakePacketConnectionRequest;
+     OlderVersion:TRNLUInt64;
+ begin
+  aConnected:=false;
+  aBound:=false;
+  OlderVersion:=TRNLEndianness.HostToLittleEndian64(RNL_PROTOCOL_VERSION);
+  Instance:=TRNLInstance.Create;
+  try
+   VirtualNetwork:=TRNLVirtualNetwork.Create(Instance);
+   try
+    FaultInjector:=TRNLNetworkFaultInjector.Create(Instance,VirtualNetwork);
+    try
+     // Exactly the downgrade: the version travels in clear in the very first datagram, so anything
+     // on the path can put it back to the older one
+     FaultInjector.RewriteOutgoingHandshakeField(HandshakePacketType(RNL_PROTOCOL_HANDSHAKE_PACKET_TYPE_CONNECTION_REQUEST),
+                                                 HandshakeFieldOffset(Probe,Probe.Header.ProtocolVersion),
+                                                 OlderVersion,
+                                                 SizeOf(OlderVersion));
+     HostPair:=TRNLTestHostPair.Create(Instance,
+                                       FaultInjector,
+                                       FIRST_PORT+(PortOffset*2),
+                                       FIRST_PORT+(PortOffset*2)+1);
+     try
+      HostPair.Client.TranscriptBindingMode:=aMode;
+      HostPair.Server.TranscriptBindingMode:=aMode;
+      if aMode=RNL_PROTOCOL_TRANSCRIPT_BINDING_ALLOWED then begin
+       aConnected:=HostPair.Connect(5000);
+      end else begin
+       aConnected:=HostPair.Connect(2000);
+      end;
+      if aConnected and assigned(HostPair.ClientPeer) then begin
+       aBound:=HostPair.ClientPeer.TranscriptBinding;
+      end;
+     finally
+      FreeAndNil(HostPair);
+     end;
+    finally
+     FreeAndNil(FaultInjector);
+    end;
+   finally
+    FreeAndNil(VirtualNetwork);
+   end;
+  finally
+   FreeAndNil(Instance);
+  end;
+  inc(PortOffset);
+ end;
+
+var Connected,Bound:boolean;
+begin
+
+ TestBegin('a protocol version downgrade is only possible where it is documented to be');
+ Watchdog:=TRNLTestWatchdog.Create('transcript binding downgrade',120000);
+ try
+
+  PortOffset:=0;
+
+  RunScenario(RNL_PROTOCOL_TRANSCRIPT_BINDING_ALLOWED,Connected,Bound);
+
+  Info('version rewritten downwards, both allowed: connected '+
+       TRNLRawByteString(BoolToStr(Connected,true))+
+       ', bound '+TRNLRawByteString(BoolToStr(Bound,true)));
+
+  // Held down on purpose. This is not the behaviour anybody wants, it is the price of speaking two
+  // versions at once, and it cannot be fixed from inside that mode: the fallback has no transcript
+  // to bind the version field to. The test exists so that it stays a known property rather than
+  // turning into a surprise.
+  Check(Connected,'in allowed the connection still comes up, since falling back is the whole point '+
+                  'of that mode');
+
+  Check(not Bound,'and it comes up unbound, which is the documented downgrade: whoever can rewrite '+
+                  'the version decides that the cleartext fields go unprotected');
+
+  RunScenario(RNL_PROTOCOL_TRANSCRIPT_BINDING_REQUIRED,Connected,Bound);
+
+  Info('version rewritten downwards, both required: connected '+
+       TRNLRawByteString(BoolToStr(Connected,true)));
+
+  Check(not Connected,'in required the same rewrite achieves nothing but preventing the connection, '+
+                      'and preventing it was possible all along');
+
+ finally
+  FreeAndNil(Watchdog);
+  TestEnd;
+ end;
+
+end;
+
 function TranscriptBindingModeName(const aMode:TRNLProtocolTranscriptBindingMode):TRNLRawByteString;
 begin
  case aMode of
@@ -3524,6 +3906,9 @@ begin
 
  // Handshake authenticity
  TestTranscriptBindingInteroperabilityMatrix;
+ TestTranscriptBindingCoversTheCleartextHandshakeFields;
+ TestTranscriptBindingDowngrade;
+ TestRemoteLongTermPublicKeyIsVisibleAndPinnable;
 
  // Socket level error classification
  TestSoftSendFailuresDoNotTerminateHost;

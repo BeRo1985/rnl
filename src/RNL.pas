@@ -1902,6 +1902,8 @@ type PRNLVersion=^TRNLVersion;
        // Filled in as the handshake progresses and hashed for the signature. Doubles as the
        // snapshot which keeps a retransmitted challenge request identical to the first one.
        fTranscript:TRNLProtocolTranscript;
+       // The long term public key of the counter side, kept once its signature verified
+       fRemoteLongTermPublicKey:TRNLKey;
        fNextChallengeTimeout:TRNLTime;
        fNextShortTermKeyPairTimeout:TRNLTime;
        fNextNonceTimeout:TRNLTime;
@@ -1923,6 +1925,7 @@ type PRNLVersion=^TRNLVersion;
        fData:PRNLConnectionCandidateData;
        function GetConnectionToken:TRNLConnectionToken;
        function GetAuthenticationToken:TRNLAuthenticationToken;
+       function GetRemoteLongTermPublicKey:TRNLKey;
       public
        procedure AcceptConnectionToken;
        procedure RejectConnectionToken;
@@ -1931,6 +1934,15 @@ type PRNLVersion=^TRNLVersion;
        property Address:TRNLAddress read fAddress;
        property ConnectionToken:TRNLConnectionToken read GetConnectionToken;
        property AuthenticationToken:TRNLAuthenticationToken read GetAuthenticationToken;
+       // The long term public key the counter side proved possession of. Only meaningful once the
+       // authentication response has been verified, which is the case whenever a
+       // RNL_HOST_EVENT_TYPE_PEER_CHECK_AUTHENTICATION_TOKEN event hands this candidate out.
+       //
+       // The signature proves possession of this key, nothing more: it does not say that the key
+       // belongs to whoever was expected. Comparing it against something known is the only thing
+       // that does, and it can be done from here, before the peer exists, by answering with
+       // RejectAuthenticationToken.
+       property RemoteLongTermPublicKey:TRNLKey read GetRemoteLongTermPublicKey;
      end;
 
      PRNLConnectionCandidateHashTable=^TRNLConnectionCandidateHashTable;
@@ -3578,6 +3590,13 @@ type PRNLVersion=^TRNLVersion;
        // The initiator side counterpart of the candidate's transcript
        fTranscript:TRNLProtocolTranscript;
 
+       // Likewise on the peer, so that it stays available for the whole connection
+       fRemoteLongTermPublicKey:TRNLKey;
+
+       // Set by Connect when the caller wants the identity pinned
+       fExpectedRemoteLongTermPublicKey:TRNLKey;
+       fHasExpectedRemoteLongTermPublicKey:boolean;
+
 
        // Initiator only, and only in ALLOWED: the point in time at which offering the newer
        // protocol version is given up on, because a counter side which does not know it answers
@@ -3742,6 +3761,10 @@ type PRNLVersion=^TRNLVersion;
        procedure MTUProbe(const aTryIterationsPerMTUProbeSize:TRNLUInt32=5;const aMTUProbeInterval:TRNLUInt64=100);
       public
        property Address:PRNLAddress read fPointerToAddress;
+       // The long term public key of the counter side, as proved by its signature. Filled for every
+       // connection, whether or not anybody asked for it. Not published, because a record typed
+       // property cannot be.
+       property RemoteLongTermPublicKey:TRNLKey read fRemoteLongTermPublicKey;
       published
        property ReferenceCounter:TRNLUInt32 read fReferenceCounter write fReferenceCounter;
        property LocalPeerID:TRNLID read fLocalPeerID;
@@ -3959,6 +3982,8 @@ type PRNLVersion=^TRNLVersion;
 
        fTotalPeersGivenUpOn:TRNLUInt64;
 
+       fTotalRejectedRemoteLongTermPublicKeys:TRNLUInt64;
+
        fTotalPeerAddressChanges:TRNLUInt64;
 
        fConnectionChallengeDifficultyLevel:TRNLUInt32;
@@ -4084,11 +4109,16 @@ type PRNLVersion=^TRNLVersion;
        constructor Create(const aInstance:TRNLInstance;const aNetwork:TRNLNetwork); reintroduce;
        destructor Destroy; override;
        procedure Start(const aAddressFamilyWorkMode:TRNLHostAddressFamilyWorkMode=RNL_HOST_ADDRESS_FAMILY_WORK_MODE_IPV4_AND_IPV6);
+       // aExpectedRemoteLongTermPublicKey pins the identity of the counter side. Left at nil,
+       // which is the default, nothing is compared and this behaves exactly as before; given a
+       // key, the handshake is broken off as soon as the counter side turns out to hold a
+       // different one, and before this side has sent its authentication token.
        function Connect(const aAddress:TRNLAddress;
                         const aCountChannels:TRNLUInt32=1;
                         const aData:TRNLUInt64=0;
                         const aConnectionToken:PRNLConnectionToken=nil;
-                        const aAuthenticationToken:PRNLAuthenticationToken=nil):TRNLPeer;
+                        const aAuthenticationToken:PRNLAuthenticationToken=nil;
+                        const aExpectedRemoteLongTermPublicKey:PRNLKey=nil):TRNLPeer;
        procedure BroadcastMessage(const aChannel:TRNLUInt8;const aMessage:TRNLMessage);
        procedure BroadcastMessageData(const aChannel:TRNLUInt8;const aData:TRNLPointer;const aDataLength:TRNLUInt32;const aFlags:TRNLMessageFlags=[]);
        procedure BroadcastMessageBytes(const aChannel:TRNLUInt8;const aBytes:TBytes;const aFlags:TRNLMessageFlags=[]); overload;
@@ -4181,6 +4211,9 @@ type PRNLVersion=^TRNLVersion;
        // Number of peers which were given up on because a reliable block packet of theirs
        // exceeded MaximumReliableBlockPacketSendAttempts
        property TotalPeersGivenUpOn:TRNLUInt64 read fTotalPeersGivenUpOn;
+       // How often a handshake was broken off because the counter side held a different long
+       // term public key than the one Connect was told to expect
+       property TotalRejectedRemoteLongTermPublicKeys:TRNLUInt64 read fTotalRejectedRemoteLongTermPublicKeys;
        // Number of times a peer was followed to a new source address, which is what a NAT
        // rebinding or a network handover of a counter side looks like from here
        property TotalPeerAddressChanges:TRNLUInt64 read fTotalPeerAddressChanges;
@@ -15571,6 +15604,15 @@ begin
  end;
 end;
 
+function TRNLConnectionCandidate.GetRemoteLongTermPublicKey:TRNLKey;
+begin
+ if assigned(fData) then begin
+  result:=fData^.fRemoteLongTermPublicKey;
+ end else begin
+  FillChar(result,SizeOf(TRNLKey),#0);
+ end;
+end;
+
 function TRNLConnectionCandidate.AcceptAuthenticationToken:TRNLPeer;
 begin
  if assigned(fData) and assigned(fData^.fHost) then begin
@@ -22920,6 +22962,8 @@ begin
 
  fProtocolFallbackPending:=false;
 
+ fHasExpectedRemoteLongTermPublicKey:=false;
+
  fConnectionToken:=nil;
 
  fAuthenticationToken:=nil;
@@ -25025,6 +25069,8 @@ begin
 
  fTotalPeersGivenUpOn:=0;
 
+ fTotalRejectedRemoteLongTermPublicKeys:=0;
+
  fTotalPeerAddressChanges:=0;
 
  fConnectionCandidateHashTable:=nil;
@@ -25584,7 +25630,8 @@ function TRNLHost.Connect(const aAddress:TRNLAddress;
                           const aCountChannels:TRNLUInt32=1;
                           const aData:TRNLUInt64=0;
                           const aConnectionToken:PRNLConnectionToken=nil;
-                          const aAuthenticationToken:PRNLAuthenticationToken=nil):TRNLPeer;
+                          const aAuthenticationToken:PRNLAuthenticationToken=nil;
+                          const aExpectedRemoteLongTermPublicKey:PRNLKey=nil):TRNLPeer;
 var Index:TRNLInt32;
 //    Channel:TRNLChannel;
 begin
@@ -25666,6 +25713,11 @@ begin
  result.fProtocolFallbackPending:=fTranscriptBindingMode=RNL_PROTOCOL_TRANSCRIPT_BINDING_ALLOWED;
  if result.fProtocolFallbackPending then begin
   result.fProtocolFallbackTimeout:=fTime+fPendingConnectionProtocolFallbackTimeout;
+ end;
+
+ result.fHasExpectedRemoteLongTermPublicKey:=assigned(aExpectedRemoteLongTermPublicKey);
+ if result.fHasExpectedRemoteLongTermPublicKey then begin
+  result.fExpectedRemoteLongTermPublicKey:=aExpectedRemoteLongTermPublicKey^;
  end;
 
  // The initiator half of the transcript, which is exactly what goes into the request below. The
@@ -26062,6 +26114,7 @@ end;
 
 procedure TRNLHost.DispatchReceivedHandshakePacketConnectionChallengeResponse(const aIncomingPacket:PRNLProtocolHandshakePacketConnectionChallengeResponse);
 var Index:TRNLInt32;
+    CountChallengeRepetitions:TRNLUInt16;
     ConnectionCandidate:PRNLConnectionCandidate;
     ConnectionSalt,ChallengeResult:TRNLUInt64;
     OutgoingPacket:TRNLProtocolHandshakePacket;
@@ -26110,7 +26163,19 @@ begin
 
   ConnectionCandidate^.fData^.fSolvedChallenge:=ConnectionCandidate^.fData^.fChallenge;
 
-  for Index:=1 to ConnectionCandidate^.fData^.fCountChallengeRepetitions do begin
+  // Solved with the same repetition count the challenge request actually carried, which with
+  // transcript binding is the snapshot and without it the live value. They can differ: the live
+  // value is re-derived from the current connection attempt rate on every incoming request, so a
+  // retransmission under load moves it, while the request that the counter side answered carried
+  // the older one. Solving with anything else than what was sent would make the challenge
+  // responses disagree and kill the handshake for no reason at all.
+  if ConnectionCandidate^.fData^.fTranscriptBinding then begin
+   CountChallengeRepetitions:=ConnectionCandidate^.fData^.fTranscript.CountChallengeRepetitions;
+  end else begin
+   CountChallengeRepetitions:=ConnectionCandidate^.fData^.fCountChallengeRepetitions;
+  end;
+
+  for Index:=1 to CountChallengeRepetitions do begin
 {$ifdef RNLUseBLAKE2B}
    TRNLBLAKE2B.Process(ConnectionCandidate^.fData^.fSolvedChallenge,
                        ConnectionCandidate^.fData^.fSolvedChallenge,
@@ -26315,6 +26380,22 @@ begin
   end;
  end;
 
+ // Kept, so that an application can at least see who it is talking to. Without this the key exists
+ // only as an argument of the verification above and is gone right after it.
+ Peer.fRemoteLongTermPublicKey:=aIncomingPacket^.Payload.LongTermPublicKey;
+
+ // And compared, if the caller of Connect said which key it expects. This has to happen here and
+ // not after the handshake: the response built below carries this side's authentication token, so
+ // giving up any later would mean handing that token to whoever answered. The signature above only
+ // proves that the counter side holds the key it sent along, never that it is the right one.
+ if Peer.fHasExpectedRemoteLongTermPublicKey and
+    TRNLMemory.SecureIsNotEqual(Peer.fRemoteLongTermPublicKey,
+                                Peer.fExpectedRemoteLongTermPublicKey,
+                                SizeOf(TRNLKey)) then begin
+  inc(fTotalRejectedRemoteLongTermPublicKeys);
+  exit;
+ end;
+
  Peer.fRemoteMTU:=TRNLEndianness.LittleEndianToHost16(aIncomingPacket^.Payload.MTU);
 
  Peer.fMTU:=Min(Max(Min(fMTU,Peer.fRemoteMTU),RNL_MINIMUM_MTU),RNL_MAXIMUM_MTU);
@@ -26443,6 +26524,7 @@ begin
  // Carried over from the candidate, because from here on the peer is what the rest of the
  // handshake and the connection itself run on
  Peer.fTranscriptBinding:=aConnectionCandidate^.fData^.fTranscriptBinding;
+ Peer.fRemoteLongTermPublicKey:=aConnectionCandidate^.fData^.fRemoteLongTermPublicKey;
 
  Peer.fRemoteIncomingBandwidthLimit:=aConnectionCandidate^.fData^.fIncomingBandwidthLimit;
 
@@ -26635,6 +26717,12 @@ begin
                               SizeOf(TRNLTwoKeys)) then begin
      Authorized:=false;
     end;
+   end;
+
+   if Authorized then begin
+    // Kept on the candidate, so that a check of the authentication token can compare the identity
+    // as well, and reject with RejectAuthenticationToken before any peer is created
+    ConnectionCandidate^.fData^.fRemoteLongTermPublicKey:=aIncomingPacket^.Payload.LongTermPublicKey;
    end;
 
   end;
