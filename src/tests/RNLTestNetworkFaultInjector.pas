@@ -43,6 +43,18 @@ uses SysUtils,
      SyncObjs,
      RNL;
 
+// Every handshake datagram has the same length regardless of its contents, because of the anti
+// amplification padding, so any one of the packet records gives that length. The packet records
+// themselves are public, which is what keeps this free of hard coded offsets: field positions
+// are taken from the records and follow along automatically should the layout ever change.
+//
+// What is not reachable from here is RNL's ChecksumCRC32C, which lives in the implementation
+// section, so the checksum has to be recomputed with a local copy of the algorithm.
+const RNL_TEST_HANDSHAKE_PACKET_SIZE=SizeOf(TRNLProtocolHandshakePacketConnectionRequest);
+
+      // Long enough for any single scalar field which is worth manipulating
+      RNL_TEST_MAXIMUM_REWRITE_LENGTH=16;
+
 type TRNLNetworkFaultInjector=class(TRNLNetwork)
       private
 
@@ -85,6 +97,16 @@ type TRNLNetworkFaultInjector=class(TRNLNetwork)
        fRebindFromAddress:TRNLAddress;
        fRebindToAddress:TRNLAddress;
 
+       // Overwrites one field of every outgoing handshake packet of one particular type. This is
+       // what it takes to test whether a field is authenticated at all: a field which nothing
+       // covers can be changed in flight without the handshake noticing, and the only way to
+       // show that is to change it.
+       fRewriteEnabled:boolean;
+       fRewritePacketType:TRNLUInt8;
+       fRewriteOffset:TRNLSizeUInt;
+       fRewriteLength:TRNLSizeUInt;
+       fRewriteValue:array[0..RNL_TEST_MAXIMUM_REWRITE_LENGTH-1] of TRNLUInt8;
+
        fCountSoftSendFailures:TRNLUInt64;
        fCountHardSendFailures:TRNLUInt64;
        fCountSoftReceiveFailures:TRNLUInt64;
@@ -93,8 +115,11 @@ type TRNLNetworkFaultInjector=class(TRNLNetwork)
        fCountDeterministicallyDroppedDatagrams:TRNLUInt64;
        fCountRebindenSourceAddresses:TRNLUInt64;
        fCountDatagramsToStaleAddress:TRNLUInt64;
+       fCountRewrittenHandshakePackets:TRNLUInt64;
 
        function Roll(const aProbabilityFactor:TRNLUInt32):boolean;
+
+       class function HandshakePacketChecksum(const aData;const aDataLength:TRNLSizeUInt):TRNLUInt32; static;
 
       public
 
@@ -131,6 +156,21 @@ type TRNLNetworkFaultInjector=class(TRNLNetwork)
        procedure RebindSourceAddress(const aFromAddress,aToAddress:TRNLAddress);
        procedure StopRebindingSourceAddress;
 
+       // Overwrites aValueLength bytes at aOffset in every outgoing handshake packet whose type
+       // is aPacketType, and recomputes the packet checksum afterwards.
+       //
+       // Repairing the checksum is the whole point. Without it the counter side would discard the
+       // datagram at its checksum check and never look at the manipulated field, so the test
+       // would prove that a corrupted datagram gets dropped, which nobody doubts, instead of
+       // whether that particular field is authenticated. With the checksum repaired, the only
+       // thing standing between the manipulation and a completed handshake is whatever really
+       // covers the field.
+       procedure RewriteOutgoingHandshakeField(const aPacketType:TRNLUInt8;
+                                               const aOffset:TRNLSizeUInt;
+                                               const aValue;
+                                               const aValueLength:TRNLSizeUInt);
+       procedure StopRewritingOutgoingHandshakeFields;
+
        function AddressSetHost(var aAddress:TRNLAddress;const aName:TRNLRawByteString):boolean; override;
        function AddressGetHost(const aAddress:TRNLAddress;out aName;const aNameLength:TRNLInt32;const aFlags:TRNLInt32=0):boolean; override;
        function AddressGetHostIP(const aAddress:TRNLAddress;out aName;const aNameLength:TRNLInt32):boolean; override;
@@ -165,6 +205,7 @@ type TRNLNetworkFaultInjector=class(TRNLNetwork)
        property CountDeterministicallyDroppedDatagrams:TRNLUInt64 read fCountDeterministicallyDroppedDatagrams;
        property CountRebindenSourceAddresses:TRNLUInt64 read fCountRebindenSourceAddresses;
        property CountDatagramsToStaleAddress:TRNLUInt64 read fCountDatagramsToStaleAddress;
+       property CountRewrittenHandshakePackets:TRNLUInt64 read fCountRewrittenHandshakePackets;
 
      end;
 
@@ -194,6 +235,11 @@ begin
 
  fRebindEnabled:=false;
 
+ fRewriteEnabled:=false;
+ fRewritePacketType:=0;
+ fRewriteOffset:=0;
+ fRewriteLength:=0;
+
  ResetCounters;
 
 end;
@@ -217,6 +263,7 @@ begin
   fCountDeterministicallyDroppedDatagrams:=0;
   fCountRebindenSourceAddresses:=0;
   fCountDatagramsToStaleAddress:=0;
+  fCountRewrittenHandshakePackets:=0;
  finally
   fLock.Release;
  end;
@@ -267,6 +314,62 @@ begin
  fLock.Acquire;
  try
   fRebindEnabled:=false;
+ finally
+  fLock.Release;
+ end;
+end;
+
+class function TRNLNetworkFaultInjector.HandshakePacketChecksum(const aData;const aDataLength:TRNLSizeUInt):TRNLUInt32;
+const REVERSED_BIT_ORDER_POLYNOMIAL=TRNLUInt32($82f63b78);
+var Position,BitIndex:TRNLSizeUInt;
+begin
+ // CRC-32C, the very same one RNL uses for its handshake packets: initial value all ones, the
+ // Castagnoli polynomial in reversed bit order, final complement. Written out bit by bit rather
+ // than with a table, since it runs a handful of times per test and clarity is worth more here
+ // than speed.
+ result:=$ffffffff;
+ if aDataLength>0 then begin
+  for Position:=0 to aDataLength-1 do begin
+   result:=result xor PRNLUInt8Array(TRNLPointer(@aData))^[Position];
+   for BitIndex:=0 to 7 do begin
+    if (result and 1)<>0 then begin
+     result:=(result shr 1) xor REVERSED_BIT_ORDER_POLYNOMIAL;
+    end else begin
+     result:=result shr 1;
+    end;
+   end;
+  end;
+ end;
+ result:=not result;
+end;
+
+procedure TRNLNetworkFaultInjector.RewriteOutgoingHandshakeField(const aPacketType:TRNLUInt8;
+                                                                 const aOffset:TRNLSizeUInt;
+                                                                 const aValue;
+                                                                 const aValueLength:TRNLSizeUInt);
+begin
+ if (aValueLength=0) or
+    (aValueLength>RNL_TEST_MAXIMUM_REWRITE_LENGTH) or
+    ((aOffset+aValueLength)>RNL_TEST_HANDSHAKE_PACKET_SIZE) then begin
+  raise ERangeError.Create('RewriteOutgoingHandshakeField: field does not fit into a handshake packet');
+ end;
+ fLock.Acquire;
+ try
+  fRewritePacketType:=aPacketType;
+  fRewriteOffset:=aOffset;
+  fRewriteLength:=aValueLength;
+  Move(aValue,fRewriteValue[0],aValueLength);
+  fRewriteEnabled:=true;
+ finally
+  fLock.Release;
+ end;
+end;
+
+procedure TRNLNetworkFaultInjector.StopRewritingOutgoingHandshakeFields;
+begin
+ fLock.Acquire;
+ try
+  fRewriteEnabled:=false;
  finally
   fLock.Release;
  end;
@@ -368,12 +471,15 @@ begin
 end;
 
 function TRNLNetworkFaultInjector.Send(const aSocket:TRNLSocket;const aAddress:PRNLAddress;const aData;const aDataLength:TRNLSizeInt;const aFamily:TRNLAddressFamily):TRNLSizeInt;
-var DoDrop,DoRedirect:boolean;
+var DoDrop,DoRedirect,DoRewrite:boolean;
     RedirectedAddress:TRNLAddress;
+    RewrittenPacket:array[0..RNL_TEST_HANDSHAKE_PACKET_SIZE-1] of TRNLUInt8;
+    IncomingHeader,RewrittenHeader:PRNLProtocolHandshakePacketHeader;
 begin
 
  DoDrop:=false;
  DoRedirect:=false;
+ DoRewrite:=false;
 
  if assigned(aAddress) then begin
   fLock.Acquire;
@@ -458,6 +564,37 @@ begin
    fLock.Release;
   end;
   result:=0;
+  exit;
+ end;
+
+ fLock.Acquire;
+ try
+  // A handshake datagram is recognised the same way RNL itself recognises it, by the signature in
+  // its header, plus the fixed length which the anti amplification padding gives every one of them
+  IncomingHeader:=PRNLProtocolHandshakePacketHeader(TRNLPointer(@aData));
+  DoRewrite:=fRewriteEnabled and
+             (aDataLength=TRNLSizeInt(RNL_TEST_HANDSHAKE_PACKET_SIZE)) and
+             (IncomingHeader^.Signature[0]=TRNLUInt8(ord('R'))) and
+             (IncomingHeader^.Signature[1]=TRNLUInt8(ord('N'))) and
+             (IncomingHeader^.Signature[2]=TRNLUInt8(ord('L'))) and
+             (IncomingHeader^.Signature[3]=TRNLUInt8($ff)) and
+             (IncomingHeader^.PacketType=fRewritePacketType);
+  if DoRewrite then begin
+   Move(aData,RewrittenPacket[0],RNL_TEST_HANDSHAKE_PACKET_SIZE);
+   Move(fRewriteValue[0],RewrittenPacket[fRewriteOffset],fRewriteLength);
+   inc(fCountRewrittenHandshakePackets);
+  end;
+ finally
+  fLock.Release;
+ end;
+
+ if DoRewrite then begin
+  // The checksum covers the whole datagram with its own field zeroed, so it has to be redone
+  // after the patch, exactly as TRNLHost.AddHandshakePacketChecksum does it
+  RewrittenHeader:=PRNLProtocolHandshakePacketHeader(TRNLPointer(@RewrittenPacket[0]));
+  RewrittenHeader^.Checksum:=0;
+  RewrittenHeader^.Checksum:=HandshakePacketChecksum(RewrittenPacket[0],RNL_TEST_HANDSHAKE_PACKET_SIZE);
+  result:=fNetwork.Send(aSocket,aAddress,RewrittenPacket[0],aDataLength,aFamily);
   exit;
  end;
 

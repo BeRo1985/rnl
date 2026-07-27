@@ -676,6 +676,19 @@ const RNL_PROTOCOL_VERSION_MAJOR=1;
 
       RNL_PROTOCOL_VERSION=TRNLUInt64((TRNLUInt64(RNL_PROTOCOL_VERSION_MAJOR) shl 32) or (TRNLUInt64(RNL_PROTOCOL_VERSION_MINOR) shl 16) or RNL_PROTOCOL_VERSION_PATCH);
 
+      // The minor version which says that the Ed25519 signatures of the handshake cover the whole
+      // transcript and not just the two ephemeral keys. Nothing about the packet layout differs
+      // between the two, only what is being signed, which is why one build speaks both and the
+      // version in the header is the only thing that tells them apart. See
+      // TRNLProtocolTranscriptBindingMode.
+      RNL_PROTOCOL_VERSION_MINOR_TRANSCRIPT_BINDING=1;
+
+      RNL_PROTOCOL_VERSION_TRANSCRIPT_BINDING=TRNLUInt64((TRNLUInt64(RNL_PROTOCOL_VERSION_MAJOR) shl 32) or (TRNLUInt64(RNL_PROTOCOL_VERSION_MINOR_TRANSCRIPT_BINDING) shl 16) or RNL_PROTOCOL_VERSION_PATCH);
+
+      // The part of a version number which has to match for two hosts to speak to each other at
+      // all, so major and minor while the patch level is ignored
+      RNL_PROTOCOL_VERSION_COMPATIBILITY_MASK=TRNLUInt64($ffffffffffff0000);
+
       RNL_TIME_HALF_OVERFLOW=TRNLUInt64($2000000000000000); // 1/8 of a 64-bit unsigned integer
 
       RNL_TIME_OVERFLOW=TRNLUInt64($4000000000000000); // 1/4 of a 64-bit unsigned integer
@@ -1764,6 +1777,72 @@ type PRNLVersion=^TRNLVersion;
        Data:array[0..RNL_AUTHENTICATION_TOKEN_SIZE-1] of TRNLUInt8;
      end;
 
+     // How much of the handshake the Ed25519 signature covers.
+     //
+     // Historically it covered only the two ephemeral X25519 public keys, which binds the signature
+     // to one particular Diffie-Hellman pair and is what makes a spliced or replayed handshake
+     // packet useless. What it does not cover is the cleartext fields of the first three packets,
+     // and one of those configures the outgoing rate limiter directly: rewriting four bytes in the
+     // very first datagram throttles a connection to arbitrarily little without any check noticing.
+     //
+     // With the binding on, the signature covers the whole transcript instead, so those fields are
+     // covered too. Nothing on the wire changes: the signature stays the same size at the same
+     // place, only its input is different. That is what makes a mode switch cheap enough to have.
+     //
+     //   OFF       protocol version 1.0.0, byte for byte the behaviour of every earlier release
+     //   ALLOWED   speaks both, so an existing installation can be migrated without downtime.
+     //             Deliberately downgrade attackable: an on path attacker rewrites the cleartext
+     //             version back to 1.0.0 and the counter side follows, which cannot be prevented
+     //             from inside this mode, since the fallback has no transcript to bind the version
+     //             to. It is a migration state and, security wise, the same as OFF
+     //   REQUIRED  protocol version 1.1.0 only. The one mode which actually closes the gap
+     PRNLProtocolTranscriptBindingMode=^TRNLProtocolTranscriptBindingMode;
+     TRNLProtocolTranscriptBindingMode=
+      (
+       RNL_PROTOCOL_TRANSCRIPT_BINDING_OFF=0,
+       RNL_PROTOCOL_TRANSCRIPT_BINDING_ALLOWED=1,
+       RNL_PROTOCOL_TRANSCRIPT_BINDING_REQUIRED=2
+      );
+
+     // Everything the two sides exchange in clear before the first signature, collected in one
+     // packed record so that hashing it is canonical by construction and both sides cannot
+     // disagree about the order. This never goes on the wire, it only gets hashed.
+     //
+     // Fields which travel inside an AEAD payload are deliberately absent: the MTU, the channel
+     // count and types, the authentication token, the long term public key and the user data are
+     // already authenticated by their own MAC and need no second cover.
+     // Each field is written exactly once, by whichever side sends or receives it, so both arrive
+     // at the same bytes without having to agree on anything beyond this declaration.
+     //
+     // The protocol version is in here for completeness only. It is the same value on both sides
+     // whenever a transcript is used at all, since using one is precisely what version 1.1.0
+     // means, so it provides no protection against a downgrade: in the downgraded case there is no
+     // transcript to check it against. Only refusing the older version outright does that, which
+     // is what REQUIRED is for.
+     //
+     // There is no responder peer ID, because none travels in clear at this point. The
+     // ConnectionChallengeRequest echoes the initiator's, and the responder's own is inside the
+     // encrypted payload of the approval, where it is authenticated already.
+     PRNLProtocolTranscript=^TRNLProtocolTranscript;
+     TRNLProtocolTranscript=packed record
+      ProtocolVersion:TRNLUInt64;
+      ProtocolID:TRNLUInt64;
+      InitiatorSalt:TRNLUInt64;
+      ResponderSalt:TRNLUInt64;
+      InitiatorIncomingBandwidthLimit:TRNLUInt32;
+      InitiatorOutgoingBandwidthLimit:TRNLUInt32;
+      ResponderIncomingBandwidthLimit:TRNLUInt32;
+      ResponderOutgoingBandwidthLimit:TRNLUInt32;
+      InitiatorPeerID:TRNLUInt16;
+      CountChallengeRepetitions:TRNLUInt16;
+      Challenge:TRNLConnectionChallenge;
+      InitiatorShortTermPublicKey:TRNLKey;
+      ResponderShortTermPublicKey:TRNLKey;
+      ConnectionToken:TRNLConnectionToken;
+     end;
+
+     TRNLProtocolTranscriptHash={$ifdef RNLUseBLAKE2B}TRNLBLAKE2BHash{$else}TRNLSHA512Hash{$endif};
+
      PRNLConnectionKnownCandidateHostAddress=^TRNLConnectionKnownCandidateHostAddress;
      TRNLConnectionKnownCandidateHostAddress=record
       case boolean of
@@ -1817,6 +1896,12 @@ type PRNLVersion=^TRNLVersion;
        fNonce:TRNLUInt64;
        fMTU:TRNLUInt16;
        fCountChallengeRepetitions:TRNLUInt16;
+       // Whether this one handshake signs the whole transcript, which is decided once from the
+       // protocol version of the very first packet and then holds for the rest of it
+       fTranscriptBinding:boolean;
+       // Filled in as the handshake progresses and hashed for the signature. Doubles as the
+       // snapshot which keeps a retransmitted challenge request identical to the first one.
+       fTranscript:TRNLProtocolTranscript;
        fNextChallengeTimeout:TRNLTime;
        fNextShortTermKeyPairTimeout:TRNLTime;
        fNextNonceTimeout:TRNLTime;
@@ -3485,6 +3570,21 @@ type PRNLVersion=^TRNLVersion;
 
        fConnectionChallengeResponse:PRNLConnectionChallenge;
 
+       // Whether this connection signs the whole handshake transcript. As an initiator this starts
+       // out as whatever the host mode offers and can still drop to false once, when the counter
+       // side turns out to speak only the older version; as a responder it is decided by the
+       // version of the incoming request and never changes.
+       fTranscriptBinding:boolean;
+       // The initiator side counterpart of the candidate's transcript
+       fTranscript:TRNLProtocolTranscript;
+
+
+       // Initiator only, and only in ALLOWED: the point in time at which offering the newer
+       // protocol version is given up on, because a counter side which does not know it answers
+       // with silence rather than with a refusal
+       fProtocolFallbackTimeout:TRNLTime;
+       fProtocolFallbackPending:boolean;
+
        fRoundTripTimeFirst:boolean;
 
        fRoundTripTime:TRNLInt64;
@@ -3653,6 +3753,11 @@ type PRNLVersion=^TRNLVersion;
        property RemoteHostSalt:TRNLUInt64 read fRemoteHostSalt write fRemoteHostSalt;
        property Channels:TRNLPeerChannelList read fChannels;
        property CountChannels:TRNLSizeInt read GetCountChannels write SetCountChannels;
+       // Whether this connection ended up with its handshake signatures covering the whole
+       // transcript. Worth looking at, because in ALLOWED the answer depends on the counter side
+       // and, at that, on a cleartext version field which an attacker can rewrite. A connection
+       // which reports false here has the cleartext handshake fields unprotected.
+       property TranscriptBinding:boolean read fTranscriptBinding;
        property RemoteIncomingBandwidthLimit:TRNLUInt32 read fRemoteIncomingBandwidthLimit;
        property RemoteOutgoingBandwidthLimit:TRNLUInt32 read fRemoteOutgoingBandwidthLimit;
        property IncomingBandwidthRate:TRNLUInt32 read GetIncomingBandwidthRate;
@@ -3790,6 +3895,10 @@ type PRNLVersion=^TRNLVersion;
 
        fMaximumUnreliableBlockPacketsPerDispatch:TRNLUInt32;
 
+       fTranscriptBindingMode:TRNLProtocolTranscriptBindingMode;
+
+       fPendingConnectionProtocolFallbackTimeout:TRNLUInt64;
+
        fRateLimiterHostAddressBurst:TRNLInt64;
 
        fRateLimiterHostAddressPeriod:TRNLUInt64;
@@ -3829,6 +3938,12 @@ type PRNLVersion=^TRNLVersion;
        fReceivedBufferLength:TRNLInt32;
 
        fReceivedAddress:TRNLAddress;
+
+       // The protocol version of the handshake packet currently being processed, kept here for the
+       // same reason and in the same way as fReceivedAddress: the per packet dispatch functions
+       // need it, and threading it through all of their signatures would buy nothing
+       fReceivedProtocolVersion:TRNLUInt64;
+       fReceivedTranscriptBinding:boolean;
 
        fTotalReceivedData:TRNLUInt64;
 
@@ -3916,6 +4031,14 @@ type PRNLVersion=^TRNLVersion;
        procedure ResetConnectionAttemptHistory;
 
        procedure UpdateConnectionAttemptHistory(const aTime:TRNLTime);
+
+       procedure InitializeTranscript(out aTranscript:TRNLProtocolTranscript);
+
+       class procedure ComputeTranscriptHash(out aHash:TRNLProtocolTranscriptHash;const aTranscript:TRNLProtocolTranscript); static;
+
+       function ProtocolVersionForTranscriptBinding(const aTranscriptBinding:boolean):TRNLUInt64;
+
+       function AcceptableProtocolVersion(const aProtocolVersion:TRNLUInt64;out aTranscriptBinding:boolean):boolean;
 
        procedure AddHandshakePacketChecksum(var aHandshakePacket);
 
@@ -4017,6 +4140,15 @@ type PRNLVersion=^TRNLVersion;
        // datagrams. The remainder simply stays queued for the next round, so nothing is lost by
        // it. Zero means no limit, which is the behaviour these channels had before.
        property MaximumUnreliableBlockPacketsPerDispatch:TRNLUInt32 read fMaximumUnreliableBlockPacketsPerDispatch write fMaximumUnreliableBlockPacketsPerDispatch;
+       // How much of the handshake the signatures cover, see TRNLProtocolTranscriptBindingMode.
+       // OFF by default, which is byte for byte the behaviour of every earlier release. REQUIRED is
+       // the only setting under which the cleartext handshake fields are actually protected;
+       // ALLOWED speaks both versions and is meant for migrating an existing installation, not as
+       // a destination.
+       property TranscriptBindingMode:TRNLProtocolTranscriptBindingMode read fTranscriptBindingMode write fTranscriptBindingMode;
+       // How long an initiator in ALLOWED offers the newer protocol version before it falls back to
+       // the older one. Unused in the other two modes.
+       property PendingConnectionProtocolFallbackTimeout:TRNLUInt64 read fPendingConnectionProtocolFallbackTimeout write fPendingConnectionProtocolFallbackTimeout;
        // Careful with the meaning of these two: the budget refills by one request per period,
        // not by a whole burst per period. With the defaults of 20 and 1000 ms an address may
        // therefore send 20 requests back to back and one per second after that, which is not
@@ -22784,6 +22916,10 @@ begin
 
  fConnectionChallengeResponse:=nil;
 
+ fTranscriptBinding:=false;
+
+ fProtocolFallbackPending:=false;
+
  fConnectionToken:=nil;
 
  fAuthenticationToken:=nil;
@@ -23416,6 +23552,20 @@ begin
         fConnectionSalt:=fLocalSalt;
         fChecksumPlaceHolder:=fConnectionSalt xor (fConnectionSalt shl 32);
         fPendingConnectionHandshakeSendData.fHandshakePacket.ConnectionRequest.OutgoingSalt:=TRNLEndianness.HostToLittleEndian64(fLocalSalt);
+        // The transcript has to follow the salt, since it is the salt of the request which the
+        // responder will actually see
+        fTranscript.InitiatorSalt:=fLocalSalt;
+       end;
+       // Give up on offering the newer protocol version and continue with the older one. Only
+       // reachable in ALLOWED, where fProtocolFallbackPending was set at Connect time. A counter
+       // side which does not know the newer version discards the request without any answer, so
+       // silence is the only signal there is, and without a deadline of its own this would have to
+       // wait out the whole fPendingConnectionTimeout. Only the version field changes; Send
+       // recomputes the checksum anyway.
+       if fProtocolFallbackPending and (fHost.fTime>=fProtocolFallbackTimeout) then begin
+        fProtocolFallbackPending:=false;
+        fTranscriptBinding:=false;
+        fPendingConnectionHandshakeSendData.fHandshakePacket.Header.ProtocolVersion:=fHost.ProtocolVersionForTranscriptBinding(false);
        end;
        fPendingConnectionHandshakeSendData.Send;
       end else begin
@@ -23432,6 +23582,9 @@ begin
                                                 fLocalShortTermPublicKey,
                                                 fLocalShortTermPrivateKey);
         fPendingConnectionHandshakeSendData.fHandshakePacket.ConnectionChallengeResponse.ShortTermPublicKey:=fLocalShortTermPublicKey;
+        // The transcript has to follow the renewed key, for the same reason it has to follow the
+        // renewed salt above: what counts is what the counter side will actually see
+        fTranscript.InitiatorShortTermPublicKey:=fLocalShortTermPublicKey;
        end;
        fPendingConnectionHandshakeSendData.Send;
       end else begin
@@ -24816,6 +24969,18 @@ begin
 
  fMaximumReliableBlockPacketSendAttempts:=64;
 
+ // Off by default, so that an existing application which knows nothing about this behaves exactly
+ // as it did before: same bytes on the wire, same protocol version 1.0.0, no fallback delay and no
+ // new way for a connection to be refused. Whoever wants the protection turns it on deliberately,
+ // and REQUIRED is the only setting which really provides it.
+ fTranscriptBindingMode:=RNL_PROTOCOL_TRANSCRIPT_BINDING_OFF;
+
+ // Only used in ALLOWED, where the initiator offers 1.1.0 first and has to fall back on silence,
+ // since a 1.0.0 counter side discards the packet without answering. The handshake repeats every
+ // fPendingConnectionSendTimeout anyway, so five attempts are plenty; without a timeout of its own
+ // this would have to wait out the whole fPendingConnectionTimeout.
+ fPendingConnectionProtocolFallbackTimeout:=500;
+
  // Generous enough that ordinary usage never touches it, small enough that a single round can
  // not produce a multi megabyte burst
  fMaximumUnreliableBlockPacketsPerDispatch:=256;
@@ -25492,11 +25657,31 @@ begin
   end;
  end;
 
+ // As an initiator, offer whatever the mode asks for. In ALLOWED that means offering the newer
+ // version first and keeping the door open for one fallback, because a counter side which only
+ // knows the older one discards the request without answering, so silence is the only signal
+ // there is and it needs a deadline of its own.
+ result.fTranscriptBinding:=fTranscriptBindingMode in [RNL_PROTOCOL_TRANSCRIPT_BINDING_ALLOWED,
+                                                       RNL_PROTOCOL_TRANSCRIPT_BINDING_REQUIRED];
+ result.fProtocolFallbackPending:=fTranscriptBindingMode=RNL_PROTOCOL_TRANSCRIPT_BINDING_ALLOWED;
+ if result.fProtocolFallbackPending then begin
+  result.fProtocolFallbackTimeout:=fTime+fPendingConnectionProtocolFallbackTimeout;
+ end;
+
+ // The initiator half of the transcript, which is exactly what goes into the request below. The
+ // responder half follows once its challenge request arrives.
+ InitializeTranscript(result.fTranscript);
+ result.fTranscript.InitiatorPeerID:=result.fLocalPeerID;
+ result.fTranscript.InitiatorSalt:=result.fLocalSalt;
+ result.fTranscript.InitiatorIncomingBandwidthLimit:=fIncomingBandwidthLimit;
+ result.fTranscript.InitiatorOutgoingBandwidthLimit:=fOutgoingBandwidthLimit;
+ result.fTranscript.ConnectionToken:=result.fConnectionToken^;
+
  FreeAndNil(result.fPendingConnectionHandshakeSendData);
 
  result.fPendingConnectionHandshakeSendData:=TRNLPeerPendingConnectionHandshakeSendData.Create(result);
  result.fPendingConnectionHandshakeSendData.fHandshakePacket.Header.Signature:=RNLProtocolHandshakePacketHeaderSignature;
- result.fPendingConnectionHandshakeSendData.fHandshakePacket.Header.ProtocolVersion:=TRNLEndianness.HostToLittleEndian64(RNL_PROTOCOL_VERSION);
+ result.fPendingConnectionHandshakeSendData.fHandshakePacket.Header.ProtocolVersion:=ProtocolVersionForTranscriptBinding(result.fTranscriptBinding);
  result.fPendingConnectionHandshakeSendData.fHandshakePacket.Header.ProtocolID:=TRNLEndianness.HostToLittleEndian64(fProtocolID);
  result.fPendingConnectionHandshakeSendData.fHandshakePacket.Header.PacketType:=TRNLInt32(TRNLProtocolHandshakePacketType(RNL_PROTOCOL_HANDSHAKE_PACKET_TYPE_CONNECTION_REQUEST));
  result.fPendingConnectionHandshakeSendData.fHandshakePacket.ConnectionRequest.PeerID:=TRNLEndianness.HostToLittleEndian16(result.fLocalPeerID);
@@ -25506,6 +25691,56 @@ begin
  result.fPendingConnectionHandshakeSendData.fHandshakePacket.ConnectionRequest.ConnectionToken:=result.fConnectionToken^;
  result.fPendingConnectionHandshakeSendData.Send;
 
+end;
+
+procedure TRNLHost.InitializeTranscript(out aTranscript:TRNLProtocolTranscript);
+begin
+ FillChar(aTranscript,SizeOf(TRNLProtocolTranscript),#0);
+ // Whenever a transcript is used at all, both sides are speaking the newer version, so this is a
+ // constant rather than the negotiated value. See the declaration of TRNLProtocolTranscript.
+ aTranscript.ProtocolVersion:=RNL_PROTOCOL_VERSION_TRANSCRIPT_BINDING;
+ aTranscript.ProtocolID:=fProtocolID;
+end;
+
+class procedure TRNLHost.ComputeTranscriptHash(out aHash:TRNLProtocolTranscriptHash;const aTranscript:TRNLProtocolTranscript);
+begin
+ // A packed record hashed as a whole, so the encoding is canonical by construction and the two
+ // sides cannot disagree about field order or padding
+{$ifdef RNLUseBLAKE2B}
+ TRNLBLAKE2B.Process(aHash,aTranscript,SizeOf(TRNLProtocolTranscript));
+{$else}
+ TRNLSHA512.Process(aHash,aTranscript,SizeOf(TRNLProtocolTranscript));
+{$endif}
+end;
+
+function TRNLHost.ProtocolVersionForTranscriptBinding(const aTranscriptBinding:boolean):TRNLUInt64;
+begin
+ // Ready to be stored into a packet header, so already in wire byte order
+ if aTranscriptBinding then begin
+  result:=TRNLEndianness.HostToLittleEndian64(RNL_PROTOCOL_VERSION_TRANSCRIPT_BINDING);
+ end else begin
+  result:=TRNLEndianness.HostToLittleEndian64(RNL_PROTOCOL_VERSION);
+ end;
+end;
+
+function TRNLHost.AcceptableProtocolVersion(const aProtocolVersion:TRNLUInt64;out aTranscriptBinding:boolean):boolean;
+var Version:TRNLUInt64;
+begin
+ // The patch level never takes part in this, only major and minor, which is what the mask is for
+ Version:=aProtocolVersion and RNL_PROTOCOL_VERSION_COMPATIBILITY_MASK;
+ aTranscriptBinding:=false;
+ if Version=(RNL_PROTOCOL_VERSION_TRANSCRIPT_BINDING and RNL_PROTOCOL_VERSION_COMPATIBILITY_MASK) then begin
+  aTranscriptBinding:=true;
+  result:=fTranscriptBindingMode in [RNL_PROTOCOL_TRANSCRIPT_BINDING_ALLOWED,
+                                     RNL_PROTOCOL_TRANSCRIPT_BINDING_REQUIRED];
+ end else if Version=(RNL_PROTOCOL_VERSION and RNL_PROTOCOL_VERSION_COMPATIBILITY_MASK) then begin
+  // Refused outright in REQUIRED, which is exactly what makes that mode the only one a downgrade
+  // cannot get anywhere with: an attacker rewriting the version back to the older one then does
+  // not weaken the connection, it only prevents it, and preventing it was possible all along
+  result:=fTranscriptBindingMode<>RNL_PROTOCOL_TRANSCRIPT_BINDING_REQUIRED;
+ end else begin
+  result:=false;
+ end;
 end;
 
 procedure TRNLHost.AddHandshakePacketChecksum(var aHandshakePacket);
@@ -25545,18 +25780,40 @@ begin
    PRNLUInt64Array(TRNLPointer(@aConnectionCandidate^.fData^.fChallenge))^[Index]:=fRandomGenerator.GetUInt64;
   end;
 
+  // The responder half of the transcript, snapshotted in exactly the same breath as the challenge.
+  // That is what keeps a retransmitted challenge request identical to the first one, which the
+  // transcript needs, because the counter side hashes what it received. The bandwidth limits and
+  // the repetition count would otherwise be re-read from the host on every attempt and could move
+  // underneath an ongoing handshake. When the challenge does get regenerated on its timeout, these
+  // move along with it, and the counter side follows from the new challenge request.
+  aConnectionCandidate^.fData^.fTranscript.ResponderSalt:=aConnectionCandidate^.fLocalSalt;
+  aConnectionCandidate^.fData^.fTranscript.ResponderIncomingBandwidthLimit:=fIncomingBandwidthLimit;
+  aConnectionCandidate^.fData^.fTranscript.ResponderOutgoingBandwidthLimit:=fOutgoingBandwidthLimit;
+  aConnectionCandidate^.fData^.fTranscript.CountChallengeRepetitions:=aConnectionCandidate^.fData^.fCountChallengeRepetitions;
+  aConnectionCandidate^.fData^.fTranscript.Challenge:=aConnectionCandidate^.fData^.fChallenge;
+
  end;
 
  OutgoingPacket.Header.Signature:=RNLProtocolHandshakePacketHeaderSignature;
- OutgoingPacket.Header.ProtocolVersion:=TRNLEndianness.HostToLittleEndian64(RNL_PROTOCOL_VERSION);
+ OutgoingPacket.Header.ProtocolVersion:=ProtocolVersionForTranscriptBinding(aConnectionCandidate^.fData^.fTranscriptBinding);
  OutgoingPacket.Header.ProtocolID:=TRNLEndianness.HostToLittleEndian64(fProtocolID);
  OutgoingPacket.Header.PacketType:=TRNLUInt32(TRNLProtocolHandshakePacketType(RNL_PROTOCOL_HANDSHAKE_PACKET_TYPE_CONNECTION_CHALLENGE_REQUEST));
  OutgoingPacket.PeerID:=TRNLEndianness.HostToLittleEndian16(aConnectionCandidate^.fData^.fOutgoingPeerID);
  OutgoingPacket.OutgoingSalt:=TRNLEndianness.HostToLittleEndian64(aConnectionCandidate^.fRemoteSalt);
  OutgoingPacket.IncomingSalt:=TRNLEndianness.HostToLittleEndian64(aConnectionCandidate^.fLocalSalt);
- OutgoingPacket.IncomingBandwidthLimit:=TRNLEndianness.HostToLittleEndian32(fIncomingBandwidthLimit);
- OutgoingPacket.OutgoingBandwidthLimit:=TRNLEndianness.HostToLittleEndian32(fOutgoingBandwidthLimit);
- OutgoingPacket.CountChallengeRepetitions:=TRNLEndianness.HostToLittleEndian16(aConnectionCandidate^.fData^.fCountChallengeRepetitions);
+ if aConnectionCandidate^.fData^.fTranscriptBinding then begin
+  // From the snapshot, so that a retransmission carries the very same values and the counter side
+  // ends up hashing what this side hashed
+  OutgoingPacket.IncomingBandwidthLimit:=TRNLEndianness.HostToLittleEndian32(aConnectionCandidate^.fData^.fTranscript.ResponderIncomingBandwidthLimit);
+  OutgoingPacket.OutgoingBandwidthLimit:=TRNLEndianness.HostToLittleEndian32(aConnectionCandidate^.fData^.fTranscript.ResponderOutgoingBandwidthLimit);
+  OutgoingPacket.CountChallengeRepetitions:=TRNLEndianness.HostToLittleEndian16(aConnectionCandidate^.fData^.fTranscript.CountChallengeRepetitions);
+ end else begin
+  // Re-read on every attempt, which is what this has always done and what keeps the older protocol
+  // version byte for byte what it was
+  OutgoingPacket.IncomingBandwidthLimit:=TRNLEndianness.HostToLittleEndian32(fIncomingBandwidthLimit);
+  OutgoingPacket.OutgoingBandwidthLimit:=TRNLEndianness.HostToLittleEndian32(fOutgoingBandwidthLimit);
+  OutgoingPacket.CountChallengeRepetitions:=TRNLEndianness.HostToLittleEndian16(aConnectionCandidate^.fData^.fCountChallengeRepetitions);
+ end;
  OutgoingPacket.Challenge:=aConnectionCandidate^.fData^.fChallenge;
 
  AddHandshakePacketChecksum(OutgoingPacket);
@@ -25652,6 +25909,22 @@ begin
    Initialize(ConnectionCandidate^.fData^);
   end;
 
+  // Decided here, once, from the version of the request, and then fixed for the rest of this
+  // handshake. A responder never chooses this for itself, it only follows what the initiator
+  // offered and what its own mode admits, which AcceptableProtocolVersion has already checked.
+  ConnectionCandidate^.fData^.fTranscriptBinding:=fReceivedTranscriptBinding;
+
+  // The initiator half of the transcript, taken from the request itself. Written unconditionally
+  // rather than only once, because a retransmitted request carries the same values anyway, and
+  // touching only this half leaves the responder half below untouched.
+  ConnectionCandidate^.fData^.fTranscript.ProtocolVersion:=RNL_PROTOCOL_VERSION_TRANSCRIPT_BINDING;
+  ConnectionCandidate^.fData^.fTranscript.ProtocolID:=fProtocolID;
+  ConnectionCandidate^.fData^.fTranscript.InitiatorPeerID:=TRNLEndianness.LittleEndianToHost16(aIncomingPacket^.PeerID);
+  ConnectionCandidate^.fData^.fTranscript.InitiatorSalt:=TRNLEndianness.LittleEndianToHost64(aIncomingPacket^.OutgoingSalt);
+  ConnectionCandidate^.fData^.fTranscript.InitiatorIncomingBandwidthLimit:=TRNLEndianness.LittleEndianToHost32(aIncomingPacket^.IncomingBandwidthLimit);
+  ConnectionCandidate^.fData^.fTranscript.InitiatorOutgoingBandwidthLimit:=TRNLEndianness.LittleEndianToHost32(aIncomingPacket^.OutgoingBandwidthLimit);
+  ConnectionCandidate^.fData^.fTranscript.ConnectionToken:=aIncomingPacket^.ConnectionToken;
+
   ConnectionCandidate^.fData^.fOutgoingPeerID:=TRNLEndianness.LittleEndianToHost16(aIncomingPacket^.PeerID);
 
   ConnectionCandidate^.fData^.fIncomingBandwidthLimit:=TRNLEndianness.LittleEndianToHost32(aIncomingPacket^.IncomingBandwidthLimit);
@@ -25719,6 +25992,21 @@ begin
   exit;
  end;
 
+ // The responder has answered, so its version is the version of this connection and there is
+ // nothing left to fall back from. In ALLOWED an on path attacker can rewrite that version
+ // downwards here and both sides will follow, which is the documented weakness of that mode; in
+ // REQUIRED the older version never gets this far, because AcceptableProtocolVersion turns it away.
+ Peer.fTranscriptBinding:=fReceivedTranscriptBinding;
+ Peer.fProtocolFallbackPending:=false;
+
+ // The responder half of the transcript, taken from the challenge request. Written on every one of
+ // them, so that a regenerated challenge is followed rather than ignored.
+ Peer.fTranscript.ResponderSalt:=RemoteSalt;
+ Peer.fTranscript.ResponderIncomingBandwidthLimit:=TRNLEndianness.LittleEndianToHost32(aIncomingPacket^.IncomingBandwidthLimit);
+ Peer.fTranscript.ResponderOutgoingBandwidthLimit:=TRNLEndianness.LittleEndianToHost32(aIncomingPacket^.OutgoingBandwidthLimit);
+ Peer.fTranscript.CountChallengeRepetitions:=TRNLEndianness.LittleEndianToHost16(aIncomingPacket^.CountChallengeRepetitions);
+ Peer.fTranscript.Challenge:=aIncomingPacket^.Challenge;
+
  Peer.fRemoteSalt:=RemoteSalt;
 
  Peer.fConnectionSalt:=Peer.fLocalSalt xor Peer.fRemoteSalt;
@@ -25755,11 +26043,12 @@ begin
 
  Peer.fPendingConnectionHandshakeSendData:=TRNLPeerPendingConnectionHandshakeSendData.Create(Peer);
  Peer.fPendingConnectionHandshakeSendData.fHandshakePacket.Header.Signature:=RNLProtocolHandshakePacketHeaderSignature;
- Peer.fPendingConnectionHandshakeSendData.fHandshakePacket.Header.ProtocolVersion:=TRNLEndianness.HostToLittleEndian64(RNL_PROTOCOL_VERSION);
+ Peer.fPendingConnectionHandshakeSendData.fHandshakePacket.Header.ProtocolVersion:=ProtocolVersionForTranscriptBinding(Peer.fTranscriptBinding);
  Peer.fPendingConnectionHandshakeSendData.fHandshakePacket.Header.ProtocolID:=TRNLEndianness.HostToLittleEndian64(fProtocolID);
  Peer.fPendingConnectionHandshakeSendData.fHandshakePacket.Header.PacketType:=TRNLInt32(TRNLProtocolHandshakePacketType(RNL_PROTOCOL_HANDSHAKE_PACKET_TYPE_CONNECTION_CHALLENGE_RESPONSE));
  Peer.fPendingConnectionHandshakeSendData.fHandshakePacket.ConnectionChallengeResponse.ConnectionSalt:=TRNLEndianness.HostToLittleEndian64(Peer.fConnectionSalt);
  Peer.fPendingConnectionHandshakeSendData.fHandshakePacket.ConnectionChallengeResponse.ShortTermPublicKey:=Peer.fLocalShortTermPublicKey;
+ Peer.fTranscript.InitiatorShortTermPublicKey:=Peer.fLocalShortTermPublicKey;
  Peer.fPendingConnectionHandshakeSendData.fHandshakePacket.ConnectionChallengeResponse.ChallengeResponse:=Peer.fConnectionChallengeResponse^;
  Peer.fPendingConnectionHandshakeSendData.Send;
 
@@ -25778,6 +26067,7 @@ var Index:TRNLInt32;
     OutgoingPacket:TRNLProtocolHandshakePacket;
     Nonce:TRNLCipherNonce;
     TwoKeys:TRNLTwoKeys;
+    TranscriptHash:TRNLProtocolTranscriptHash;
 begin
 
 {$if defined(RNL_DEBUG) and defined(RNL_DEBUG_SECURITY)}
@@ -25856,6 +26146,8 @@ begin
 
   ConnectionCandidate^.fData^.fRemoteShortTermPublicKey:=aIncomingPacket^.ShortTermPublicKey;
 
+  ConnectionCandidate^.fData^.fTranscript.InitiatorShortTermPublicKey:=aIncomingPacket^.ShortTermPublicKey;
+
   TRNLX25519.GenerateSharedSecretKey(ConnectionCandidate^.fData^.fSharedSecretKey,
                                      ConnectionCandidate^.fData^.fRemoteShortTermPublicKey,
                                      ConnectionCandidate^.fData^.fLocalShortTermPrivateKey);
@@ -25878,7 +26170,7 @@ begin
   end;
 
   OutgoingPacket.Header.Signature:=RNLProtocolHandshakePacketHeaderSignature;
-  OutgoingPacket.Header.ProtocolVersion:=TRNLEndianness.HostToLittleEndian64(RNL_PROTOCOL_VERSION);
+  OutgoingPacket.Header.ProtocolVersion:=ProtocolVersionForTranscriptBinding(ConnectionCandidate^.fData^.fTranscriptBinding);
   OutgoingPacket.Header.ProtocolID:=TRNLEndianness.HostToLittleEndian64(fProtocolID);
 
   OutgoingPacket.Header.PacketType:=TRNLUInt32(TRNLProtocolHandshakePacketType(RNL_PROTOCOL_HANDSHAKE_PACKET_TYPE_CONNECTION_AUTHENTICATION_REQUEST));
@@ -25886,20 +26178,29 @@ begin
   OutgoingPacket.ConnectionAuthenticationRequest.PeerID:=TRNLEndianness.HostToLittleEndian16(ConnectionCandidate^.fData^.fOutgoingPeerID);
   OutgoingPacket.ConnectionAuthenticationRequest.ConnectionSalt:=TRNLEndianness.HostToLittleEndian64(ConnectionSalt);
   OutgoingPacket.ConnectionAuthenticationRequest.ShortTermPublicKey:=ConnectionCandidate^.fData^.fLocalShortTermPublicKey;
+  ConnectionCandidate^.fData^.fTranscript.ResponderShortTermPublicKey:=ConnectionCandidate^.fData^.fLocalShortTermPublicKey;
   OutgoingPacket.ConnectionAuthenticationRequest.Nonce:=TRNLEndianness.HostToLittleEndian64(ConnectionCandidate^.fData^.fNonce);
 
   OutgoingPacket.ConnectionAuthenticationRequest.Payload.LongTermPublicKey:=fLongTermPublicKey;
 
   OutgoingPacket.ConnectionAuthenticationRequest.Payload.MTU:=TRNLEndianness.HostToLittleEndian16(fMTU);
 
-  TwoKeys[0]:=ConnectionCandidate^.fData^.fLocalShortTermPublicKey;
-  TwoKeys[1]:=ConnectionCandidate^.fData^.fRemoteShortTermPublicKey;
-
-  TRNLED25519.Sign(OutgoingPacket.ConnectionAuthenticationRequest.Payload.Signature,
-                   fLongTermPrivateKey,
-                   fLongTermPublicKey,
-                   TwoKeys,
-                   SizeOf(TRNLTwoKeys));
+  if ConnectionCandidate^.fData^.fTranscriptBinding then begin
+   ComputeTranscriptHash(TranscriptHash,ConnectionCandidate^.fData^.fTranscript);
+   TRNLED25519.Sign(OutgoingPacket.ConnectionAuthenticationRequest.Payload.Signature,
+                    fLongTermPrivateKey,
+                    fLongTermPublicKey,
+                    TranscriptHash,
+                    SizeOf(TRNLProtocolTranscriptHash));
+  end else begin
+   TwoKeys[0]:=ConnectionCandidate^.fData^.fLocalShortTermPublicKey;
+   TwoKeys[1]:=ConnectionCandidate^.fData^.fRemoteShortTermPublicKey;
+   TRNLED25519.Sign(OutgoingPacket.ConnectionAuthenticationRequest.Payload.Signature,
+                    fLongTermPrivateKey,
+                    fLongTermPublicKey,
+                    TwoKeys,
+                    SizeOf(TRNLTwoKeys));
+  end;
 
   PRNLUInt64Array(TRNLPointer(@Nonce))^[0]:=TRNLEndianness.HostToLittleEndian64(ConnectionCandidate^.fData^.fNonce);
   PRNLUInt64Array(TRNLPointer(@Nonce))^[1]:=TRNLEndianness.HostToLittleEndian64(ConnectionCandidate^.fRemoteSalt);
@@ -25934,6 +26235,7 @@ var Index:TRNLInt32;
     Peer:TRNLPeer;
     Nonce:TRNLCipherNonce;
     TwoKeys:TRNLTwoKeys;
+    TranscriptHash:TRNLProtocolTranscriptHash;
 begin
 
 {$if defined(RNL_DEBUG) and defined(RNL_DEBUG_SECURITY)}
@@ -25959,6 +26261,9 @@ begin
  if Peer.fState<>RNL_PEER_STATE_CONNECTION_CHALLENGING then begin
   exit;
  end;
+
+ // The last field of the transcript, which is complete on this side from here on
+ Peer.fTranscript.ResponderShortTermPublicKey:=aIncomingPacket^.ShortTermPublicKey;
 
  TRNLX25519.GenerateSharedSecretKey(Peer.fSharedSecretKey,
                                     aIncomingPacket^.ShortTermPublicKey,
@@ -25991,14 +26296,23 @@ begin
   exit;
  end;
 
- TwoKeys[0]:=aIncomingPacket^.ShortTermPublicKey;
- TwoKeys[1]:=Peer.fLocalShortTermPublicKey;
-
- if not TRNLED25519.Verify(aIncomingPacket^.Payload.Signature,
-                           aIncomingPacket^.Payload.LongTermPublicKey,
-                           TwoKeys,
-                           SizeOf(TRNLTwoKeys)) then begin
-  exit;
+ if Peer.fTranscriptBinding then begin
+  ComputeTranscriptHash(TranscriptHash,Peer.fTranscript);
+  if not TRNLED25519.Verify(aIncomingPacket^.Payload.Signature,
+                            aIncomingPacket^.Payload.LongTermPublicKey,
+                            TranscriptHash,
+                            SizeOf(TRNLProtocolTranscriptHash)) then begin
+   exit;
+  end;
+ end else begin
+  TwoKeys[0]:=aIncomingPacket^.ShortTermPublicKey;
+  TwoKeys[1]:=Peer.fLocalShortTermPublicKey;
+  if not TRNLED25519.Verify(aIncomingPacket^.Payload.Signature,
+                            aIncomingPacket^.Payload.LongTermPublicKey,
+                            TwoKeys,
+                            SizeOf(TRNLTwoKeys)) then begin
+   exit;
+  end;
  end;
 
  Peer.fRemoteMTU:=TRNLEndianness.LittleEndianToHost16(aIncomingPacket^.Payload.MTU);
@@ -26009,7 +26323,7 @@ begin
 
  Peer.fPendingConnectionHandshakeSendData:=TRNLPeerPendingConnectionHandshakeSendData.Create(Peer);
  Peer.fPendingConnectionHandshakeSendData.fHandshakePacket.Header.Signature:=RNLProtocolHandshakePacketHeaderSignature;
- Peer.fPendingConnectionHandshakeSendData.fHandshakePacket.Header.ProtocolVersion:=TRNLEndianness.HostToLittleEndian64(RNL_PROTOCOL_VERSION);
+ Peer.fPendingConnectionHandshakeSendData.fHandshakePacket.Header.ProtocolVersion:=ProtocolVersionForTranscriptBinding(Peer.fTranscriptBinding);
  Peer.fPendingConnectionHandshakeSendData.fHandshakePacket.Header.ProtocolID:=TRNLEndianness.HostToLittleEndian64(fProtocolID);
  Peer.fPendingConnectionHandshakeSendData.fHandshakePacket.Header.PacketType:=TRNLInt32(TRNLProtocolHandshakePacketType(RNL_PROTOCOL_HANDSHAKE_PACKET_TYPE_CONNECTION_AUTHENTICATION_RESPONSE));
  Peer.fPendingConnectionHandshakeSendData.fHandshakePacket.ConnectionAuthenticationResponse.ConnectionSalt:=TRNLEndianness.HostToLittleEndian64(Peer.fConnectionSalt);
@@ -26029,14 +26343,22 @@ begin
 
  Peer.fPendingConnectionHandshakeSendData.fHandshakePacket.ConnectionAuthenticationResponse.Payload.LongTermPublicKey:=fLongTermPublicKey;
 
- TwoKeys[0]:=Peer.fLocalShortTermPublicKey;
- TwoKeys[1]:=aIncomingPacket^.ShortTermPublicKey;
-
- TRNLED25519.Sign(Peer.fPendingConnectionHandshakeSendData.fHandshakePacket.ConnectionAuthenticationResponse.Payload.Signature,
-                  fLongTermPrivateKey,
-                  fLongTermPublicKey,
-                  TwoKeys,
-                  SizeOf(TRNLTwoKeys));
+ if Peer.fTranscriptBinding then begin
+  ComputeTranscriptHash(TranscriptHash,Peer.fTranscript);
+  TRNLED25519.Sign(Peer.fPendingConnectionHandshakeSendData.fHandshakePacket.ConnectionAuthenticationResponse.Payload.Signature,
+                   fLongTermPrivateKey,
+                   fLongTermPublicKey,
+                   TranscriptHash,
+                   SizeOf(TRNLProtocolTranscriptHash));
+ end else begin
+  TwoKeys[0]:=Peer.fLocalShortTermPublicKey;
+  TwoKeys[1]:=aIncomingPacket^.ShortTermPublicKey;
+  TRNLED25519.Sign(Peer.fPendingConnectionHandshakeSendData.fHandshakePacket.ConnectionAuthenticationResponse.Payload.Signature,
+                   fLongTermPrivateKey,
+                   fLongTermPublicKey,
+                   TwoKeys,
+                   SizeOf(TRNLTwoKeys));
+ end;
 
  Peer.fPendingConnectionHandshakeSendData.fHandshakePacket.ConnectionAuthenticationResponse.Payload.MTU:=TRNLEndianness.HostToLittleEndian16(fMTU);
 
@@ -26118,6 +26440,10 @@ begin
 
  Peer.fConnectionData:=aConnectionCandidate^.fData^.fData;
 
+ // Carried over from the candidate, because from here on the peer is what the rest of the
+ // handshake and the connection itself run on
+ Peer.fTranscriptBinding:=aConnectionCandidate^.fData^.fTranscriptBinding;
+
  Peer.fRemoteIncomingBandwidthLimit:=aConnectionCandidate^.fData^.fIncomingBandwidthLimit;
 
  Peer.fRemoteOutgoingBandwidthLimit:=aConnectionCandidate^.fData^.fOutgoingBandwidthLimit;
@@ -26128,7 +26454,7 @@ begin
 
  Peer.fPendingConnectionHandshakeSendData:=TRNLPeerPendingConnectionHandshakeSendData.Create(Peer);
  Peer.fPendingConnectionHandshakeSendData.fHandshakePacket.Header.Signature:=RNLProtocolHandshakePacketHeaderSignature;
- Peer.fPendingConnectionHandshakeSendData.fHandshakePacket.Header.ProtocolVersion:=TRNLEndianness.HostToLittleEndian64(RNL_PROTOCOL_VERSION);
+ Peer.fPendingConnectionHandshakeSendData.fHandshakePacket.Header.ProtocolVersion:=ProtocolVersionForTranscriptBinding(Peer.fTranscriptBinding);
  Peer.fPendingConnectionHandshakeSendData.fHandshakePacket.Header.ProtocolID:=TRNLEndianness.HostToLittleEndian64(fProtocolID);
  Peer.fPendingConnectionHandshakeSendData.fHandshakePacket.Header.PacketType:=TRNLInt32(TRNLProtocolHandshakePacketType(RNL_PROTOCOL_HANDSHAKE_PACKET_TYPE_CONNECTION_APPROVAL_RESPONSE));
 
@@ -26178,7 +26504,7 @@ begin
   ConnectionSalt:=aConnectionCandidate^.fLocalSalt xor aConnectionCandidate^.fRemoteSalt;
 
   OutgoingPacket.Header.Signature:=RNLProtocolHandshakePacketHeaderSignature;
-  OutgoingPacket.Header.ProtocolVersion:=TRNLEndianness.HostToLittleEndian64(RNL_PROTOCOL_VERSION);
+  OutgoingPacket.Header.ProtocolVersion:=ProtocolVersionForTranscriptBinding(aConnectionCandidate^.fData^.fTranscriptBinding);
   OutgoingPacket.Header.ProtocolID:=TRNLEndianness.HostToLittleEndian64(fProtocolID);
 
   OutgoingPacket.Header.PacketType:=TRNLUInt32(TRNLProtocolHandshakePacketType(RNL_PROTOCOL_HANDSHAKE_PACKET_TYPE_CONNECTION_DENIAL_RESPONSE));
@@ -26228,6 +26554,7 @@ var Index:TRNLInt32;
     ConnectionSalt:TRNLUInt64;
     Nonce:TRNLCipherNonce;
     TwoKeys:TRNLTwoKeys;
+    TranscriptHash:TRNLProtocolTranscriptHash;
     Authorized:boolean;
     RemoteChannelTypes:TRNLPeerChannelTypes;
     DenialReason:TRNLConnectionDenialReason;
@@ -26291,14 +26618,23 @@ begin
 
   if Authorized then begin
 
-   TwoKeys[0]:=ConnectionCandidate^.fData^.fRemoteShortTermPublicKey;
-   TwoKeys[1]:=ConnectionCandidate^.fData^.fLocalShortTermPublicKey;
-
-   if not TRNLED25519.Verify(aIncomingPacket^.Payload.Signature,
-                             aIncomingPacket^.Payload.LongTermPublicKey,
-                             TwoKeys,
-                             SizeOf(TRNLTwoKeys)) then begin
-    Authorized:=false;
+   if ConnectionCandidate^.fData^.fTranscriptBinding then begin
+    ComputeTranscriptHash(TranscriptHash,ConnectionCandidate^.fData^.fTranscript);
+    if not TRNLED25519.Verify(aIncomingPacket^.Payload.Signature,
+                              aIncomingPacket^.Payload.LongTermPublicKey,
+                              TranscriptHash,
+                              SizeOf(TRNLProtocolTranscriptHash)) then begin
+     Authorized:=false;
+    end;
+   end else begin
+    TwoKeys[0]:=ConnectionCandidate^.fData^.fRemoteShortTermPublicKey;
+    TwoKeys[1]:=ConnectionCandidate^.fData^.fLocalShortTermPublicKey;
+    if not TRNLED25519.Verify(aIncomingPacket^.Payload.Signature,
+                              aIncomingPacket^.Payload.LongTermPublicKey,
+                              TwoKeys,
+                              SizeOf(TRNLTwoKeys)) then begin
+     Authorized:=false;
+    end;
    end;
 
   end;
@@ -26440,7 +26776,7 @@ begin
  end;
 
  OutgoingPacket.Header.Signature:=RNLProtocolHandshakePacketHeaderSignature;
- OutgoingPacket.Header.ProtocolVersion:=TRNLEndianness.HostToLittleEndian64(RNL_PROTOCOL_VERSION);
+ OutgoingPacket.Header.ProtocolVersion:=ProtocolVersionForTranscriptBinding(Peer.fTranscriptBinding);
  OutgoingPacket.Header.ProtocolID:=TRNLEndianness.HostToLittleEndian64(fProtocolID);
  OutgoingPacket.Header.PacketType:=TRNLUInt32(TRNLProtocolHandshakePacketType(RNL_PROTOCOL_HANDSHAKE_PACKET_TYPE_CONNECTION_APPROVAL_ACKNOWLEDGE));
  OutgoingPacket.Header.Checksum:=0;
@@ -26626,8 +26962,12 @@ begin
 
  ProtocolHandshakePacket:=@aPacketData;
 
- // Protocol version check, but ignore the patch number part of the whole version number
- if ((TRNLEndianness.LittleEndianToHost64(ProtocolHandshakePacket^.Header.ProtocolVersion) xor RNL_PROTOCOL_VERSION) and TRNLUInt64($ffffffffffff0000))<>0 then begin
+ // Protocol version check, but ignore the patch number part of the whole version number. Which
+ // versions are acceptable depends on the transcript binding mode, so this is a membership test
+ // and no longer a comparison against one single value. The result is kept for the per packet
+ // dispatch functions below, which need to know which of the two they are dealing with.
+ fReceivedProtocolVersion:=TRNLEndianness.LittleEndianToHost64(ProtocolHandshakePacket^.Header.ProtocolVersion);
+ if not AcceptableProtocolVersion(fReceivedProtocolVersion,fReceivedTranscriptBinding) then begin
   exit;
  end;
 

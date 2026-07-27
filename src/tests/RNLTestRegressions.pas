@@ -79,6 +79,18 @@ end;
 // A payload large enough that every single message needs its own datagram, so that a
 // configured packet loss really does hit individual messages instead of a single datagram
 // which happens to carry all of them at once
+// The byte offset of a field inside its handshake packet, taken from the record itself rather
+// than written out as a number, so that a change of the packet layout carries over on its own
+function HandshakeFieldOffset(const aPacket;const aField):TRNLSizeUInt;
+begin
+ result:=TRNLSizeUInt(TRNLPtrUInt(TRNLPointer(@aField))-TRNLPtrUInt(TRNLPointer(@aPacket)));
+end;
+
+function HandshakePacketType(const aType:TRNLProtocolHandshakePacketType):TRNLUInt8;
+begin
+ result:=TRNLUInt8(TRNLInt32(aType));
+end;
+
 function TestMessageText(const aIndex:TRNLSizeInt;const aPaddingSize:TRNLSizeInt=0):TRNLRawByteString;
 begin
  result:=TEST_MESSAGE_PREFIX+TRNLRawByteString(IntToStr(aIndex));
@@ -2908,6 +2920,200 @@ begin
 
 end;
 
+function EitherText(const aCondition:boolean;const aWhenTrue,aWhenFalse:TRNLRawByteString):TRNLRawByteString;
+begin
+ if aCondition then begin
+  result:=aWhenTrue;
+ end else begin
+  result:=aWhenFalse;
+ end;
+end;
+
+function TranscriptBindingModeName(const aMode:TRNLProtocolTranscriptBindingMode):TRNLRawByteString;
+begin
+ case aMode of
+  RNL_PROTOCOL_TRANSCRIPT_BINDING_OFF:begin
+   result:='off';
+  end;
+  RNL_PROTOCOL_TRANSCRIPT_BINDING_ALLOWED:begin
+   result:='allowed';
+  end;
+  else begin
+   result:='required';
+  end;
+ end;
+end;
+
+procedure TestTranscriptBindingInteroperabilityMatrix;
+const MODES:array[0..2] of TRNLProtocolTranscriptBindingMode=
+       (RNL_PROTOCOL_TRANSCRIPT_BINDING_OFF,
+        RNL_PROTOCOL_TRANSCRIPT_BINDING_ALLOWED,
+        RNL_PROTOCOL_TRANSCRIPT_BINDING_REQUIRED);
+      FIRST_PORT=18300;
+var Instance:TRNLInstance;
+    Network:TRNLVirtualNetwork;
+    HostPair:TRNLTestHostPair;
+    ClientIndex,ServerIndex,PortOffset:TRNLSizeInt;
+    Connected,ExpectConnected,Bound,ExpectBound:boolean;
+    Watchdog:TRNLTestWatchdog;
+begin
+
+ TestBegin('the transcript binding modes interoperate as documented');
+ Watchdog:=TRNLTestWatchdog.Create('transcript binding matrix',180000);
+ try
+
+  PortOffset:=0;
+
+  for ClientIndex:=Low(MODES) to High(MODES) do begin
+   for ServerIndex:=Low(MODES) to High(MODES) do begin
+
+    // Only a pairing where one side insists on a version the other refuses can fail. REQUIRED
+    // turns the older version away, and OFF does not know the newer one, so those two never meet.
+    ExpectConnected:=not (((MODES[ClientIndex]=RNL_PROTOCOL_TRANSCRIPT_BINDING_OFF) and
+                           (MODES[ServerIndex]=RNL_PROTOCOL_TRANSCRIPT_BINDING_REQUIRED)) or
+                          ((MODES[ClientIndex]=RNL_PROTOCOL_TRANSCRIPT_BINDING_REQUIRED) and
+                           (MODES[ServerIndex]=RNL_PROTOCOL_TRANSCRIPT_BINDING_OFF)));
+
+    // Bound whenever both sides can speak the newer version, which is exactly when neither of
+    // them is OFF
+    ExpectBound:=ExpectConnected and
+                 (MODES[ClientIndex]<>RNL_PROTOCOL_TRANSCRIPT_BINDING_OFF) and
+                 (MODES[ServerIndex]<>RNL_PROTOCOL_TRANSCRIPT_BINDING_OFF);
+
+    Connected:=false;
+    Bound:=false;
+
+    Instance:=TRNLInstance.Create;
+    try
+     Network:=TRNLVirtualNetwork.Create(Instance);
+     try
+      HostPair:=TRNLTestHostPair.Create(Instance,
+                                        Network,
+                                        FIRST_PORT+(PortOffset*2),
+                                        FIRST_PORT+(PortOffset*2)+1);
+      try
+
+       HostPair.Client.TranscriptBindingMode:=MODES[ClientIndex];
+       HostPair.Server.TranscriptBindingMode:=MODES[ServerIndex];
+
+       // A pairing which cannot work shows that by staying silent, so it only gets a short
+       // deadline; there is nothing to wait for. The successful ones get room for the 500 ms
+       // fallback which ALLOWED against OFF needs.
+       if ExpectConnected then begin
+        Connected:=HostPair.Connect(5000);
+       end else begin
+        Connected:=HostPair.Connect(1500);
+       end;
+
+       if Connected and assigned(HostPair.ClientPeer) then begin
+        Bound:=HostPair.ClientPeer.TranscriptBinding;
+       end;
+
+      finally
+       FreeAndNil(HostPair);
+      end;
+     finally
+      FreeAndNil(Network);
+     end;
+    finally
+     FreeAndNil(Instance);
+    end;
+
+    Info('client '+TranscriptBindingModeName(MODES[ClientIndex])+
+         ' to server '+TranscriptBindingModeName(MODES[ServerIndex])+
+         ': connected '+TRNLRawByteString(BoolToStr(Connected,true))+
+         ', bound '+TRNLRawByteString(BoolToStr(Bound,true)));
+
+    Check(Connected=ExpectConnected,
+          'client '+TranscriptBindingModeName(MODES[ClientIndex])+
+          ' to server '+TranscriptBindingModeName(MODES[ServerIndex])+
+          ' has to '+EitherText(ExpectConnected,'connect','be refused'));
+
+    Check(Bound=ExpectBound,
+          'and it has to end up '+EitherText(ExpectBound,'bound','unbound'));
+
+    inc(PortOffset);
+
+   end;
+  end;
+
+ finally
+  FreeAndNil(Watchdog);
+  TestEnd;
+ end;
+
+end;
+
+procedure TestHandshakeFieldRewritingKeepsThePacketChecksumValid;
+var Instance:TRNLInstance;
+    VirtualNetwork:TRNLVirtualNetwork;
+    FaultInjector:TRNLNetworkFaultInjector;
+    HostPair:TRNLTestHostPair;
+    Probe:TRNLProtocolHandshakePacketConnectionRequest;
+    Filler:array[0..15] of TRNLUInt8;
+    Index:TRNLSizeInt;
+    Watchdog:TRNLTestWatchdog;
+begin
+
+ TestBegin('handshake field rewriting keeps the packet checksum valid');
+ Watchdog:=TRNLTestWatchdog.Create('handshake field rewriting',120000);
+ try
+
+  Instance:=TRNLInstance.Create;
+  try
+   VirtualNetwork:=TRNLVirtualNetwork.Create(Instance);
+   try
+    FaultInjector:=TRNLNetworkFaultInjector.Create(Instance,VirtualNetwork);
+    try
+
+     for Index:=Low(Filler) to High(Filler) do begin
+      Filler[Index]:=TRNLUInt8($a5);
+     end;
+
+     // The connection token is the one field which can be changed without changing any meaning:
+     // token checking is off by default, so nothing looks at it. What it does change is the bytes
+     // of the datagram, and therefore its checksum. If the injector did not repair that, the
+     // counter side would discard every single connection request and the handshake below could
+     // not possibly succeed.
+     FaultInjector.RewriteOutgoingHandshakeField(HandshakePacketType(RNL_PROTOCOL_HANDSHAKE_PACKET_TYPE_CONNECTION_REQUEST),
+                                                 HandshakeFieldOffset(Probe,Probe.ConnectionToken),
+                                                 Filler,
+                                                 SizeOf(Filler));
+
+     HostPair:=TRNLTestHostPair.Create(Instance,FaultInjector);
+     try
+
+      Check(HostPair.Connect,'the handshake must still complete while a field is being rewritten, '+
+                             'which it can only do if the checksum was recomputed');
+
+      Info('handshake packets rewritten: '+
+           TRNLRawByteString(IntToStr(FaultInjector.CountRewrittenHandshakePackets)));
+
+      CheckAtLeastInt64(FaultInjector.CountRewrittenHandshakePackets,1,
+                        'and at least one packet has to have been rewritten at all, otherwise '+
+                        'the assertion above holds for the wrong reason');
+
+     finally
+      FreeAndNil(HostPair);
+     end;
+
+    finally
+     FreeAndNil(FaultInjector);
+    end;
+   finally
+    FreeAndNil(VirtualNetwork);
+   end;
+  finally
+   FreeAndNil(Instance);
+  end;
+
+ finally
+  FreeAndNil(Watchdog);
+  TestEnd;
+ end;
+
+end;
+
 procedure TestBandwidthRateLimiterHonoursItsPeriodLength;
 const MAXIMUM_PER_PERIOD=100000;
       PERIOD_LENGTH=1000;
@@ -3314,6 +3520,10 @@ begin
 
  // Test tooling correctness, everything which follows relies on it
  TestOutgoingBitFlippingSimulationActuallyFlipsBits;
+ TestHandshakeFieldRewritingKeepsThePacketChecksumValid;
+
+ // Handshake authenticity
+ TestTranscriptBindingInteroperabilityMatrix;
 
  // Socket level error classification
  TestSoftSendFailuresDoNotTerminateHost;
