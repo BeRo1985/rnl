@@ -3720,6 +3720,10 @@ type PRNLVersion=^TRNLVersion;
        // address migration rather than of this.
        fCandidatesNominated:boolean;
 
+       // Where the next round of the fan out starts in fCandidateAddresses, so that a list longer
+       // than one round still gets every one of its entries served, just spread over several rounds
+       fCandidateRoundOffset:TRNLSizeInt;
+
        // Likewise on the peer, so that it stays available for the whole connection
        fRemoteLongTermPublicKey:TRNLKey;
 
@@ -4056,6 +4060,10 @@ type PRNLVersion=^TRNLVersion;
 
        fPendingConnectionProtocolFallbackTimeout:TRNLUInt64;
 
+       // How many candidates of one connection attempt may receive a full handshake packet within
+       // one repetition round. Zero means all of them.
+       fMaximumCandidatesPerHandshakeRound:TRNLSizeInt;
+
        fRateLimiterHostAddressBurst:TRNLInt64;
 
        fRateLimiterHostAddressPeriod:TRNLUInt64;
@@ -4122,6 +4130,12 @@ type PRNLVersion=^TRNLVersion;
        fTotalPeersGivenUpOn:TRNLUInt64;
 
        fTotalRejectedRemoteLongTermPublicKeys:TRNLUInt64;
+
+       fTotalRateLimitedConnectionRequests:TRNLUInt64;
+
+       fTotalSimultaneousConnectsWon:TRNLUInt64;
+
+       fTotalSimultaneousConnectsGivenUp:TRNLUInt64;
 
        fTotalPeerAddressChanges:TRNLUInt64;
 
@@ -4205,6 +4219,7 @@ type PRNLVersion=^TRNLVersion;
        function AcceptableProtocolVersion(const aProtocolVersion:TRNLUInt64;out aTranscriptBinding:boolean):boolean;
 
        function CanReachAddressFamily(const aAddress:TRNLAddress):boolean;
+       function FindOwnPendingAttemptTowards(const aAddress:TRNLAddress):TRNLPeer;
        function GetCountSockets:TRNLSizeInt;
        function GetLocalCandidates:TRNLCandidates;
 
@@ -4263,13 +4278,21 @@ type PRNLVersion=^TRNLVersion;
                                  out aCandidates:TRNLCandidates;
                                  const aTimeoutMilliseconds:TRNLInt64=2000):boolean;
        // Like Connect, but offered every address the counter side might be reachable at instead of
-       // exactly one. The handshake repetition fans out over all of them, which opens a local NAT
+       // exactly one. The handshake repetition fans out over the candidates, which opens a local NAT
        // mapping towards each; whichever answers first becomes the path, and the rest are dropped.
+       // A round serves at most MaximumCandidatesPerHandshakeRound of them and continues where it
+       // left off, so a list longer than that costs time rather than bandwidth.
        //
        // This is the initiating half. For two sides which are both behind a restricting NAT it is
        // not enough on its own: the request can only reach the counter side once that side has sent
-       // something outwards itself, so the answering side has to call PunchCandidates. Two hosts
-       // both calling this would end up with two connections, which this stage does not solve.
+       // something outwards itself, so the answering side has to call PunchCandidates.
+       //
+       // Two hosts calling this at each other at the same time end up with one connection, not two:
+       // the side whose salt is lower drops its own attempt and takes the incoming one instead. The
+       // peer returned here is the one that goes away in that case, silently, exactly as an attempt
+       // which ran into its timeout does, and the connection arrives as an ordinary incoming one
+       // with a peer of its own. So a caller which may be called at the same time has to be
+       // prepared for its connection to show up as RNL_HOST_EVENT_TYPE_PEER_CONNECT.
        function ConnectViaCandidates(const aRemoteCandidates:TRNLCandidates;
                                      const aCountChannels:TRNLUInt32=1;
                                      const aData:TRNLUInt64=0;
@@ -4361,6 +4384,14 @@ type PRNLVersion=^TRNLVersion;
        // not by a whole burst per period. With the defaults of 20 and 1000 ms an address may
        // therefore send 20 requests back to back and one per second after that, which is not
        // the same thing as twenty per second.
+       // An attempt fanned out over candidates sends a full handshake packet, which is padded to
+       // 508 bytes against amplification, to every one of them in every repetition round. The
+       // candidate list comes from the counter side, so its length is not this host's to choose,
+       // and every entry which never answers is an address this host sends 508 bytes to ten times
+       // a second for nothing. This bounds both at once: the traffic leaving this host per round,
+       // and, because the rounds rotate through the list, what any single one of those addresses
+       // gets to see. Zero switches the bound off and serves the whole list every round.
+       property MaximumCandidatesPerHandshakeRound:TRNLSizeInt read fMaximumCandidatesPerHandshakeRound write fMaximumCandidatesPerHandshakeRound;
        property RateLimiterHostAddressBurst:TRNLInt64 read fRateLimiterHostAddressBurst write fRateLimiterHostAddressBurst;
        property RateLimiterHostAddressPeriod:TRNLUInt64 read fRateLimiterHostAddressPeriod write fRateLimiterHostAddressPeriod;
        // Incoming connection attempts per second, averaged over the attempt history, and the
@@ -4400,6 +4431,15 @@ type PRNLVersion=^TRNLVersion;
        // How often a handshake was broken off because the counter side held a different long
        // term public key than the one Connect was told to expect
        property TotalRejectedRemoteLongTermPublicKeys:TRNLUInt64 read fTotalRejectedRemoteLongTermPublicKeys;
+       // How many connection requests the per address flooding limit turned away. Only requests
+       // which would start a new handshake are counted, since repetitions of one already under way
+       // are not subject to it.
+       property TotalRateLimitedConnectionRequests:TRNLUInt64 read fTotalRateLimitedConnectionRequests;
+       // How often two hosts turned out to be connecting to each other at the same moment, and
+       // which way it was resolved. Both counted, because an application seeing an outgoing attempt
+       // vanish and an incoming connection appear instead has no other way of telling why.
+       property TotalSimultaneousConnectsWon:TRNLUInt64 read fTotalSimultaneousConnectsWon;
+       property TotalSimultaneousConnectsGivenUp:TRNLUInt64 read fTotalSimultaneousConnectsGivenUp;
        // Number of times a peer was followed to a new source address, which is what a NAT
        // rebinding or a network handover of a counter side looks like from here
        property TotalPeerAddressChanges:TRNLUInt64 read fTotalPeerAddressChanges;
@@ -21657,24 +21697,46 @@ end;
 
 function TRNLPeerPendingConnectionHandshakeSendData.Send:boolean;
 var PacketSize:TRNLSizeInt;
-    Index:TRNLSizeInt;
+    Index,CountCandidates,CountThisRound:TRNLSizeInt;
 begin
  fPeer.fHost.AddHandshakePacketChecksum(fHandshakePacket);
  PacketSize:=RNLProtocolHandshakePacketSizes[TRNLProtocolHandshakePacketType(TRNLInt32(fHandshakePacket.Header.PacketType))];
  if PacketSize<=0 then begin
   result:=false;
  end else if length(fPeer.fCandidateAddresses)>0 then begin
-  // Fanned out over every candidate at once. Each of these datagrams opens a local mapping
-  // towards the address it goes to, so the repetition which the handshake performs anyway is
-  // already the hole punching; nothing else has to knock.
+  // Fanned out over the candidates. Each of these datagrams opens a local mapping towards the
+  // address it goes to, so the repetition which the handshake performs anyway is already the
+  // hole punching; nothing else has to knock.
+  //
+  // Not necessarily over all of them within one round, though. The list is the counter side's,
+  // and a handshake packet is padded to 508 bytes, so a long list would turn this host into a
+  // sender of 508 bytes ten times a second at every address in it. The round therefore serves at
+  // most fMaximumCandidatesPerHandshakeRound of them and continues where it left off the next
+  // time, which bounds what leaves this host per round as well as what any single address in the
+  // list gets to see, while still reaching every entry within a few rounds. Lists no longer than
+  // the bound, which is what an honest counter side sends, are served exactly as before.
   //
   // Only a hard send error counts as failure. One unreachable candidate among several is the
   // normal case and says nothing about the others.
   result:=false;
-  for Index:=0 to length(fPeer.fCandidateAddresses)-1 do begin
-   if fPeer.SendPacketToAddress(fPeer.fCandidateAddresses[Index],fHandshakePacket,PacketSize)<>RNL_NETWORK_SEND_RESULT_ERROR then begin
+  CountCandidates:=length(fPeer.fCandidateAddresses);
+  CountThisRound:=fPeer.fHost.fMaximumCandidatesPerHandshakeRound;
+  if (CountThisRound<=0) or (CountThisRound>CountCandidates) then begin
+   CountThisRound:=CountCandidates;
+  end;
+  if fPeer.fCandidateRoundOffset>=CountCandidates then begin
+   fPeer.fCandidateRoundOffset:=0;
+  end;
+  for Index:=0 to CountThisRound-1 do begin
+   if fPeer.SendPacketToAddress(fPeer.fCandidateAddresses[(fPeer.fCandidateRoundOffset+Index) mod CountCandidates],
+                                fHandshakePacket,
+                                PacketSize)<>RNL_NETWORK_SEND_RESULT_ERROR then begin
     result:=true;
    end;
+  end;
+  inc(fPeer.fCandidateRoundOffset,CountThisRound);
+  if fPeer.fCandidateRoundOffset>=CountCandidates then begin
+   dec(fPeer.fCandidateRoundOffset,CountCandidates);
   end;
  end else begin
   result:=fPeer.SendPacket(fHandshakePacket,PacketSize)<>RNL_NETWORK_SEND_RESULT_ERROR;
@@ -23767,6 +23829,8 @@ begin
 
  fCandidatesNominated:=false;
 
+ fCandidateRoundOffset:=0;
+
  fTranscriptBinding:=false;
 
  fProtocolFallbackPending:=false;
@@ -25843,6 +25907,8 @@ begin
  // not produce a multi megabyte burst
  fMaximumUnreliableBlockPacketsPerDispatch:=256;
 
+ fMaximumCandidatesPerHandshakeRound:=4;
+
  fRateLimiterHostAddressBurst:=20;
 
  fRateLimiterHostAddressPeriod:=1000;
@@ -25884,6 +25950,12 @@ begin
  fTotalPeersGivenUpOn:=0;
 
  fTotalRejectedRemoteLongTermPublicKeys:=0;
+
+ fTotalRateLimitedConnectionRequests:=0;
+
+ fTotalSimultaneousConnectsWon:=0;
+
+ fTotalSimultaneousConnectsGivenUp:=0;
 
  fTotalPeerAddressChanges:=0;
 
@@ -26645,6 +26717,38 @@ begin
 
 end;
 
+function TRNLHost.FindOwnPendingAttemptTowards(const aAddress:TRNLAddress):TRNLPeer;
+var Peer:TRNLPeer;
+    Index:TRNLSizeInt;
+begin
+ // A connection attempt of this host towards that very address, whether as its single destination
+ // or as one of the candidates it is fanning out over.
+ //
+ // Every handshake state counts, not only the first one. The counter side keeps repeating its own
+ // request until it hears back, so requests from it still arrive while this side's handshake has
+ // already moved on; looking only at the first state let those through and produced exactly the
+ // second connection this is meant to prevent.
+ result:=nil;
+ for Peer in fPeerList do begin
+  if not (Peer.fState in [RNL_PEER_STATE_CONNECTION_REQUESTING,
+                          RNL_PEER_STATE_CONNECTION_CHALLENGING,
+                          RNL_PEER_STATE_CONNECTION_AUTHENTICATING,
+                          RNL_PEER_STATE_CONNECTION_APPROVING]) then begin
+   continue;
+  end;
+  if Peer.fAddress.Equals(aAddress) then begin
+   result:=Peer;
+   exit;
+  end;
+  for Index:=0 to length(Peer.fCandidateAddresses)-1 do begin
+   if Peer.fCandidateAddresses[Index].Equals(aAddress) then begin
+    result:=Peer;
+    exit;
+   end;
+  end;
+ end;
+end;
+
 function TRNLHost.CanReachAddressFamily(const aAddress:TRNLAddress):boolean;
 var Index:TRNLSizeInt;
     Family:TRNLAddressFamily;
@@ -26916,6 +27020,8 @@ procedure TRNLHost.DispatchReceivedHandshakePacketConnectionRequest(const aIncom
 var ConnectionKnownCandidateHostAddress:PRNLConnectionKnownCandidateHostAddress;
     ConnectionCandidate:PRNLConnectionCandidate;
     HostEvent:TRNLHostEvent;
+    OwnAttempt:TRNLPeer;
+    SimultaneousRemoteSalt:TRNLUInt64;
 begin
 
 {$if defined(RNL_DEBUG) and defined(RNL_DEBUG_SECURITY)}
@@ -26939,16 +27045,66 @@ begin
                                               0),
                                           65535);
 
- ConnectionKnownCandidateHostAddress:=fConnectionKnownCandidateHostAddressHashTable^.Find(fReceivedAddress.Host,
-                                                                                          true);
- if assigned(ConnectionKnownCandidateHostAddress) then begin
-  if ConnectionKnownCandidateHostAddress^.RateLimiter.RateLimit(fInstance.Time,
-                                                                fRateLimiterHostAddressBurst,
-                                                                fRateLimiterHostAddressPeriod) then begin
+ // Both sides connecting to each other at the same moment, which is what happens when two peers
+ // punch towards one another and both call ConnectViaCandidates. Each of them would answer the
+ // other's request and end up with a second connection alongside the one it started itself.
+ //
+ // Resolved by comparing the two random salts, which both sides already exchange: the side holding
+ // the higher one keeps its own attempt and ignores the incoming request, the side holding the lower
+ // one drops its attempt and lets the incoming request through. The comparison is antisymmetric, so
+ // exactly one of the two gives way, and neither needs a field the protocol does not have.
+ //
+ // Equal salts are two to the power of minus sixty four and are left alone, which is the behaviour
+ // there was before any of this.
+ OwnAttempt:=FindOwnPendingAttemptTowards(fReceivedAddress);
+ if assigned(OwnAttempt) then begin
+  SimultaneousRemoteSalt:=TRNLEndianness.LittleEndianToHost64(aIncomingPacket^.OutgoingSalt);
+  if OwnAttempt.fLocalSalt>SimultaneousRemoteSalt then begin
+   // This side wins, so the counter side is expected to give way and to accept the attempt which is
+   // already on its way to it
+   inc(fTotalSimultaneousConnectsWon);
+   exit;
+  end else if OwnAttempt.fLocalSalt<SimultaneousRemoteSalt then begin
+   // This side gives way. The peer the application was handed goes away and the incoming request is
+   // served as an ordinary one, so the application sees its outgoing attempt disconnect and an
+   // incoming connection arrive in its place.
+   inc(fTotalSimultaneousConnectsGivenUp);
+   OwnAttempt.fState:=RNL_PEER_STATE_DISCONNECTED;
+  end;
+ end;
+
+ // A request which belongs to a handshake already under way is not a new connection attempt, so it
+ // does not have to pass the flooding limit again. Looking that up first is what keeps this host's
+ // own defences off the back of a legitimate counter side: a client repeats its request every
+ // fPendingConnectionSendTimeout while it waits, and one which is punching sends it to every
+ // candidate at once, so a single connection can easily be dozens of requests per second from one
+ // address. All of them carry the same salt and therefore mean the same candidate.
+ //
+ // Nothing is weakened by it. A flood has to invent a new salt for every request to look like a new
+ // attempt, and every one of those still goes through the limit below.
+ ConnectionCandidate:=fConnectionCandidateHashTable^.Find(fRandomGenerator,
+                                                          fReceivedAddress,
+                                                          TRNLEndianness.LittleEndianToHost64(aIncomingPacket^.OutgoingSalt),
+                                                          fSalt,
+                                                          fInstance.Time,
+                                                          fPendingConnectionTimeout,
+                                                          false);
+
+ if not assigned(ConnectionCandidate) then begin
+
+  ConnectionKnownCandidateHostAddress:=fConnectionKnownCandidateHostAddressHashTable^.Find(fReceivedAddress.Host,
+                                                                                           true);
+  if assigned(ConnectionKnownCandidateHostAddress) then begin
+   if ConnectionKnownCandidateHostAddress^.RateLimiter.RateLimit(fInstance.Time,
+                                                                 fRateLimiterHostAddressBurst,
+                                                                 fRateLimiterHostAddressPeriod) then begin
+    inc(fTotalRateLimitedConnectionRequests);
+    exit;
+   end;
+  end else begin
    exit;
   end;
- end else begin
-  exit;
+
  end;
 
  if fCheckConnectionTokens and
@@ -26957,13 +27113,16 @@ begin
   exit;
  end;
 
- ConnectionCandidate:=fConnectionCandidateHashTable^.Find(fRandomGenerator,
-                                                          fReceivedAddress,
-                                                          TRNLEndianness.LittleEndianToHost64(aIncomingPacket^.OutgoingSalt),
-                                                          fSalt,
-                                                          fInstance.Time,
-                                                          fPendingConnectionTimeout,
-                                                          true);
+ if not assigned(ConnectionCandidate) then begin
+  ConnectionCandidate:=fConnectionCandidateHashTable^.Find(fRandomGenerator,
+                                                           fReceivedAddress,
+                                                           TRNLEndianness.LittleEndianToHost64(aIncomingPacket^.OutgoingSalt),
+                                                           fSalt,
+                                                           fInstance.Time,
+                                                           fPendingConnectionTimeout,
+                                                           true);
+ end;
+
  if assigned(ConnectionCandidate) then begin
 
   if not (ConnectionCandidate^.fState in [RNL_CONNECTION_STATE_REQUESTING,

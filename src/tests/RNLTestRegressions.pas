@@ -2835,6 +2835,294 @@ begin
 end;
 
 // ---------------------------------------------------------------------------------------
+// A handshake in progress and the flooding limit
+// ---------------------------------------------------------------------------------------
+
+// The per address flooding limit exists to keep an unknown address from opening connection
+// attempts faster than the host can carry them. It used to count every arriving connection
+// request, including the repetitions of a handshake which is already under way, and those are
+// not attempts at all: an initiator repeats its request every fPendingConnectionSendTimeout
+// until it hears back, and one which fans out over several candidates sends one per candidate
+// per repetition. So the very thing the limit is meant to protect, a connection that is trying
+// to come up, was what ran into it first.
+//
+// What separates the two cases is the salt: every repetition of one handshake carries the same
+// one and therefore means the same connection candidate, while a flood has to invent a new salt
+// per request to look like a new attempt, and each of those still meets the limit.
+//
+// The construction below is the smallest one in which the difference is visible. The answers of
+// the server are dropped for a while, which is exactly what makes the client repeat, and the
+// budget is set to a single request with a period far longer than the test, so that a limit
+// which counts repetitions has nothing left to give for the rest of the run.
+procedure TestRepeatedHandshakeRequestsDoNotEatTheFloodingBudget;
+const COUNT_DROPPED_ANSWERS=4;
+      CLIENT_PORT=18235;
+var Instance:TRNLInstance;
+    VirtualNetwork:TRNLVirtualNetwork;
+    FaultInjector:TRNLNetworkFaultInjector;
+    HostPair:TRNLTestHostPair;
+    ClientAddress:TRNLAddress;
+    Connected:boolean;
+    Watchdog:TRNLTestWatchdog;
+begin
+
+ TestBegin('the repetitions of one handshake do not eat the flooding budget');
+ Watchdog:=TRNLTestWatchdog.Create('handshake repetitions and flooding limit',120000);
+ try
+
+  Instance:=TRNLInstance.Create;
+  try
+   VirtualNetwork:=TRNLVirtualNetwork.Create(Instance);
+   try
+    FaultInjector:=TRNLNetworkFaultInjector.Create(Instance,VirtualNetwork);
+    try
+
+     HostPair:=TRNLTestHostPair.Create(Instance,FaultInjector);
+     try
+
+      // One single request per address, and a period which outlasts the whole test, so that a
+      // budget once spent stays spent. Without that the period would simply refill and the
+      // connection would come up a second later, which would prove nothing.
+      HostPair.Server.RateLimiterHostAddressBurst:=1;
+      HostPair.Server.RateLimiterHostAddressPeriod:=60000;
+
+      FillChar(ClientAddress,SizeOf(TRNLAddress),#0);
+      FaultInjector.AddressSetHost(ClientAddress,'127.0.0.1');
+      ClientAddress.Port:=CLIENT_PORT;
+
+      // The answers of the server, and only those, get lost for a while. The client keeps its
+      // request going meanwhile, which is what puts several of them in front of the limit.
+      FaultInjector.DropNextOutgoingDatagramsToAddress(ClientAddress,COUNT_DROPPED_ANSWERS);
+
+      Connected:=HostPair.Connect(5000);
+
+      Info('dropped answers: '+TRNLRawByteString(IntToStr(FaultInjector.CountDeterministicallyDroppedDatagrams))+
+           ', flooding budget: '+TRNLRawByteString(IntToStr(HostPair.Server.RateLimiterHostAddressBurst))+
+           ' request(s) per '+TRNLRawByteString(IntToStr(HostPair.Server.RateLimiterHostAddressPeriod))+' ms');
+      Info('rate limited connection requests: '+
+           TRNLRawByteString(IntToStr(HostPair.Server.TotalRateLimitedConnectionRequests)));
+
+      // A precondition rather than a result: at least the first answer has to have gone missing,
+      // because that is what makes the client repeat at all. It stays deliberately at one, since
+      // the later drops only happen if the server is still answering, which is exactly the thing
+      // under test here.
+      CheckAtLeastInt64(FaultInjector.CountDeterministicallyDroppedDatagrams,1,
+                        'the client has to have been left without an answer at least once');
+
+      Check(Connected,'a handshake which only has to repeat itself must still come up');
+
+      CheckEqualsInt64(HostPair.Server.TotalRateLimitedConnectionRequests,0,
+                       'and none of its repetitions may be turned away as flooding');
+
+     finally
+      FreeAndNil(HostPair);
+     end;
+
+    finally
+     FreeAndNil(FaultInjector);
+    end;
+   finally
+    FreeAndNil(VirtualNetwork);
+   end;
+  finally
+   FreeAndNil(Instance);
+  end;
+
+ finally
+  FreeAndNil(Watchdog);
+  TestEnd;
+ end;
+
+end;
+
+// ---------------------------------------------------------------------------------------
+// What a candidate list costs
+// ---------------------------------------------------------------------------------------
+
+// The candidate list of a connection attempt is not this host's to choose: it arrives over
+// whatever signalling brought the two sides together, and the counter side decides what is in it.
+// Every entry is an address this host then sends a full handshake packet to, once per repetition
+// round, ten times a second, and a handshake packet is padded to 508 bytes so that RNL itself can
+// not be used as an amplifier. Fanning out over a list without a bound gives that padding right
+// back: a list of addresses which never answer costs this host 508 bytes per entry per round and
+// hands every one of those addresses a steady stream it never asked for, for as long as the
+// attempt runs, at no cost at all to whoever wrote the list.
+//
+// So the round serves at most a fixed number of candidates and continues where it left off next
+// time. This measures both ends of that: the traffic which leaves this host, and the share of it
+// which reaches any single address in the list.
+//
+// None of the candidates here answers, which is what keeps the fan out running for the whole
+// measurement window instead of stopping at the first reply, and is at the same time exactly the
+// case worth bounding.
+procedure TestCandidateFanOutStaysBoundedForALongCandidateList;
+const COUNT_BYSTANDERS=16;
+      MAXIMUM_PER_ROUND=4;
+      FIRST_BYSTANDER_PORT=18490;
+      CLIENT_PORT=18489;
+      FAN_OUT_MILLISECONDS=1000;
+      // Anything but the one the client uses, so that a bystander counts what arrives and
+      // answers none of it
+      BYSTANDER_PROTOCOL_ID=TRNLUInt64($1234567890abcdef);
+var UnboundedTotal,UnboundedMaximum,BoundedTotal,BoundedMaximum:TRNLUInt64;
+    Watchdog:TRNLTestWatchdog;
+
+ procedure Run(const aMaximumPerRound:TRNLSizeInt;
+               out aTotal,aMaximum:TRNLUInt64);
+ var Instance:TRNLInstance;
+     Network:TRNLVirtualNetwork;
+     Client:TRNLHost;
+     Bystanders:array of TRNLHost;
+     Candidates:TRNLCandidates;
+     Address:TRNLAddress;
+     Peer:TRNLPeer;
+     Event:TRNLHostEvent;
+     StartTime:TRNLTime;
+     Index:TRNLSizeInt;
+ begin
+
+  aTotal:=0;
+  aMaximum:=0;
+
+  Bystanders:=nil;
+  Candidates:=nil;
+
+  Instance:=TRNLInstance.Create;
+  try
+   Network:=TRNLVirtualNetwork.Create(Instance);
+   try
+
+    SetLength(Bystanders,COUNT_BYSTANDERS);
+    for Index:=0 to COUNT_BYSTANDERS-1 do begin
+     Bystanders[Index]:=nil;
+    end;
+    try
+
+     FillChar(Address,SizeOf(TRNLAddress),#0);
+     Network.AddressSetHost(Address,'127.0.0.1');
+
+     SetLength(Candidates,COUNT_BYSTANDERS);
+     for Index:=0 to COUNT_BYSTANDERS-1 do begin
+      Bystanders[Index]:=TRNLHost.Create(Instance,Network);
+      Bystanders[Index].Address.Host:=Address.Host;
+      Bystanders[Index].Address.Port:=FIRST_BYSTANDER_PORT+Index;
+      Bystanders[Index].ProtocolID:=BYSTANDER_PROTOCOL_ID;
+      Bystanders[Index].Start(RNL_HOST_ADDRESS_FAMILY_WORK_MODE_IPV4_ONLY);
+      FillChar(Candidates[Index],SizeOf(TRNLCandidate),#0);
+      Candidates[Index].Address:=Address;
+      Candidates[Index].Address.Port:=FIRST_BYSTANDER_PORT+Index;
+      Candidates[Index].Kind:=RNL_CANDIDATE_KIND_HOST;
+      Candidates[Index].Priority:=TRNLCandidateUtils.Priority(RNL_CANDIDATE_KIND_HOST,Index);
+     end;
+
+     Client:=TRNLHost.Create(Instance,Network);
+     try
+
+      Client.Address.Host:=Address.Host;
+      Client.Address.Port:=CLIENT_PORT;
+      Client.MaximumCandidatesPerHandshakeRound:=aMaximumPerRound;
+      Client.Start(RNL_HOST_ADDRESS_FAMILY_WORK_MODE_IPV4_ONLY);
+
+      Peer:=Client.ConnectViaCandidates(Candidates);
+      if assigned(Peer) then begin
+       Peer.IncRef;
+       try
+
+        StartTime:=Instance.Time;
+        Event.Initialize;
+        try
+         repeat
+          while Client.Service(Event,0)=RNL_HOST_SERVICE_STATUS_EVENT do begin
+           Event.Free;
+          end;
+          for Index:=0 to COUNT_BYSTANDERS-1 do begin
+           while Bystanders[Index].Service(Event,0)=RNL_HOST_SERVICE_STATUS_EVENT do begin
+            Event.Free;
+           end;
+          end;
+          Sleep(1);
+         until TRNLTime.RelativeDifference(Instance.Time,StartTime)>=FAN_OUT_MILLISECONDS;
+        finally
+         Event.Free;
+        end;
+
+       finally
+        Peer.DecRef;
+       end;
+      end;
+
+      for Index:=0 to COUNT_BYSTANDERS-1 do begin
+       inc(aTotal,Bystanders[Index].TotalReceivedData);
+       if aMaximum<Bystanders[Index].TotalReceivedData then begin
+        aMaximum:=Bystanders[Index].TotalReceivedData;
+       end;
+      end;
+
+     finally
+      FreeAndNil(Client);
+     end;
+
+    finally
+     for Index:=0 to COUNT_BYSTANDERS-1 do begin
+      FreeAndNil(Bystanders[Index]);
+     end;
+     Bystanders:=nil;
+     Candidates:=nil;
+    end;
+
+   finally
+    FreeAndNil(Network);
+   end;
+  finally
+   FreeAndNil(Instance);
+  end;
+
+ end;
+
+begin
+
+ TestBegin('fanning out over a long candidate list stays bounded');
+ Watchdog:=TRNLTestWatchdog.Create('candidate fan out cost',120000);
+ try
+
+  Run(0,UnboundedTotal,UnboundedMaximum);
+  Run(MAXIMUM_PER_ROUND,BoundedTotal,BoundedMaximum);
+
+  Info('candidates: '+TRNLRawByteString(IntToStr(COUNT_BYSTANDERS))+
+       ', none of them answering, over '+TRNLRawByteString(IntToStr(FAN_OUT_MILLISECONDS))+' ms');
+  Info('without a bound: '+TRNLRawByteString(IntToStr(UnboundedTotal))+
+       ' bytes in total, at most '+TRNLRawByteString(IntToStr(UnboundedMaximum))+
+       ' bytes at a single address');
+  Info('at most '+TRNLRawByteString(IntToStr(MAXIMUM_PER_ROUND))+
+       ' per round: '+TRNLRawByteString(IntToStr(BoundedTotal))+
+       ' bytes in total, at most '+TRNLRawByteString(IntToStr(BoundedMaximum))+
+       ' bytes at a single address');
+
+  if not Check(UnboundedTotal>0,'the unbounded run has to have produced traffic at all') then begin
+   exit;
+  end;
+
+  // Four out of sixteen per round, so a quarter is what is expected; halved is the assertion, which
+  // leaves room for a round more or less on either side without turning this into a timing test
+  CheckAtMostInt64(BoundedTotal,UnboundedTotal div 2,
+                   'the bound has to show in what leaves the host');
+
+  CheckAtMostInt64(BoundedMaximum,UnboundedMaximum div 2,
+                   'and in what any single address in the list gets to see');
+
+  // Every entry still has to be reached, just spread over rounds, because one of them may well be
+  // the address the connection is actually going to come up on
+  CheckAtLeastInt64(BoundedTotal,TRNLInt64(COUNT_BYSTANDERS)*RNL_TEST_HANDSHAKE_PACKET_SIZE,
+                    'and every candidate still has to have been served at least once');
+
+ finally
+  FreeAndNil(Watchdog);
+  TestEnd;
+ end;
+
+end;
+
+// ---------------------------------------------------------------------------------------
 // Peer capacity
 // ---------------------------------------------------------------------------------------
 
@@ -3253,6 +3541,161 @@ begin
 
 end;
 
+procedure TestSimultaneousConnectResolvesToOneConnection;
+const HOST_A_PORT=18470;
+      HOST_B_PORT=18471;
+var Instance:TRNLInstance;
+    Network:TRNLVirtualNetwork;
+    HostA,HostB:TRNLHost;
+    AddressA,AddressB:TRNLAddress;
+    PeerA,PeerB:TRNLPeer;
+    Event:TRNLHostEvent;
+    StartTime:TRNLTime;
+    CountApprovalsA,CountIncomingA,CountApprovalsB,CountIncomingB:TRNLSizeInt;
+    Watchdog:TRNLTestWatchdog;
+
+ function CandidateOf(const aAddress:TRNLAddress):TRNLCandidates;
+ begin
+  result:=nil;
+  SetLength(result,1);
+  FillChar(result[0],SizeOf(TRNLCandidate),#0);
+  result[0].Address:=aAddress;
+  result[0].Kind:=RNL_CANDIDATE_KIND_HOST;
+  result[0].Priority:=TRNLCandidateUtils.Priority(RNL_CANDIDATE_KIND_HOST,0);
+ end;
+
+ procedure Pump(const aHost:TRNLHost;var aCountApprovals,aCountIncoming:TRNLSizeInt);
+ begin
+  while aHost.Service(Event,0)=RNL_HOST_SERVICE_STATUS_EVENT do begin
+   case Event.Type_ of
+    RNL_HOST_EVENT_TYPE_PEER_APPROVAL:begin
+     inc(aCountApprovals);
+    end;
+    RNL_HOST_EVENT_TYPE_PEER_CONNECT:begin
+     inc(aCountIncoming);
+    end;
+    else begin
+    end;
+   end;
+   Event.Free;
+  end;
+  Event.Free;
+ end;
+
+begin
+
+ TestBegin('two hosts connecting to each other at once end up with one connection');
+ Watchdog:=TRNLTestWatchdog.Create('simultaneous connect',120000);
+ try
+
+  CountApprovalsA:=0;
+  CountIncomingA:=0;
+  CountApprovalsB:=0;
+  CountIncomingB:=0;
+
+  Instance:=TRNLInstance.Create;
+  try
+   Network:=TRNLVirtualNetwork.Create(Instance);
+   try
+
+    FillChar(AddressA,SizeOf(TRNLAddress),#0);
+    Network.AddressSetHost(AddressA,'127.0.0.1');
+    AddressB:=AddressA;
+    AddressA.Port:=HOST_A_PORT;
+    AddressB.Port:=HOST_B_PORT;
+
+    HostA:=TRNLHost.Create(Instance,Network);
+    try
+     HostA.Address.Host:=AddressA.Host;
+     HostA.Address.Port:=HOST_A_PORT;
+     HostA.Start(RNL_HOST_ADDRESS_FAMILY_WORK_MODE_IPV4_ONLY);
+
+     HostB:=TRNLHost.Create(Instance,Network);
+     try
+      HostB.Address.Host:=AddressB.Host;
+      HostB.Address.Port:=HOST_B_PORT;
+      HostB.Start(RNL_HOST_ADDRESS_FAMILY_WORK_MODE_IPV4_ONLY);
+
+      // Both at once, which is what two peers that punched at each other would do
+      PeerA:=HostA.ConnectViaCandidates(CandidateOf(AddressB));
+      PeerB:=HostB.ConnectViaCandidates(CandidateOf(AddressA));
+
+      if not Check(assigned(PeerA) and assigned(PeerB),
+                   'both sides can start an attempt') then begin
+       exit;
+      end;
+      PeerA.IncRef;
+      PeerB.IncRef;
+      try
+
+       StartTime:=Instance.Time;
+       Event.Initialize;
+       try
+        repeat
+         Pump(HostA,CountApprovalsA,CountIncomingA);
+         Pump(HostB,CountApprovalsB,CountIncomingB);
+         Sleep(1);
+        until TRNLTime.RelativeDifference(Instance.Time,StartTime)>=3000;
+       finally
+        Event.Free;
+       end;
+
+       Info('host A: '+TRNLRawByteString(IntToStr(CountApprovalsA))+' approval(s), '+
+            TRNLRawByteString(IntToStr(CountIncomingA))+' incoming connect(s); host B: '+
+            TRNLRawByteString(IntToStr(CountApprovalsB))+' approval(s), '+
+            TRNLRawByteString(IntToStr(CountIncomingB))+' incoming connect(s)');
+       Info('resolution: A won '+TRNLRawByteString(IntToStr(HostA.TotalSimultaneousConnectsWon))+
+            ' and gave up '+TRNLRawByteString(IntToStr(HostA.TotalSimultaneousConnectsGivenUp))+
+            ', B won '+TRNLRawByteString(IntToStr(HostB.TotalSimultaneousConnectsWon))+
+            ' and gave up '+TRNLRawByteString(IntToStr(HostB.TotalSimultaneousConnectsGivenUp)));
+
+       // Exactly one of the two has to give way, because the salt comparison is antisymmetric
+       CheckEqualsInt64(HostA.TotalSimultaneousConnectsGivenUp+HostB.TotalSimultaneousConnectsGivenUp,1,
+                        'exactly one of the two gives way');
+
+       CheckAtLeastInt64(HostA.TotalSimultaneousConnectsWon+HostB.TotalSimultaneousConnectsWon,1,
+                         'and the other one keeps its own attempt');
+
+       // The point of the whole thing: one connection, not two. One side ends up as the initiator
+       // and sees an approval, the other one as the responder and sees an incoming connect. Without
+       // the tie breaker both handshakes run to completion and every one of these is two.
+       CheckEqualsInt64(CountApprovalsA+CountApprovalsB,1,'exactly one connection is approved');
+
+       CheckEqualsInt64(CountIncomingA+CountIncomingB,1,'and exactly one is taken as incoming');
+
+       // And the two are the two ends of the same connection, not two connections of which each
+       // side happens to see one
+       CheckEqualsInt64(CountApprovalsA+CountIncomingA,1,'host A holds exactly one end of it');
+
+       CheckEqualsInt64(CountApprovalsB+CountIncomingB,1,'and host B the other one');
+
+      finally
+       PeerA.DecRef;
+       PeerB.DecRef;
+      end;
+
+     finally
+      FreeAndNil(HostB);
+     end;
+
+    finally
+     FreeAndNil(HostA);
+    end;
+
+   finally
+    FreeAndNil(Network);
+   end;
+  finally
+   FreeAndNil(Instance);
+  end;
+
+ finally
+  FreeAndNil(Watchdog);
+  TestEnd;
+ end;
+
+end;
+
 procedure TestHolePunchingOpensTheWayForAnIncomingConnection;
 const INSIDE_HOST='10.0.0.2';
       EXTERNAL_HOST='198.51.100.1';
@@ -3285,6 +3728,7 @@ var Instance:TRNLInstance;
 
  function CandidateOf(const aAddress:TRNLAddress):TRNLCandidates;
  begin
+  result:=nil;
   SetLength(result,1);
   FillChar(result[0],SizeOf(TRNLCandidate),#0);
   result[0].Address:=aAddress;
@@ -4843,6 +5287,8 @@ begin
  TestCandidatePriorityOrderAndSerialisation;
  TestGatherCandidatesFindsHostAndServerReflexive;
  TestHolePunchingOpensTheWayForAnIncomingConnection;
+ TestCandidateFanOutStaysBoundedForALongCandidateList;
+ TestSimultaneousConnectResolvesToOneConnection;
 
  // The rate limiters, on their own before anything drives them over a network
  TestBandwidthRateLimiterHonoursItsPeriodLength;
@@ -4892,6 +5338,7 @@ begin
  // Peer capacity and connection flooding protection
  TestHostAcceptsExactlyItsConfiguredPeerCapacity;
  TestConnectionAttemptHistoryStaysInsideItsRingBuffer;
+ TestRepeatedHandshakeRequestsDoNotEatTheFloodingBudget;
 
  // Address changes, disconnecting and exactly once delivery
  TestPeerFollowsAnAuthenticatedAddressChange;
