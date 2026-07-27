@@ -2184,93 +2184,177 @@ end;
 
 // A reliable channel promises every message exactly once. On an unordered one the payload is
 // handed to the application as soon as it arrives, rather than in sequence, so a retransmission
-// which arrives while the original is still inside the receive window has to be recognised as the
-// duplicate it is. The replay window one layer below does not help here, because a retransmission
-// carries a fresh encrypted packet sequence number and is therefore not a replay at all.
+// which arrives while the original is still inside the receive window has to be recognised as
+// the duplicate it is. The replay window one layer below does not help here, because a
+// retransmission carries a fresh encrypted packet sequence number and is therefore no replay.
 //
-// Packet loss is what produces the situation: whenever the payload arrives but its acknowledgement
-// gets lost, the counter side retransmits something which has already been delivered.
+// Reaching that state needs three things at once, which is why plain random packet loss is a
+// poor way to ask for it: the loss has to hit the right things, and if it hits the payload
+// instead of only the acknowledgement, then the retransmission is not a duplicate at all.
+//
+//   1. an earlier block packet has to be missing, so that the receive window can not advance and
+//      therefore keeps the later one in its slot
+//   2. a later block packet has to arrive and be delivered
+//   3. the acknowledgement of that later one has to get lost, so that it is retransmitted
+//
+// All three are arranged deterministically here. The first message is made permanently
+// undeliverable through its size, which parks the window base in front of it for good, and the
+// acknowledgements towards the client are then dropped for a while, which is what forces the
+// retransmission of the second message.
 procedure TestReliableUnorderedChannelDeliversEachMessageOnce;
-const COUNT_MESSAGES=20;
-      MESSAGE_PADDING_SIZE=600;
+const SERVER_PORT=18254;
+      CLIENT_PORT=18255;
+      // Everything above this never leaves, everything below it passes
+      DATAGRAM_LIMIT=400;
+      // Large enough for two separate purposes at once. Its datagram has to end up above the
+      // limit, so that its block packet can never be delivered and the window base stays parked
+      // in front of it. And it has to leave so little room in a datagram of the default MTU that
+      // the second message can not be appended alongside it, because otherwise both block
+      // packets travel in one single datagram, that one datagram is over the limit as a whole,
+      // and then neither of the two arrives.
+      BLOCKING_MESSAGE_PADDING_SIZE=780;
+      // Small enough to fit into a datagram below the limit all by itself
+      DELIVERED_MESSAGE_PADDING_SIZE=64;
+      // Effectively everything towards the client for the duration of the interesting window.
+      // It has to be set up before the payload is even sent, because an acknowledgement is small
+      // enough to slip below the datagram limit, and once the client has seen it, it has no
+      // reason left to retransmit anything.
+      COUNT_ACKNOWLEDGEMENT_DATAGRAMS_TO_DROP=1000;
+      // Long enough for several retransmission timeouts of the second message, and short enough
+      // to stay well below the connection timeout, since the client hears nothing at all here
+      BLACKOUT_MILLISECONDS=2500;
 var Instance:TRNLInstance;
     VirtualNetwork:TRNLVirtualNetwork;
-    Simulator:TRNLNetworkInterferenceSimulator;
+    FaultInjector:TRNLNetworkFaultInjector;
     HostPair:TRNLTestHostPair;
-    Seen:TStringList;
-    Index,CountDuplicates:TRNLSizeInt;
+    ClientAddress:TRNLAddress;
+    BlockingMessage,DeliveredMessage:TRNLRawByteString;
     ElapsedMilliseconds:TRNLInt64;
+    Index,CountDeliveries:TRNLSizeInt;
     Watchdog:TRNLTestWatchdog;
 begin
 
  TestBegin('a reliable unordered channel delivers each message exactly once');
- Watchdog:=TRNLTestWatchdog.Create('exactly once delivery',180000);
+ Watchdog:=TRNLTestWatchdog.Create('exactly once delivery',120000);
  try
 
   Instance:=TRNLInstance.Create;
   try
    VirtualNetwork:=TRNLVirtualNetwork.Create(Instance);
    try
-    Simulator:=TRNLNetworkInterferenceSimulator.Create(Instance,VirtualNetwork);
+    FaultInjector:=TRNLNetworkFaultInjector.Create(Instance,VirtualNetwork);
     try
 
-     Simulator.SimulatedIncomingPacketLossProbabilityFactor:=PROBABILITY_THIRTY_PERCENT;
-     Simulator.SimulatedOutgoingPacketLossProbabilityFactor:=PROBABILITY_THIRTY_PERCENT;
-
-     HostPair:=TRNLTestHostPair.Create(Instance,Simulator);
+     HostPair:=TRNLTestHostPair.Create(Instance,FaultInjector,SERVER_PORT,CLIENT_PORT);
      try
 
-      if not Check(HostPair.Connect(20000),'the handshake must survive the packet loss') then begin
+      if not Check(HostPair.Connect(5000),'the handshake must succeed without any injected faults') then begin
        exit;
       end;
 
-      for Index:=1 to COUNT_MESSAGES do begin
-       HostPair.ClientPeer.Channels[RNL_TEST_HOST_PAIR_CHANNEL_RELIABLE_UNORDERED].SendMessageRawByteString(TestMessageText(Index,MESSAGE_PADDING_SIZE));
-      end;
+      FaultInjector.AddressSetHost(ClientAddress,'127.0.0.1');
+      ClientAddress.Port:=CLIENT_PORT;
 
-      if not Check(HostPair.PumpUntilServerReceived(COUNT_MESSAGES,120000,ElapsedMilliseconds),
+      BlockingMessage:=TestMessageText(1,BLOCKING_MESSAGE_PADDING_SIZE);
+      DeliveredMessage:=TestMessageText(2,DELIVERED_MESSAGE_PADDING_SIZE);
+
+      Info('peer MTU: '+TRNLRawByteString(IntToStr(HostPair.ClientPeer.MTU))+
+           ', blocking message: '+TRNLRawByteString(IntToStr(length(BlockingMessage)))+
+           ' bytes, delivered message: '+TRNLRawByteString(IntToStr(length(DeliveredMessage)))+
+           ' bytes, datagram limit: '+TRNLRawByteString(IntToStr(DATAGRAM_LIMIT))+' bytes');
+
+      FaultInjector.MaximumDatagramSize:=DATAGRAM_LIMIT;
+
+      // Both of these have to be in place before anything is sent
+      FaultInjector.DropNextOutgoingDatagramsToAddress(ClientAddress,COUNT_ACKNOWLEDGEMENT_DATAGRAMS_TO_DROP);
+
+      // The blocking one first, so that it takes the lower block packet sequence number
+      HostPair.ClientPeer.Channels[RNL_TEST_HOST_PAIR_CHANNEL_RELIABLE_UNORDERED].SendMessageRawByteString(BlockingMessage);
+      HostPair.ClientPeer.Channels[RNL_TEST_HOST_PAIR_CHANNEL_RELIABLE_UNORDERED].SendMessageRawByteString(DeliveredMessage);
+
+      if not Check(HostPair.PumpUntilServerReceived(1,10000,ElapsedMilliseconds),
                    'the host service loop must stay alive') then begin
        exit;
       end;
 
-      // And a while longer, so that any late duplicate would still show up
-      if not Check(HostPair.Pump(2000),'the host service loop must stay alive') then begin
+      Info('oversized datagrams rejected: '+TRNLRawByteString(IntToStr(FaultInjector.CountOversizedDatagrams)));
+      Info('messages delivered so far: '+TRNLRawByteString(IntToStr(HostPair.ServerReceivedMessages.Count)));
+
+      CheckAtLeastInt64(FaultInjector.CountOversizedDatagrams,1,
+                        'the blocking message must actually have been kept from being delivered');
+
+      if not CheckEqualsInt64(HostPair.ServerReceivedMessages.Count,1,
+                              'the second message must have been delivered while the first one is still missing') then begin
        exit;
       end;
 
-      Info('received '+TRNLRawByteString(IntToStr(HostPair.ServerReceivedMessages.Count))+
-           ' message(s) of '+TRNLRawByteString(IntToStr(COUNT_MESSAGES))+' sent, in '+
-           TRNLRawByteString(IntToStr(ElapsedMilliseconds))+' ms');
-
-      Seen:=TStringList.Create;
-      try
-       CountDuplicates:=0;
-       for Index:=0 to HostPair.ServerReceivedMessages.Count-1 do begin
-        if Seen.IndexOf(HostPair.ServerReceivedMessages[Index])>=0 then begin
-         inc(CountDuplicates);
-        end else begin
-         Seen.Add(HostPair.ServerReceivedMessages[Index]);
-        end;
-       end;
-       Info('distinct messages: '+TRNLRawByteString(IntToStr(Seen.Count))+
-            ', duplicates: '+TRNLRawByteString(IntToStr(CountDuplicates)));
-       CheckEqualsInt64(CountDuplicates,0,
-                        'a reliable channel must not hand the same message to the application twice');
-       CheckEqualsInt64(Seen.Count,COUNT_MESSAGES,
-                        'every sent message must arrive exactly once');
-      finally
-       FreeAndNil(Seen);
+      // The client hears nothing at all during this window, so it retransmits the block packet
+      // which the server has already delivered
+      if not Check(HostPair.Pump(BLACKOUT_MILLISECONDS),'the host service loop must stay alive') then begin
+       exit;
       end;
 
-      CheckEqualsInt64(HostPair.ServerReceivedMessages.Count,COUNT_MESSAGES,
-                       'the total number of delivered messages must match the number sent');
+      Info('datagrams dropped towards the client: '+TRNLRawByteString(IntToStr(FaultInjector.CountDeterministicallyDroppedDatagrams)));
+      Info('messages delivered in total: '+TRNLRawByteString(IntToStr(HostPair.ServerReceivedMessages.Count)));
+
+      CheckAtLeastInt64(FaultInjector.CountDeterministicallyDroppedDatagrams,1,
+                        'the test must actually have dropped the acknowledgements it intended to drop');
+
+      CountDeliveries:=0;
+      for Index:=0 to HostPair.ServerReceivedMessages.Count-1 do begin
+       if TRNLRawByteString(HostPair.ServerReceivedMessages[Index])=DeliveredMessage then begin
+        inc(CountDeliveries);
+       end;
+      end;
+
+      Info('deliveries of the retransmitted message: '+TRNLRawByteString(IntToStr(CountDeliveries)));
+
+      CheckEqualsInt64(CountDeliveries,1,
+                       'a retransmission of a block packet which is still inside the receive window '+
+                       'must not hand the very same message to the application a second time');
+
+      CheckEqualsInt64(HostPair.ServerReceivedMessages.Count,1,
+                       'and nothing else may have been delivered either, since the first message '+
+                       'still can not get through');
+
+      // Once the datagrams fit again and the client can hear again, the blocked message has to
+      // arrive as well, exactly once
+      FaultInjector.MaximumDatagramSize:=0;
+      FaultInjector.DropNextOutgoingDatagramsToAddress(ClientAddress,0);
+
+      if not Check(HostPair.PumpUntilServerReceived(2,20000,ElapsedMilliseconds),
+                   'the host service loop must stay alive while recovering') then begin
+       exit;
+      end;
+
+      if not Check(HostPair.Pump(1500),'the host service loop must stay alive') then begin
+       exit;
+      end;
+
+      Info('messages delivered after the recovery: '+TRNLRawByteString(IntToStr(HostPair.ServerReceivedMessages.Count)));
+
+      CheckEqualsInt64(HostPair.ServerReceivedMessages.Count,2,
+                       'both messages must have arrived exactly once each after the recovery');
+
+      CountDeliveries:=0;
+      for Index:=0 to HostPair.ServerReceivedMessages.Count-1 do begin
+       if TRNLRawByteString(HostPair.ServerReceivedMessages[Index])=BlockingMessage then begin
+        inc(CountDeliveries);
+       end;
+      end;
+
+      CheckEqualsInt64(CountDeliveries,1,
+                       'the formerly blocked message must have arrived exactly once as well');
+
+      CheckEqualsInt64(HostPair.CountServerDisconnectEvents,0,
+                       'none of this may drop the connection');
 
      finally
       FreeAndNil(HostPair);
      end;
 
     finally
-     FreeAndNil(Simulator);
+     FreeAndNil(FaultInjector);
     end;
    finally
     FreeAndNil(VirtualNetwork);
@@ -2286,14 +2370,6 @@ begin
 
 end;
 
-// ---------------------------------------------------------------------------------------
-// Compression
-// ---------------------------------------------------------------------------------------
-
-// The compressed receive path replaces the payload pointer with the decompression buffer and
-// releases the original packet data, which makes everything still pointing into that packet data
-// dangle. Nothing exercised this path before, so it is worth covering on its own, with payloads
-// which actually do compress.
 procedure TestCompressedTransferStaysIntact;
 const COUNT_MESSAGES=20;
 var Instance:TRNLInstance;

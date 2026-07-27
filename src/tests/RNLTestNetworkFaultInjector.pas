@@ -75,6 +75,8 @@ type TRNLNetworkFaultInjector=class(TRNLNetwork)
        // actually costs
        fCountOutgoingDatagramsToDrop:TRNLSizeInt;
        fMinimumSizeOfOutgoingDatagramsToDrop:TRNLSizeUInt;
+       fRestrictDropToAddress:boolean;
+       fDropToAddress:TRNLAddress;
 
        // Rewrites the source address of every datagram coming from fRebindFromAddress, which is
        // what a NAT rebinding, a carrier grade NAT reassigning its ports, or a handover between
@@ -108,6 +110,14 @@ type TRNLNetworkFaultInjector=class(TRNLNetwork)
        // test can target its own payload carrying datagrams precisely.
        procedure DropNextOutgoingDatagrams(const aCount:TRNLSizeInt;
                                            const aMinimumSize:TRNLSizeUInt=0);
+
+       // The same, but restricted to datagrams headed for one particular address. Since both
+       // hosts of a test share one network, the destination address is what tells the two
+       // directions apart, and that is what it takes to lose an acknowledgement of one side
+       // without touching the payload of the other.
+       procedure DropNextOutgoingDatagramsToAddress(const aAddress:TRNLAddress;
+                                                   const aCount:TRNLSizeInt;
+                                                   const aMinimumSize:TRNLSizeUInt=0);
 
        // Models a complete address change of one side, the way a NAT rebinding or a network
        // handover really behaves, which needs all three of these at once:
@@ -180,6 +190,7 @@ begin
 
  fCountOutgoingDatagramsToDrop:=0;
  fMinimumSizeOfOutgoingDatagramsToDrop:=0;
+ fRestrictDropToAddress:=false;
 
  fRebindEnabled:=false;
 
@@ -218,6 +229,22 @@ begin
  try
   fCountOutgoingDatagramsToDrop:=aCount;
   fMinimumSizeOfOutgoingDatagramsToDrop:=aMinimumSize;
+  fRestrictDropToAddress:=false;
+ finally
+  fLock.Release;
+ end;
+end;
+
+procedure TRNLNetworkFaultInjector.DropNextOutgoingDatagramsToAddress(const aAddress:TRNLAddress;
+                                                                     const aCount:TRNLSizeInt;
+                                                                     const aMinimumSize:TRNLSizeUInt=0);
+begin
+ fLock.Acquire;
+ try
+  fCountOutgoingDatagramsToDrop:=aCount;
+  fMinimumSizeOfOutgoingDatagramsToDrop:=aMinimumSize;
+  fDropToAddress:=aAddress;
+  fRestrictDropToAddress:=true;
  finally
   fLock.Release;
  end;
@@ -381,7 +408,9 @@ begin
  fLock.Acquire;
  try
   if (fCountOutgoingDatagramsToDrop>0) and
-     (aDataLength>=TRNLSizeInt(fMinimumSizeOfOutgoingDatagramsToDrop)) then begin
+     (aDataLength>=TRNLSizeInt(fMinimumSizeOfOutgoingDatagramsToDrop)) and
+     ((not fRestrictDropToAddress) or
+      (assigned(aAddress) and aAddress^.Equals(fDropToAddress))) then begin
    dec(fCountOutgoingDatagramsToDrop);
    inc(fCountDeterministicallyDroppedDatagrams);
    DoDrop:=true;
