@@ -1727,6 +1727,7 @@ type PRNLVersion=^TRNLVersion;
        procedure Reset(const aAssociatedDataSize:TRNLSizeUInt=0;const aBufferLength:TRNLSizeUInt=SizeOf(TRNLPacketBuffer));
        function HasSpaceFor(const aDataLength:TRNLSizeUInt):boolean;
        function PayloadSize:TRNLSizeUInt;
+       function MaximumPayloadSize:TRNLSizeUInt;
        function Write(const aData;const aDataLength:TRNLSizeUInt):TRNLSizeUInt;
        property Size:TRNLSizeUInt read fSize;
      end;
@@ -3086,6 +3087,8 @@ type PRNLVersion=^TRNLVersion;
 
        function GetMaximumUnfragmentedMessageSize:TRNLSizeUInt; override;
 
+       function GetMaximumFragmentedMessageSize:TRNLSizeUInt;
+
        procedure DispatchOutgoingBlockPacketsTimeout;
 
        procedure DispatchOutgoingAcknowledgementBlockPackets;
@@ -3107,6 +3110,12 @@ type PRNLVersion=^TRNLVersion;
        constructor Create(const aPeer:TRNLPeer;const aChannelNumber:TRNLUInt16); override;
 
        destructor Destroy; override;
+
+       // The largest message which this channel can ever transmit. A reliable message has to
+       // fit into the send window as a whole, because it is split into block packets in one
+       // go, so a message needing more block packets than the window has slots can never be
+       // sent at all, no matter how long one waits.
+       property MaximumMessageSize:TRNLSizeUInt read GetMaximumFragmentedMessageSize;
 
      end;
 
@@ -3449,6 +3458,14 @@ type PRNLVersion=^TRNLVersion;
 
        fMTUProbeSequenceNumber:TRNLSequenceNumber;
 
+       // The sequence number and the size of the MTU probe exchange which the counter side
+       // started, as opposed to fMTUProbeSequenceNumber, which belongs to the exchange this
+       // side started. The responding side of an exchange needs its own copy, because the
+       // even numbered phases travel towards it and it has no probing state of its own.
+       fRemoteMTUProbeSequenceNumber:TRNLSequenceNumber;
+
+       fRemoteMTUProbeSize:TRNLSizeUInt;
+
        fMTUProbeTryIterationsPerMTUProbeSize:TRNLUInt32;
 
        fMTUProbeRemainingTryIterations:TRNLUInt32;
@@ -3533,6 +3550,9 @@ type PRNLVersion=^TRNLVersion;
       published
        property ReferenceCounter:TRNLUInt32 read fReferenceCounter write fReferenceCounter;
        property LocalPeerID:TRNLID read fLocalPeerID;
+       // The negotiated MTU of this peer, which starts out at the MTU of its host and is only
+       // ever changed by a completed MTU probe exchange
+       property MTU:TRNLSizeUInt read fMTU;
        property RemotePeerID:TRNLID read fRemotePeerID;
        property Host:TRNLHost read fHost;
        property RemoteHostSalt:TRNLUInt64 read fRemoteHostSalt write fRemoteHostSalt;
@@ -3721,6 +3741,8 @@ type PRNLVersion=^TRNLVersion;
 
        fTotalHardReceiveFailures:TRNLUInt64;
 
+       fTotalDroppedOutgoingMessages:TRNLUInt64;
+
        fConnectionChallengeDifficultyLevel:TRNLUInt32;
 
        fConnectionAttemptsPerSecondChallengeDifficultyFactor:TRNLUInt32;
@@ -3895,6 +3917,9 @@ type PRNLVersion=^TRNLVersion;
        // service loop with RNL_HOST_SERVICE_STATUS_ERROR
        property TotalHardSendFailures:TRNLUInt64 read fTotalHardSendFailures;
        property TotalHardReceiveFailures:TRNLUInt64 read fTotalHardReceiveFailures;
+       // Number of outgoing messages which were dropped because they violated a size
+       // constraint of their channel, most notably by not fitting into the send window
+       property TotalDroppedOutgoingMessages:TRNLUInt64 read fTotalDroppedOutgoingMessages;
       published
        property Instance:TRNLInstance read fInstance;
        property Network:TRNLNetwork read fNetwork;
@@ -3908,6 +3933,10 @@ type PRNLVersion=^TRNLVersion;
        property IncomingBandwidthRate:TRNLUInt32 read GetIncomingBandwidthRate;
        property OutgoingBandwidthRate:TRNLUInt32 read GetOutgoingBandwidthRate;
        property ReliableChannelBlockPacketWindowSize:TRNLUInt32 read fReliableChannelBlockPacketWindowSize write SetReliableChannelBlockPacketWindowSize;
+       // The library wide upper bound for a single message. Note that this is not the same as
+       // the limit of a reliable channel, which additionally has to fit the whole message into
+       // its send window at once, see TRNLPeerReliableChannel.MaximumMessageSize
+       property MaximumMessageSize:TRNLSizeUInt read fMaximumMessageSize write fMaximumMessageSize;
        property EncryptedPacketSequenceWindowSize:TRNLUInt32 read fEncryptedPacketSequenceWindowSize write SetEncryptedPacketSequenceWindowSize;
        property KeepAliveWindowSize:TRNLUInt32 read fKeepAliveWindowSize write SetKeepAliveWindowSize;
        property ReceiveBufferSize:TRNLUInt32 read fReceiveBufferSize write fReceiveBufferSize;
@@ -4180,7 +4209,14 @@ const RNLDiscoveryRequestSignature:TRNLDiscoverySignature=('R','N','L','D','R',#
         RNL_PEER_STATE_DISCONNECTION_PENDING
        ];
 
-      RNLKnownCommonMTUSizes:array[0..19] of TRNLUInt16=
+      // Probed from the largest entry downwards, and the first size which completes the whole
+      // probe exchange wins. Every entry must stay within RNL_MINIMUM_MTU..RNL_MAXIMUM_MTU,
+      // because anything above the maximum can never become the effective MTU anyway, it would
+      // only cost probe rounds and produce needlessly huge datagrams on the way there. The
+      // entries which used to live above the maximum were 4352 (FDDI), 4464 (token ring),
+      // 7981 (WLAN), 8192, 9190 and 9198 (ethernet jumbo frames), 16384, 32768 and 65535, so
+      // raising RNL_MAXIMUM_MTU is what to do if any of those should ever be reachable again.
+      RNLKnownCommonMTUSizes:array[0..10] of TRNLUInt16=
        (
         576,  // Internet Path MTU for X.25 (RFC 879)
         1024, // 1/64 of maximum
@@ -4192,16 +4228,7 @@ const RNLDiscoveryRequestSignature:TRNLDiscoverySignature=('R','N','L','D','R',#
         1501, // Minimum Ethernet Jumbo Frame MTU (1501 - 9198)
         2048, // 1/32 of maximum
         2304, // WLAN (802.11), the maximum MSDU size is 2304 before encryption. WEP will add 8 bytes, WPA-TKIP 20 bytes, and WPA2-CCMP 16 bytes.
-        4096, // 1/16 of maximum
-        4352, // FDDI
-        4464, // Token ring
-        7981, // WLAN
-        8192, // 1/8 of maximum
-        9190, // Maximum Ethernet Jumbo Frame MTU (1501 - 9198) - PPPoE header (8)
-        9198, // Maximum Ethernet Jumbo Frame MTU (1501 - 9198)
-        16384, // 1/4 of maximum
-        32768, // Half maximum
-        65535 // Maximum minus one (minus one because 0..65535 range of the 16-bit unsigned integer data fields here)
+        4096  // 1/16 of maximum, and RNL_MAXIMUM_MTU
        );
 
       OneDiv32Bit=1.0/TRNLInt64($100000000);
@@ -15130,6 +15157,18 @@ begin
  end;
 end;
 
+// The payload size which fits into a freshly reset buffer. Anything larger than this can never
+// be appended, no matter how often it is retried, so it has to be told apart from the merely
+// "does not fit into the remaining space right now" case
+function TRNLOutgoingPacketBuffer.MaximumPayloadSize:TRNLSizeUInt;
+begin
+ if fAssociatedDataSize<=fBufferLength then begin
+  result:=fBufferLength-fAssociatedDataSize;
+ end else begin
+  result:=0;
+ end;
+end;
+
 function TRNLOutgoingPacketBuffer.Write(const aData;const aDataLength:TRNLSizeUInt):TRNLSizeUInt;
 begin
  result:=TRNLSizeUInt(SizeOf(TRNLPacketBuffer))-fSize;
@@ -20737,6 +20776,18 @@ begin
                      SizeOf(TRNLPeerReliableChannelShortMessagePacketHeader));
 end;
 
+function TRNLPeerReliableChannel.GetMaximumFragmentedMessageSize:TRNLSizeUInt;
+begin
+ // One block packet per fragment, and all fragments of one message are created in a single
+ // dispatching round, so the whole message has to fit into the send window at once
+ result:=TRNLSizeUInt(fHost.fReliableChannelBlockPacketWindowSize)*
+         (fPeer.fMTU-(RNL_IP_HEADER_SIZE+
+                      RNL_UDP_HEADER_SIZE+
+                      SizeOf(TRNLProtocolNormalPacketHeader)+
+                      SizeOf(TRNLProtocolBlockPacketChannel)+
+                      SizeOf(TRNLPeerReliableChannelLongMessagePacketHeader)));
+end;
+
 procedure TRNLPeerReliableChannel.DispatchOutgoingBlockPacketsTimeout;
 var CurrentBlockPacketListNode,
     NextBlockPacketListNode:TRNLPeerBlockPacketCircularDoublyLinkedListNode;
@@ -21226,7 +21277,16 @@ begin
 
  while fOutgoingMessageQueue.Peek(Message) do begin
 
-  if assigned(Message) and ((Message.fDataLength>0) and (Message.fDataLength<=fHost.fMaximumMessageSize)) then begin
+  // A message needing more block packets than the send window has slots can never be sent,
+  // because all of its fragments are created in a single dispatching round. Without the
+  // window capacity check here such a message would sit at the head of this queue forever and
+  // would silently take every later message on this channel down with it, which looks exactly
+  // like a dead channel on an otherwise perfectly alive connection. It is dropped instead,
+  // like any other message which does not satisfy the size constraints of this channel.
+  if assigned(Message) and
+     (Message.fDataLength>0) and
+     (Message.fDataLength<=fHost.fMaximumMessageSize) and
+     (Message.fDataLength<=GetMaximumFragmentedMessageSize) then begin
 
    if Message.fDataLength<=MaximumShortMessageBlockPacketSize then begin
 
@@ -21264,6 +21324,11 @@ begin
        inc(fOutgoingMessageBlockPacketSequenceNumber);
 
        inc(fPeer.fUnacknowlegmentedBlockPackets);
+
+       // Without this the whole outgoing message queue would be converted in one go,
+       // regardless of the window, so that the message block packet sequence number could
+       // run arbitrarily far ahead of the one of the send window
+       dec(MaxPacketsToSend);
 
       finally
        fOutgoingBlockPacketQueue.Enqueue(BlockPacket);
@@ -21320,6 +21385,10 @@ begin
 
         inc(fPeer.fUnacknowlegmentedBlockPackets);
 
+        // One window slot per fragment, so that the check above stays meaningful for the
+        // next message of this same dispatching round
+        dec(MaxPacketsToSend);
+
        finally
         fOutgoingBlockPacketQueue.Enqueue(BlockPacket);
        end;
@@ -21343,6 +21412,8 @@ begin
    try
 
     fOutgoingMessageQueue.Dequeue;
+
+    inc(fHost.fTotalDroppedOutgoingMessages);
 
    finally
 
@@ -21647,7 +21718,16 @@ begin
 
  while fOutgoingMessageQueue.Peek(Message) do begin
 
-  if assigned(Message) and ((Message.fDataLength>0) and (Message.fDataLength<=fHost.fMaximumMessageSize)) then begin
+  // A message needing more block packets than the send window has slots can never be sent,
+  // because all of its fragments are created in a single dispatching round. Without the
+  // window capacity check here such a message would sit at the head of this queue forever and
+  // would silently take every later message on this channel down with it, which looks exactly
+  // like a dead channel on an otherwise perfectly alive connection. It is dropped instead,
+  // like any other message which does not satisfy the size constraints of this channel.
+  if assigned(Message) and
+     (Message.fDataLength>0) and
+     (Message.fDataLength<=fHost.fMaximumMessageSize) and
+     (Message.fDataLength<=GetMaximumFragmentedMessageSize) then begin
 
    if Message.fDataLength<=MaximumShortMessageBlockPacketSize then begin
 
@@ -21685,6 +21765,11 @@ begin
        inc(fOutgoingMessageBlockPacketSequenceNumber);
 
        inc(fPeer.fUnacknowlegmentedBlockPackets);
+
+       // Without this the whole outgoing message queue would be converted in one go,
+       // regardless of the window, so that the message block packet sequence number could
+       // run arbitrarily far ahead of the one of the send window
+       dec(MaxPacketsToSend);
 
       finally
        fOutgoingBlockPacketQueue.Enqueue(BlockPacket);
@@ -21741,6 +21826,10 @@ begin
 
         inc(fPeer.fUnacknowlegmentedBlockPackets);
 
+        // One window slot per fragment, so that the check above stays meaningful for the
+        // next message of this same dispatching round
+        dec(MaxPacketsToSend);
+
        finally
         fOutgoingBlockPacketQueue.Enqueue(BlockPacket);
        end;
@@ -21764,6 +21853,8 @@ begin
    try
 
     fOutgoingMessageQueue.Dequeue;
+
+    inc(fHost.fTotalDroppedOutgoingMessages);
 
    finally
 
@@ -22648,6 +22739,10 @@ begin
 
  fMTUProbeSequenceNumber:=$ffff;
 
+ fRemoteMTUProbeSequenceNumber:=$ffff;
+
+ fRemoteMTUProbeSize:=0;
+
  fSendNewHostBandwidthLimits:=false;
 
  fReceivedNewHostBandwidthLimitsSequenceNumber:=$ff;
@@ -22890,6 +22985,8 @@ end;
 procedure TRNLPeer.DispatchIncomingMTUProbeBlockPacket(const aIncomingBlockPacket:TRNLPeerBlockPacket);
 var OutgoingBlockPacket:TRNLPeerBlockPacket;
     HostEvent:TRNLHostEvent;
+    MTUProbeSize:TRNLSizeUInt;
+    MTUProbeSequenceNumber:TRNLUInt16;
 begin
 
 {$if defined(RNL_DEBUG) and defined(RNL_DEBUG_MTU)}
@@ -22903,14 +23000,52 @@ begin
  end;
 {$ifend}
 
- if ((aIncomingBlockPacket.fBlockPacket.MTUProbe.Phase and 1)<>0) and
-    (TRNLEndianness.LittleEndianToHost16(aIncomingBlockPacket.fBlockPacket.MTUProbe.SequenceNumber)<>fMTUProbeSequenceNumber.fValue) then begin
+ // The size is a raw wire value, so it has to be validated before it is either assigned to
+ // fMTU or used for any size arithmetic. A value below the minimum would underflow the
+ // unsigned header size subtractions all over the channel and packet code, and a value above
+ // the maximum would produce datagrams beyond what this side ever agreed to
+ MTUProbeSize:=TRNLEndianness.LittleEndianToHost16(aIncomingBlockPacket.fBlockPacket.MTUProbe.Size);
+
+ if (MTUProbeSize<RNL_MINIMUM_MTU) or (MTUProbeSize>RNL_MAXIMUM_MTU) then begin
   exit;
+ end;
+
+ MTUProbeSequenceNumber:=TRNLEndianness.LittleEndianToHost16(aIncomingBlockPacket.fBlockPacket.MTUProbe.SequenceNumber);
+
+ // An exchange runs 0 -> 1 -> 2 -> 3, where the even numbered phases travel towards the
+ // responding side and the odd numbered ones back towards the initiating side. Both sides
+ // therefore have to validate against different state: the initiator against the exchange it
+ // started itself, the responder against the phase 0 it accepted earlier.
+ //
+ // Validating the responder side matters, because phase 2 is what assigns the MTU there. With
+ // that phase unchecked, any peer could set the MTU of this side at any time, entirely
+ // unsolicited, without any probing having been started here, and to any value it likes.
+ if (aIncomingBlockPacket.fBlockPacket.MTUProbe.Phase and 1)<>0 then begin
+
+  if MTUProbeSequenceNumber<>fMTUProbeSequenceNumber.fValue then begin
+   exit;
+  end;
+
+ end else if aIncomingBlockPacket.fBlockPacket.MTUProbe.Phase=0 then begin
+
+  // A new exchange started by the counter side, so remember what was agreed on here
+  fRemoteMTUProbeSequenceNumber:=MTUProbeSequenceNumber;
+  fRemoteMTUProbeSize:=MTUProbeSize;
+
+ end else begin
+
+  // A later even numbered phase has to belong to the exchange accepted above, and it has to
+  // still be about the very same size
+  if (MTUProbeSequenceNumber<>fRemoteMTUProbeSequenceNumber.fValue) or
+     (MTUProbeSize<>fRemoteMTUProbeSize) then begin
+   exit;
+  end;
+
  end;
 
  case aIncomingBlockPacket.fBlockPacket.MTUProbe.Phase of
   2:begin
-   fMTU:=TRNLEndianness.LittleEndianToHost16(aIncomingBlockPacket.fBlockPacket.MTUProbe.Size);
+   fMTU:=MTUProbeSize;
    if assigned(fHost.fOnPeerMTU) then begin
     fHost.fOnPeerMTU(fHost,self,fMTU);
    end else begin
@@ -22927,7 +23062,7 @@ begin
    end;
   end;
   3..$ff:begin
-   fMTU:=TRNLEndianness.LittleEndianToHost16(aIncomingBlockPacket.fBlockPacket.MTUProbe.Size);
+   fMTU:=MTUProbeSize;
    if assigned(fHost.fOnPeerMTU) then begin
     fHost.fOnPeerMTU(fHost,self,fMTU);
    end else begin
@@ -22955,10 +23090,10 @@ begin
    OutgoingBlockPacket.fBlockPacket.MTUProbe.SequenceNumber:=aIncomingBlockPacket.fBlockPacket.MTUProbe.SequenceNumber;
    OutgoingBlockPacket.fBlockPacket.MTUProbe.Phase:=aIncomingBlockPacket.fBlockPacket.MTUProbe.Phase+1;
    OutgoingBlockPacket.fBlockPacket.MTUProbe.Size:=aIncomingBlockPacket.fBlockPacket.MTUProbe.Size;
-   OutgoingBlockPacket.fBlockPacketDataLength:=TRNLEndianness.LittleEndianToHost16(aIncomingBlockPacket.fBlockPacket.MTUProbe.Size)-(RNL_IP_HEADER_SIZE+
-                                                                                                                                     RNL_UDP_HEADER_SIZE+
-                                                                                                                                     SizeOf(TRNLProtocolNormalPacketHeader)+
-                                                                                                                                     SizeOf(TRNLProtocolBlockPacketMTUProbe));
+   OutgoingBlockPacket.fBlockPacketDataLength:=MTUProbeSize-(RNL_IP_HEADER_SIZE+
+                                                             RNL_UDP_HEADER_SIZE+
+                                                             SizeOf(TRNLProtocolNormalPacketHeader)+
+                                                             SizeOf(TRNLProtocolBlockPacketMTUProbe));
    SetLength(OutgoingBlockPacket.fBlockPacketData,OutgoingBlockPacket.fBlockPacketDataLength);
    OutgoingBlockPacket.fBlockPacket.MTUProbe.PayloadDataLength:=TRNLEndianness.LittleEndianToHost16(OutgoingBlockPacket.fBlockPacketDataLength);
    if OutgoingBlockPacket.fBlockPacketDataLength>0 then begin
@@ -23450,13 +23585,58 @@ end;
 
 function TRNLPeer.DispatchOutgoingBlockPackets(var aOutgoingPacketBuffer:TRNLOutgoingPacketBuffer):boolean;
 var OutgoingBlockPacket:TRNLPeerBlockPacket;
+    MaximumBlockPacketSize:TRNLSizeUInt;
+    IsOversized:boolean;
 begin
 
  result:=true;
 
- while fOutgoingBlockPackets.Peek(OutgoingBlockPacket) and
-       aOutgoingPacketBuffer.HasSpaceFor(OutgoingBlockPacket.Size) and
-       fOutgoingBlockPackets.Dequeue do begin
+ // The payload size which fits into a fresh datagram of the currently negotiated MTU
+ MaximumBlockPacketSize:=aOutgoingPacketBuffer.MaximumPayloadSize;
+
+ // Every path through this loop body either consumes the peeked block packet or leaves the
+ // loop, so that a block packet can never block this queue indefinitely
+ while fOutgoingBlockPackets.Peek(OutgoingBlockPacket) do begin
+
+  IsOversized:=false;
+
+  if not aOutgoingPacketBuffer.HasSpaceFor(OutgoingBlockPacket.Size) then begin
+
+   if (aOutgoingPacketBuffer.PayloadSize>0) or
+      (OutgoingBlockPacket.Size<=MaximumBlockPacketSize) then begin
+    // Only the remainder of this datagram is too small, so flush what has been collected so
+    // far and let the next round start over with a fresh datagram
+    break;
+   end;
+
+   // It does not even fit into a fresh datagram of the current MTU, which is what happens as
+   // soon as the MTU shrinks below the size of an already constructed block packet, for
+   // example because a second MTU probing run found a smaller path. Breaking out here would
+   // block this queue behind that block packet forever, and since every acknowledgement,
+   // every pong and every disconnect block of this peer goes through this very queue, the
+   // whole connection would go silent without a single error being reported anywhere.
+   //
+   // So it gets sent as its own oversized datagram instead. The MTU governs how large
+   // datagrams are built, it is not a hard limit of the socket: with MTUDoFragment left on,
+   // which is the default, IP fragmentation carries it, and if it does get dropped on the
+   // way, then the reliable layer retransmits it like any other lost packet.
+   aOutgoingPacketBuffer.Reset(SizeOf(TRNLProtocolNormalPacketHeader),
+                               SizeOf(TRNLPacketBuffer));
+
+   if not aOutgoingPacketBuffer.HasSpaceFor(OutgoingBlockPacket.Size) then begin
+    // Beyond even the physical packet buffer, so there is nothing which could be done with it
+    // here. Unreachable as long as the MTU stays clamped to RNL_MAXIMUM_MTU, since every
+    // channel derives its fragment sizes from the MTU.
+    break;
+   end;
+
+   IsOversized:=true;
+
+  end;
+
+  if not fOutgoingBlockPackets.Dequeue then begin
+   break;
+  end;
 
   try
 
@@ -23499,6 +23679,12 @@ begin
 
    end;
 
+  end;
+
+  if IsOversized then begin
+   // This datagram deliberately exceeds the negotiated MTU, so nothing else may be appended
+   // to it, it has to go out on its own
+   break;
   end;
 
  end;
@@ -23632,10 +23818,16 @@ begin
 
  fNextPingResendTime.fValue:=0;
 
+ // The ping is deliberately only gated by the keep alive window itself and by the two time
+ // conditions. Suppressing it while other traffic is pending would look like a reasonable
+ // optimization, but it makes the liveness detection of the connection depend on the
+ // correctness of the outgoing queues and of the unacknowledged block packet accounting: any
+ // block packet which gets stuck in a queue, and any accounting slip which leaves that
+ // counter above zero, would silently stop the pings forever. The connection would then look
+ // perfectly alive right up to the moment the connection timeout kills it, without a single
+ // ping ever having been sent again. A ping is a handful of bytes, so the optimization is not
+ // worth putting the liveness detection at the mercy of three other subsystems.
  if (TRNLInt8(TRNLUInt8(fOutgoingPingSequenceNumber-fIncomingPongSequenceNumber))<TRNLSizeInt(fHost.fKeepAliveWindowSize)) and
-    (fOutgoingBlockPackets.Count=0) and
-    (fOutgoingMTUProbeBlockPackets.Count=0) and
-    (fUnacknowlegmentedBlockPackets=0) and
     (fHost.fTime>=(fLastReceivedDataTime+fHost.fPingInterval)) and
     (fHost.fTime>=(fLastPingSentTime+fHost.fPingInterval)) then begin
 
@@ -24516,6 +24708,8 @@ begin
  fTotalHardSendFailures:=0;
 
  fTotalHardReceiveFailures:=0;
+
+ fTotalDroppedOutgoingMessages:=0;
 
  fConnectionCandidateHashTable:=nil;
 
@@ -26661,9 +26855,13 @@ begin
                     RNL_SOCKET_WAIT_CONDITION_IO_INTERRUPT,
                     RNL_SOCKET_WAIT_CONDITION_SERVICE_INTERRUPT];
 
+   // This must be the signed difference and not TRNLTime.Difference, which is an absolute
+   // value. NextTimeout was computed further above with an older fTime, so it can lie in the
+   // past by now, and an absolute difference would then make the host wait for exactly as
+   // long as it is already overdue, instead of continuing right away
    if not fNetwork.SocketWait(fSockets,
                               WaitConditions,
-                              TRNLTime.Difference(NextTimeout,fTime),
+                              Max(0,TRNLTime.RelativeDifference(NextTimeout,fTime)),
                               fNetworkEvent) then begin
     result:=RNL_HOST_SERVICE_STATUS_ERROR;
     exit;

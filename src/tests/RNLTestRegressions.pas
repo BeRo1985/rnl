@@ -1275,6 +1275,484 @@ begin
 
 end;
 
+
+// ---------------------------------------------------------------------------------------
+// Message size constraints
+// ---------------------------------------------------------------------------------------
+
+// A reliable message is split into block packets in one single dispatching round, so it has
+// to fit into the send window as a whole. A message needing more block packets than the window
+// has slots can therefore never be sent, no matter how long one waits.
+//
+// Such a message must not be allowed to sit at the head of the outgoing message queue, because
+// it would take every later message on that channel down with it, and the result looks exactly
+// like one dead channel on an otherwise perfectly healthy connection: no error, no event, no
+// disconnect, the pings keep flowing, and the payload silently stops.
+procedure TestOversizedReliableMessageDoesNotStallTheChannel;
+var Instance:TRNLInstance;
+    VirtualNetwork:TRNLVirtualNetwork;
+    HostPair:TRNLTestHostPair;
+    Channel:TRNLPeerReliableChannel;
+    MaximumMessageSize:TRNLSizeUInt;
+    Oversized,Payload:TRNLRawByteString;
+    ElapsedMilliseconds:TRNLInt64;
+    DroppedBefore:TRNLUInt64;
+    Watchdog:TRNLTestWatchdog;
+begin
+
+ TestBegin('an oversized reliable message does not stall its channel');
+ Watchdog:=TRNLTestWatchdog.Create('oversized reliable message',60000);
+ try
+
+  Instance:=TRNLInstance.Create;
+  try
+   VirtualNetwork:=TRNLVirtualNetwork.Create(Instance);
+   try
+
+    HostPair:=TRNLTestHostPair.Create(Instance,VirtualNetwork);
+    try
+
+     if not Check(HostPair.Connect(5000),'the handshake must succeed') then begin
+      exit;
+     end;
+
+     Channel:=TRNLPeerReliableChannel(HostPair.ClientPeer.Channels[RNL_TEST_HOST_PAIR_CHANNEL_RELIABLE_ORDERED]);
+
+     MaximumMessageSize:=Channel.MaximumMessageSize;
+
+     Info('peer MTU: '+TRNLRawByteString(IntToStr(HostPair.ClientPeer.MTU)));
+     Info('reliable channel window size: '+TRNLRawByteString(IntToStr(HostPair.Client.ReliableChannelBlockPacketWindowSize)));
+     Info('reliable channel MaximumMessageSize: '+TRNLRawByteString(IntToStr(MaximumMessageSize)));
+     Info('host MaximumMessageSize: '+TRNLRawByteString(IntToStr(HostPair.Client.MaximumMessageSize)));
+
+     if not Check(MaximumMessageSize>0,'the channel must report a usable maximum message size') then begin
+      exit;
+     end;
+
+     // The library wide limit is deliberately far above what a single window can carry, so an
+     // application can ask for a message which is accepted by the one and impossible for the
+     // other. That gap is exactly where the stall used to happen.
+     Check(HostPair.Client.MaximumMessageSize>MaximumMessageSize,
+           'this test only makes sense while the host wide message size limit is the larger one');
+
+     DroppedBefore:=HostPair.Client.TotalDroppedOutgoingMessages;
+
+     Oversized:=TRNLRawByteString(StringOfChar('O',MaximumMessageSize+1));
+     Payload:=TestMessageText(1,600);
+
+     // The oversized one first, so that it would be the head of the queue blocking the other
+     Channel.SendMessageRawByteString(Oversized);
+     Channel.SendMessageRawByteString(Payload);
+
+     if not Check(HostPair.PumpUntilServerReceived(1,10000,ElapsedMilliseconds),
+                  'the host service loop must stay alive') then begin
+      exit;
+     end;
+
+     Info('messages dropped by the client: '+
+          TRNLRawByteString(IntToStr(HostPair.Client.TotalDroppedOutgoingMessages-DroppedBefore)));
+     Info('elapsed: '+TRNLRawByteString(IntToStr(ElapsedMilliseconds))+' ms');
+
+     CheckEqualsInt64(TRNLInt64(HostPair.Client.TotalDroppedOutgoingMessages-DroppedBefore),1,
+                      'the oversized message must be dropped, and exactly once');
+
+     if not CheckEqualsInt64(HostPair.ServerReceivedMessages.Count,1,
+                             'the message queued behind the oversized one must still get through') then begin
+      exit;
+     end;
+
+     CheckEqualsRawByteString(TRNLRawByteString(HostPair.ServerReceivedMessages[0]),Payload,
+                              'and it must arrive intact');
+
+     // A message of exactly the reported maximum size has to be accepted, otherwise the
+     // reported limit would be off by one and applications could not rely on it
+     DroppedBefore:=HostPair.Client.TotalDroppedOutgoingMessages;
+
+     Payload:=TRNLRawByteString(StringOfChar('M',MaximumMessageSize));
+
+     Channel.SendMessageRawByteString(Payload);
+
+     if not Check(HostPair.PumpUntilServerReceived(2,30000,ElapsedMilliseconds),
+                  'the host service loop must stay alive') then begin
+      exit;
+     end;
+
+     Info('a message of exactly MaximumMessageSize took '+TRNLRawByteString(IntToStr(ElapsedMilliseconds))+' ms');
+
+     CheckEqualsInt64(TRNLInt64(HostPair.Client.TotalDroppedOutgoingMessages-DroppedBefore),0,
+                      'a message of exactly the reported maximum size must not be dropped');
+
+     if CheckEqualsInt64(HostPair.ServerReceivedMessages.Count,2,
+                         'a message of exactly the reported maximum size must arrive') then begin
+      CheckEqualsInt64(length(HostPair.ServerReceivedMessages[1]),TRNLInt64(MaximumMessageSize),
+                       'and it must arrive complete');
+     end;
+
+    finally
+     FreeAndNil(HostPair);
+    end;
+
+   finally
+    FreeAndNil(VirtualNetwork);
+   end;
+  finally
+   FreeAndNil(Instance);
+  end;
+
+ finally
+  FreeAndNil(Watchdog);
+  TestEnd;
+ end;
+
+end;
+
+// ---------------------------------------------------------------------------------------
+// Keep alive independence
+// ---------------------------------------------------------------------------------------
+
+// The keep alive pings are the only liveness signal of an otherwise idle connection. If they
+// are suppressed while any other traffic is pending, then their delivery depends on the
+// correctness of the outgoing queues and of the unacknowledged block packet accounting, and any
+// block packet stuck in a queue silently switches the liveness detection off.
+//
+// This reproduces exactly that situation: both sides have an unacknowledged reliable block
+// packet outstanding, and the datagrams carrying it are too large for the simulated path, so
+// its retransmissions never arrive either. Only the small ping and acknowledgement datagrams
+// still fit. If the pings are gated on the pending traffic, then no datagram of any kind is
+// exchanged any more and both sides run into their connection timeout.
+procedure TestKeepAliveSurvivesOutstandingReliableBlockPackets;
+const SMALL_DATAGRAM_LIMIT=400;
+      MESSAGE_PADDING_SIZE=600;
+var Instance:TRNLInstance;
+    VirtualNetwork:TRNLVirtualNetwork;
+    FaultInjector:TRNLNetworkFaultInjector;
+    HostPair:TRNLTestHostPair;
+    IdleMilliseconds,ElapsedMilliseconds:TRNLInt64;
+    Watchdog:TRNLTestWatchdog;
+begin
+
+ TestBegin('keep alive survives outstanding reliable block packets');
+ Watchdog:=TRNLTestWatchdog.Create('keep alive with pending traffic',180000);
+ try
+
+  Instance:=TRNLInstance.Create;
+  try
+   VirtualNetwork:=TRNLVirtualNetwork.Create(Instance);
+   try
+    FaultInjector:=TRNLNetworkFaultInjector.Create(Instance,VirtualNetwork);
+    try
+
+     HostPair:=TRNLTestHostPair.Create(Instance,FaultInjector);
+     try
+
+      if not Check(HostPair.Connect(5000),'the handshake must succeed without any injected faults') then begin
+       exit;
+      end;
+
+      if not Check(assigned(HostPair.ServerPeer),'the server side peer must be known') then begin
+       exit;
+      end;
+
+      // Well beyond the connection timeout, so that a suppressed keep alive really does show up
+      IdleMilliseconds:=TRNLInt64(HostPair.Client.ConnectionTimeout)+(TRNLInt64(HostPair.Client.ConnectionTimeout) div 2);
+
+      Info('connection timeout: '+TRNLRawByteString(IntToStr(HostPair.Client.ConnectionTimeout))+' ms');
+      Info('idle period under test: '+TRNLRawByteString(IntToStr(IdleMilliseconds))+' ms');
+
+      // Only the small keep alive and acknowledgement datagrams still fit through
+      FaultInjector.MaximumDatagramSize:=SMALL_DATAGRAM_LIMIT;
+
+      // Both directions, so that neither side can keep the other one warm with its own pings
+      HostPair.ClientPeer.Channels[RNL_TEST_HOST_PAIR_CHANNEL_RELIABLE_ORDERED].SendMessageRawByteString(TestMessageText(1,MESSAGE_PADDING_SIZE));
+      HostPair.ServerPeer.Channels[RNL_TEST_HOST_PAIR_CHANNEL_RELIABLE_ORDERED].SendMessageRawByteString(TestMessageText(2,MESSAGE_PADDING_SIZE));
+
+      if not Check(HostPair.Pump(IdleMilliseconds),'the host service loop must stay alive') then begin
+       exit;
+      end;
+
+      Info('oversized datagrams rejected: '+TRNLRawByteString(IntToStr(FaultInjector.CountOversizedDatagrams)));
+
+      CheckAtLeastInt64(FaultInjector.CountOversizedDatagrams,1,
+                        'the test must actually have blocked the payload carrying datagrams');
+
+      CheckEqualsInt64(HostPair.ServerReceivedMessages.Count,0,
+                       'no payload can have arrived while its datagrams do not fit');
+
+      CheckEqualsInt64(HostPair.ClientReceivedMessages.Count,0,
+                       'no payload can have arrived while its datagrams do not fit');
+
+      CheckEqualsInt64(HostPair.CountServerDisconnectEvents,0,
+                       'the server must not drop the connection, the keep alive pings still fit through');
+
+      CheckEqualsInt64(HostPair.CountClientDisconnectEvents,0,
+                       'the client must not drop the connection, the keep alive pings still fit through');
+
+      // And once the datagrams fit again, both pending messages have to arrive on their own
+      FaultInjector.MaximumDatagramSize:=0;
+
+      if not Check(HostPair.PumpUntilServerReceived(1,20000,ElapsedMilliseconds),
+                   'the host service loop must stay alive while recovering') then begin
+       exit;
+      end;
+
+      if not Check(HostPair.PumpUntilClientReceived(1,20000,ElapsedMilliseconds),
+                   'the host service loop must stay alive while recovering') then begin
+       exit;
+      end;
+
+      CheckEqualsInt64(HostPair.ServerReceivedMessages.Count,1,
+                       'the pending message towards the server must arrive after the recovery');
+
+      CheckEqualsInt64(HostPair.ClientReceivedMessages.Count,1,
+                       'the pending message towards the client must arrive after the recovery');
+
+     finally
+      FreeAndNil(HostPair);
+     end;
+
+    finally
+     FreeAndNil(FaultInjector);
+    end;
+   finally
+    FreeAndNil(VirtualNetwork);
+   end;
+  finally
+   FreeAndNil(Instance);
+  end;
+
+ finally
+  FreeAndNil(Watchdog);
+  TestEnd;
+ end;
+
+end;
+
+// ---------------------------------------------------------------------------------------
+// MTU limits
+// ---------------------------------------------------------------------------------------
+
+// TRNLVirtualNetwork has no MTU whatsoever, so probing over it succeeds with the very first and
+// largest probe size it is offered. That makes it the ideal way to check that the probing can
+// not talk either side into an MTU outside of the range the library declares to support, no
+// matter what the path would technically carry.
+procedure TestMTUProbingStaysWithinTheDeclaredLimits;
+var Instance:TRNLInstance;
+    VirtualNetwork:TRNLVirtualNetwork;
+    HostPair:TRNLTestHostPair;
+    ElapsedMilliseconds:TRNLInt64;
+    Watchdog:TRNLTestWatchdog;
+begin
+
+ TestBegin('MTU probing stays within the declared limits');
+ Watchdog:=TRNLTestWatchdog.Create('MTU probing limits',60000);
+ try
+
+  Instance:=TRNLInstance.Create;
+  try
+   VirtualNetwork:=TRNLVirtualNetwork.Create(Instance);
+   try
+
+    HostPair:=TRNLTestHostPair.Create(Instance,VirtualNetwork);
+    try
+
+     if not Check(HostPair.Connect(5000),'the handshake must succeed') then begin
+      exit;
+     end;
+
+     Info('MTU before probing: '+TRNLRawByteString(IntToStr(HostPair.ClientPeer.MTU)));
+
+     HostPair.ClientPeer.MTUProbe(3,20);
+
+     if not Check(HostPair.PumpUntilClientMTUEvent(1,20000,ElapsedMilliseconds),
+                  'MTU probing must terminate') then begin
+      exit;
+     end;
+
+     Info('MTU probing took '+TRNLRawByteString(IntToStr(ElapsedMilliseconds))+' ms');
+     Info('client peer MTU after probing: '+TRNLRawByteString(IntToStr(HostPair.ClientPeer.MTU)));
+     Info('server peer MTU after probing: '+TRNLRawByteString(IntToStr(HostPair.ServerPeer.MTU)));
+     Info('RNL_MINIMUM_MTU = '+TRNLRawByteString(IntToStr(RNL_MINIMUM_MTU))+
+          ', RNL_MAXIMUM_MTU = '+TRNLRawByteString(IntToStr(RNL_MAXIMUM_MTU)));
+
+     CheckAtLeastInt64(HostPair.ClientPeer.MTU,RNL_MINIMUM_MTU,
+                       'the negotiated MTU must not fall below the declared minimum');
+
+     CheckAtMostInt64(HostPair.ClientPeer.MTU,RNL_MAXIMUM_MTU,
+                      'the negotiated MTU must not exceed the declared maximum, not even on a network without any MTU at all');
+
+     CheckAtLeastInt64(HostPair.ServerPeer.MTU,RNL_MINIMUM_MTU,
+                       'the negotiated MTU must not fall below the declared minimum on the responding side either');
+
+     CheckAtMostInt64(HostPair.ServerPeer.MTU,RNL_MAXIMUM_MTU,
+                      'the negotiated MTU must not exceed the declared maximum on the responding side either');
+
+     CheckEqualsInt64(HostPair.ServerPeer.MTU,HostPair.ClientPeer.MTU,
+                      'both sides must agree on the negotiated MTU');
+
+     // And the connection has to still work with whatever was negotiated
+     HostPair.ClientPeer.Channels[RNL_TEST_HOST_PAIR_CHANNEL_RELIABLE_ORDERED].SendMessageRawByteString(TestMessageText(1,600));
+
+     if not Check(HostPair.PumpUntilServerReceived(1,10000,ElapsedMilliseconds),
+                  'the host service loop must stay alive after probing') then begin
+      exit;
+     end;
+
+     CheckEqualsInt64(HostPair.ServerReceivedMessages.Count,1,
+                      'reliable messages must still get through after probing');
+
+    finally
+     FreeAndNil(HostPair);
+    end;
+
+   finally
+    FreeAndNil(VirtualNetwork);
+   end;
+  finally
+   FreeAndNil(Instance);
+  end;
+
+ finally
+  FreeAndNil(Watchdog);
+  TestEnd;
+ end;
+
+end;
+
+// A block packet is built for the MTU which was current at the time, and the MTU can shrink
+// afterwards, for example because a second probing run found a smaller path. From that moment
+// on such a block packet no longer fits into a datagram of the new MTU.
+//
+// It must not be allowed to block the outgoing queue of its peer, because that queue carries
+// everything: the acknowledgements, the pongs and the disconnect blocks of that peer. One stuck
+// block packet in there silences the whole connection without reporting anything anywhere.
+procedure TestShrinkingMTUDoesNotBlockTheOutgoingQueue;
+const LARGE_PATH_MTU=RNL_MAXIMUM_MTU;
+      SMALL_PATH_MTU=RNL_MINIMUM_MTU;
+      HEADER_ALLOWANCE=60+8;
+var Instance:TRNLInstance;
+    VirtualNetwork:TRNLVirtualNetwork;
+    FaultInjector:TRNLNetworkFaultInjector;
+    HostPair:TRNLTestHostPair;
+    LargeMessage:TRNLRawByteString;
+    ElapsedMilliseconds:TRNLInt64;
+    MTUAfterGrowing:TRNLSizeUInt;
+    Watchdog:TRNLTestWatchdog;
+begin
+
+ TestBegin('a shrinking MTU does not block the outgoing queue');
+ Watchdog:=TRNLTestWatchdog.Create('shrinking MTU',180000);
+ try
+
+  Instance:=TRNLInstance.Create;
+  try
+   VirtualNetwork:=TRNLVirtualNetwork.Create(Instance);
+   try
+    FaultInjector:=TRNLNetworkFaultInjector.Create(Instance,VirtualNetwork);
+    try
+
+     HostPair:=TRNLTestHostPair.Create(Instance,FaultInjector);
+     try
+
+      if not Check(HostPair.Connect(5000),'the handshake must succeed without any injected faults') then begin
+       exit;
+      end;
+
+      // First negotiate the largest MTU this library supports
+      FaultInjector.MaximumDatagramSize:=LARGE_PATH_MTU-HEADER_ALLOWANCE;
+
+      HostPair.ClientPeer.MTUProbe(3,20);
+
+      if not Check(HostPair.PumpUntilClientMTUEvent(1,20000,ElapsedMilliseconds),
+                   'the first MTU probing must terminate') then begin
+       exit;
+      end;
+
+      MTUAfterGrowing:=HostPair.ClientPeer.MTU;
+
+      Info('MTU after the first probing: '+TRNLRawByteString(IntToStr(MTUAfterGrowing)));
+
+      if not Check(MTUAfterGrowing>SMALL_PATH_MTU,
+                   'the first probing must have negotiated an MTU which can then actually shrink') then begin
+       exit;
+      end;
+
+      // Now queue a message whose fragments are built for the large MTU, and make sure they
+      // can not leave, so that they are still outstanding when the MTU shrinks
+      FaultInjector.MaximumDatagramSize:=SMALL_PATH_MTU-HEADER_ALLOWANCE;
+
+      LargeMessage:=TRNLRawByteString(StringOfChar('L',MTUAfterGrowing*3));
+
+      HostPair.ClientPeer.Channels[RNL_TEST_HOST_PAIR_CHANNEL_RELIABLE_ORDERED].SendMessageRawByteString(LargeMessage);
+
+      if not Check(HostPair.Pump(500),'the host service loop must stay alive') then begin
+       exit;
+      end;
+
+      // And shrink the MTU underneath those already constructed block packets
+      HostPair.ClientPeer.MTUProbe(3,20);
+
+      if not Check(HostPair.Pump(5000),'the second MTU probing must not terminate the host service loop') then begin
+       exit;
+      end;
+
+      Info('MTU after the second probing: '+TRNLRawByteString(IntToStr(HostPair.ClientPeer.MTU)));
+      Info('oversized datagrams rejected: '+TRNLRawByteString(IntToStr(FaultInjector.CountOversizedDatagrams)));
+
+      CheckAtMostInt64(HostPair.ClientPeer.MTU,MTUAfterGrowing,
+                       'the second probing must not have grown the MTU');
+
+      // The decisive part: the queue must still be flowing. The keep alive of this connection
+      // travels through the very same outgoing queue as the stuck block packets, so surviving
+      // well past the connection timeout proves that nothing is blocking it.
+      if not Check(HostPair.Pump(TRNLInt64(HostPair.Client.ConnectionTimeout)+
+                                 (TRNLInt64(HostPair.Client.ConnectionTimeout) div 2)),
+                   'the host service loop must stay alive') then begin
+       exit;
+      end;
+
+      CheckEqualsInt64(HostPair.CountClientDisconnectEvents,0,
+                       'the client must not drop the connection because of a block packet which no longer fits');
+
+      CheckEqualsInt64(HostPair.CountServerDisconnectEvents,0,
+                       'the server must not drop the connection because of a block packet which no longer fits');
+
+      // And once the path carries the built fragments again, the message has to arrive
+      FaultInjector.MaximumDatagramSize:=0;
+
+      if not Check(HostPair.PumpUntilServerReceived(1,30000,ElapsedMilliseconds),
+                   'the host service loop must stay alive while recovering') then begin
+       exit;
+      end;
+
+      Info('recovery took '+TRNLRawByteString(IntToStr(ElapsedMilliseconds))+' ms');
+
+      if CheckEqualsInt64(HostPair.ServerReceivedMessages.Count,1,
+                          'the pending message must arrive once its datagrams fit again') then begin
+       CheckEqualsInt64(length(HostPair.ServerReceivedMessages[0]),TRNLInt64(length(LargeMessage)),
+                        'and it must arrive complete');
+      end;
+
+     finally
+      FreeAndNil(HostPair);
+     end;
+
+    finally
+     FreeAndNil(FaultInjector);
+    end;
+   finally
+    FreeAndNil(VirtualNetwork);
+   end;
+  finally
+   FreeAndNil(Instance);
+  end;
+
+ finally
+  FreeAndNil(Watchdog);
+  TestEnd;
+ end;
+
+end;
+
 procedure RunRegressionTests;
 begin
 
@@ -1301,6 +1779,12 @@ begin
 
  // MTU probing
  TestMTUProbingTerminatesAndReportsAMTU;
+ TestMTUProbingStaysWithinTheDeclaredLimits;
+ TestShrinkingMTUDoesNotBlockTheOutgoingQueue;
+
+ // Message size constraints and keep alive independence
+ TestOversizedReliableMessageDoesNotStallTheChannel;
+ TestKeepAliveSurvivesOutstandingReliableBlockPackets;
 
  // The platform specific poll and select code paths
  TestInterruptibleHostBlocksUntilItsTimeout;

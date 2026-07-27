@@ -41,6 +41,8 @@ type TRNLTestHostPair=class
 
        fClientPeer:TRNLPeer;
 
+       fServerPeer:TRNLPeer;
+
        fServerAddress:TRNLAddress;
 
        fServerReceivedMessages:TStringList;
@@ -104,6 +106,7 @@ type TRNLTestHostPair=class
        property Server:TRNLHost read fServer;
        property Client:TRNLHost read fClient;
        property ClientPeer:TRNLPeer read fClientPeer;
+       property ServerPeer:TRNLPeer read fServerPeer;
 
        property ServerReceivedMessages:TStringList read fServerReceivedMessages;
        property ClientReceivedMessages:TStringList read fClientReceivedMessages;
@@ -149,6 +152,8 @@ begin
 
  fClientPeer:=nil;
 
+ fServerPeer:=nil;
+
  fServerReceivedMessages:=TStringList.Create;
  fClientReceivedMessages:=TStringList.Create;
 
@@ -188,6 +193,10 @@ end;
 
 destructor TRNLTestHostPair.Destroy;
 begin
+ if assigned(fServerPeer) then begin
+  fServerPeer.DecRef;
+  fServerPeer:=nil;
+ end;
  if assigned(fClientPeer) then begin
   fClientPeer.DecRef;
   fClientPeer:=nil;
@@ -239,6 +248,10 @@ begin
     RNL_HOST_EVENT_TYPE_PEER_CONNECT:begin
      if aIsServer then begin
       inc(fCountServerConnectEvents);
+      if not assigned(fServerPeer) then begin
+       fServerPeer:=Event.Peer;
+       fServerPeer.IncRef;
+      end;
      end;
     end;
 

@@ -64,3 +64,8 @@ __recovery/
 
 # Castalia statistics file (since XE7 Castalia is distributed with Delphi)
 *.stat
+
+# RNL test runner build artifacts
+/src/tests/RNLTests
+/src/tests/RNLTests.exe
+/src/tests/units/
