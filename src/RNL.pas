@@ -17950,7 +17950,11 @@ begin
    result:=false;
   end else begin
    aAddress:=TemporaryAddress;
-   result:=false;
+   // True, as the branch for every other platform below has it. This said false, so on Windows the
+   // call reported failure even after it had filled in the address, and every caller took that at
+   // face value: a host bound to RNL_HOST_ANY never learned which address and port it had actually
+   // been given, and gathering candidates found none at all.
+   result:=true;
   end;
  end;
 {$else}

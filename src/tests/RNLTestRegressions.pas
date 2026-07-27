@@ -505,6 +505,73 @@ end;
 //
 //   An invalid socket handle in contrast really is unrecoverable and has to stay a hard
 //   error, otherwise a host would spin on it forever instead of giving up.
+procedure TestRealSocketReportsItsBoundAddress;
+var Instance:TRNLInstance;
+    Network:TRNLRealNetwork;
+    Socket:TRNLSocket;
+    Address,BoundAddress:TRNLAddress;
+    Watchdog:TRNLTestWatchdog;
+begin
+
+ TestBegin('a real socket reports the address it was bound to');
+ Watchdog:=TRNLTestWatchdog.Create('real socket bound address',60000);
+ try
+
+  Instance:=TRNLInstance.Create;
+  try
+   Network:=TRNLRealNetwork.Create(Instance);
+   try
+
+    Socket:=Network.SocketCreate(RNL_SOCKET_TYPE_DATAGRAM,RNL_IPV4);
+    if not Check(Socket<>RNL_SOCKET_NULL,'a datagram socket can be created') then begin
+     exit;
+    end;
+    try
+
+     // Port zero, so the system picks one. Asking afterwards which one it picked is the only way to
+     // find out, and it is what a host bound to RNL_HOST_ANY does in Start and what gathering
+     // candidates depends on entirely.
+     FillChar(Address,SizeOf(TRNLAddress),#0);
+     Address.Host:=RNL_HOST_ANY;
+     Address.Port:=0;
+     if not Check(Network.SocketBind(Socket,@Address,RNL_IPV4),'and bound to any address') then begin
+      exit;
+     end;
+
+     FillChar(BoundAddress,SizeOf(TRNLAddress),#0);
+
+     // This is the whole test. On Windows the call used to fill in the address and then report
+     // failure anyway, so every caller threw the answer away: a host never learned its own port,
+     // and candidate gathering came up empty. It cost nothing to find on Linux, because there the
+     // very same function returned true all along.
+     if not Check(Network.SocketGetAddress(Socket,BoundAddress,RNL_IPV4),
+                  'and asking for the bound address has to succeed') then begin
+      exit;
+     end;
+
+     Info('bound to port '+TRNLRawByteString(IntToStr(BoundAddress.Port)));
+
+     CheckAtLeastInt64(BoundAddress.Port,1,
+                       'and it has to report the port the system really handed out, not zero');
+
+    finally
+     Network.SocketDestroy(Socket);
+    end;
+
+   finally
+    FreeAndNil(Network);
+   end;
+  finally
+   FreeAndNil(Instance);
+  end;
+
+ finally
+  FreeAndNil(Watchdog);
+  TestEnd;
+ end;
+
+end;
+
 procedure TestRealSocketReceiveErrorClassification;
 const CLOSED_PORT=19387;
       COUNT_ATTEMPTS=200;
@@ -4583,6 +4650,7 @@ begin
  TestSoftReceiveFailuresDoNotTerminateHost;
  TestOversizedDatagramsDoNotTerminateHost;
  TestRealSocketReceiveErrorClassification;
+ TestRealSocketReportsItsBoundAddress;
 
  // Retransmission behaviour
  TestSingleLostReliablePacketIsRecoveredQuickly;
