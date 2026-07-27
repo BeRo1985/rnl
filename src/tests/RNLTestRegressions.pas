@@ -3349,6 +3349,174 @@ begin
 end;
 
 // ---------------------------------------------------------------------------------------
+// Streaming a hash and the key length boundary of HMAC
+// ---------------------------------------------------------------------------------------
+
+// The self tests of the hashes check digests against the published vectors, all of them in one
+// Update call. That leaves the two places where such an implementation actually breaks untouched.
+//
+// The first is the block boundary. Update takes a message in three phases - bytes until the word
+// boundary, then whole words, then the remainder - and each phase has to hand a full block over to
+// the compression function at exactly the right moment. Fed in one lump that logic is barely
+// exercised; fed in chunks of one, three or sixty five bytes it is exercised in every state it can
+// be in. Since the digest must not depend on how the message was cut up, the one shot digest is the
+// reference and no external vector is needed.
+//
+// The second is the key handling of HMAC. RFC 2104 replaces a key longer than one block by its own
+// digest and zero pads a shorter one, so at exactly the block size the behaviour changes. Both
+// sides of that are checked without an external vector too: a key of 65 bytes has to give the same
+// result as its digest used as the key, and a key of 64 bytes must not.
+procedure TestHashesStreamInChunksAndHMACHandlesKeyLengths;
+const MESSAGE_SIZE=1000;
+      CHUNK_SIZES:array[0..5] of TRNLSizeInt=(1,3,7,63,64,65);
+var Watchdog:TRNLTestWatchdog;
+    Message_:array[0..MESSAGE_SIZE-1] of TRNLUInt8;
+    Index:TRNLSizeInt;
+
+ // Whatever the chunk size, the digest has to be the one of the whole message
+ procedure CheckSHA256Streaming;
+ var OneShot,Streamed:TRNLSHA256Hash;
+     Context:TRNLSHA256Context;
+     ChunkIndex,Position,Chunk:TRNLSizeInt;
+     AllMatched:boolean;
+ begin
+  TRNLSHA256.Process(OneShot,Message_,SizeOf(Message_));
+  AllMatched:=true;
+  for ChunkIndex:=Low(CHUNK_SIZES) to High(CHUNK_SIZES) do begin
+   Context.Initialize;
+   Position:=0;
+   while Position<SizeOf(Message_) do begin
+    Chunk:=CHUNK_SIZES[ChunkIndex];
+    if Chunk>(TRNLSizeInt(SizeOf(Message_))-Position) then begin
+     Chunk:=TRNLSizeInt(SizeOf(Message_))-Position;
+    end;
+    Context.Update(Message_[Position],Chunk);
+    inc(Position,Chunk);
+   end;
+   Context.Finalize(Streamed);
+   if not TRNLMemory.SecureIsEqual(Streamed,OneShot,SizeOf(TRNLSHA256Hash)) then begin
+    AllMatched:=false;
+    Info('sha256 differs at a chunk size of '+TRNLRawByteString(IntToStr(CHUNK_SIZES[ChunkIndex])));
+   end;
+  end;
+  Check(AllMatched,'sha256 has to give the same digest however the message is cut up');
+ end;
+
+ procedure CheckSHA1Streaming;
+ var OneShot,Streamed:TRNLSHA1Hash;
+     Context:TRNLSHA1Context;
+     ChunkIndex,Position,Chunk:TRNLSizeInt;
+     AllMatched:boolean;
+ begin
+  TRNLSHA1.Process(OneShot,Message_,SizeOf(Message_));
+  AllMatched:=true;
+  for ChunkIndex:=Low(CHUNK_SIZES) to High(CHUNK_SIZES) do begin
+   Context.Initialize;
+   Position:=0;
+   while Position<SizeOf(Message_) do begin
+    Chunk:=CHUNK_SIZES[ChunkIndex];
+    if Chunk>(TRNLSizeInt(SizeOf(Message_))-Position) then begin
+     Chunk:=TRNLSizeInt(SizeOf(Message_))-Position;
+    end;
+    Context.Update(Message_[Position],Chunk);
+    inc(Position,Chunk);
+   end;
+   Context.Finalize(Streamed);
+   if not TRNLMemory.SecureIsEqual(Streamed,OneShot,SizeOf(TRNLSHA1Hash)) then begin
+    AllMatched:=false;
+    Info('sha1 differs at a chunk size of '+TRNLRawByteString(IntToStr(CHUNK_SIZES[ChunkIndex])));
+   end;
+  end;
+  Check(AllMatched,'and so does sha1');
+ end;
+
+ procedure CheckMD5Streaming;
+ var OneShot,Streamed:TRNLMD5Hash;
+     Context:TRNLMD5Context;
+     ChunkIndex,Position,Chunk:TRNLSizeInt;
+     AllMatched:boolean;
+ begin
+  TRNLMD5.Process(OneShot,Message_,SizeOf(Message_));
+  AllMatched:=true;
+  for ChunkIndex:=Low(CHUNK_SIZES) to High(CHUNK_SIZES) do begin
+   Context.Initialize;
+   Position:=0;
+   while Position<SizeOf(Message_) do begin
+    Chunk:=CHUNK_SIZES[ChunkIndex];
+    if Chunk>(TRNLSizeInt(SizeOf(Message_))-Position) then begin
+     Chunk:=TRNLSizeInt(SizeOf(Message_))-Position;
+    end;
+    Context.Update(Message_[Position],Chunk);
+    inc(Position,Chunk);
+   end;
+   Context.Finalize(Streamed);
+   if not TRNLMemory.SecureIsEqual(Streamed,OneShot,SizeOf(TRNLMD5Hash)) then begin
+    AllMatched:=false;
+    Info('md5 differs at a chunk size of '+TRNLRawByteString(IntToStr(CHUNK_SIZES[ChunkIndex])));
+   end;
+  end;
+  Check(AllMatched,'and md5, which is the one reading its words the other way round');
+ end;
+
+ procedure CheckHMACKeyLengthBoundary;
+ var ShortKey:array[0..63] of TRNLUInt8;
+     LongKey:array[0..64] of TRNLUInt8;
+     DigestOfLongKey,DigestOfShortKey:TRNLSHA256Hash;
+     WithLongKey,WithItsDigest,WithShortKey,WithShortKeyDigest:TRNLSHA256Hash;
+     KeyIndex:TRNLSizeInt;
+ begin
+
+  // Two keys which differ in length by one, right across the block size
+  for KeyIndex:=0 to SizeOf(LongKey)-1 do begin
+   LongKey[KeyIndex]:=TRNLUInt8($a0+(KeyIndex and $0f));
+  end;
+  Move(LongKey[0],ShortKey[0],SizeOf(ShortKey));
+
+  TRNLSHA256.Process(DigestOfLongKey,LongKey,SizeOf(LongKey));
+  TRNLSHA256.Process(DigestOfShortKey,ShortKey,SizeOf(ShortKey));
+
+  TRNLHMACSHA256.Process(WithLongKey,LongKey,SizeOf(LongKey),Message_,SizeOf(Message_));
+  TRNLHMACSHA256.Process(WithItsDigest,DigestOfLongKey,SizeOf(DigestOfLongKey),Message_,SizeOf(Message_));
+  TRNLHMACSHA256.Process(WithShortKey,ShortKey,SizeOf(ShortKey),Message_,SizeOf(Message_));
+  TRNLHMACSHA256.Process(WithShortKeyDigest,DigestOfShortKey,SizeOf(DigestOfShortKey),Message_,SizeOf(Message_));
+
+  Check(TRNLMemory.SecureIsEqual(WithLongKey,WithItsDigest,SizeOf(TRNLSHA256Hash)),
+        'a key of 65 bytes has to stand in for its own digest, since that is what rfc 2104 says '+
+        'happens to a key longer than one block');
+
+  Check(not TRNLMemory.SecureIsEqual(WithShortKey,WithShortKeyDigest,SizeOf(TRNLSHA256Hash)),
+        'while a key of 64 bytes is used as it is, so the boundary really sits at the block size '+
+        'and not one byte to either side of it');
+
+ end;
+
+begin
+
+ TestBegin('the hashes stream in chunks and hmac handles every key length');
+ Watchdog:=TRNLTestWatchdog.Create('hash streaming',60000);
+ try
+
+  // Something that is not all the same byte, so that a chunk landing in the wrong place shows
+  for Index:=0 to SizeOf(Message_)-1 do begin
+   Message_[Index]:=TRNLUInt8((Index*7) xor (Index shr 3));
+  end;
+
+  Info('message of '+TRNLRawByteString(IntToStr(MESSAGE_SIZE))+
+       ' bytes, fed in chunks of 1, 3, 7, 63, 64 and 65 bytes');
+
+  CheckSHA256Streaming;
+  CheckSHA1Streaming;
+  CheckMD5Streaming;
+  CheckHMACKeyLengthBoundary;
+
+ finally
+  FreeAndNil(Watchdog);
+  TestEnd;
+ end;
+
+end;
+
+// ---------------------------------------------------------------------------------------
 // Peer capacity
 // ---------------------------------------------------------------------------------------
 
@@ -5497,6 +5665,7 @@ begin
  // The cryptographic primitives first of all, because everything else rests on them and
  // because until now nothing ever checked them
  TestCryptographySelfTestsPass;
+ TestHashesStreamInChunksAndHMACHandlesKeyLengths;
 
  // Pure configuration invariants first, they are instant and their failure explains a lot of
  // what the behavioural tests below would otherwise report in a much noisier way

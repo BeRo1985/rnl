@@ -1271,6 +1271,288 @@ type PRNLVersion=^TRNLVersion;
        class procedure SelfTest; static;
      end;
 
+     PRNLSHA256State=^TRNLSHA256State;
+     TRNLSHA256State=array[0..7] of TRNLUInt32;
+
+     PRNLSHA256Hash=^TRNLSHA256Hash;
+     TRNLSHA256Hash=array[0..31] of TRNLUInt8;
+
+     PRNLSHA256Input=^TRNLSHA256Input;
+     TRNLSHA256Input=array[0..15] of TRNLUInt32;
+
+     // FIPS 180-4. Same shape as TRNLSHA512Context throughout, only 32 bit wide, with 64 rounds
+     // instead of 80 and a 64 bit length field instead of a 128 bit one.
+     //
+     // Needed for RFC 8489 MESSAGE-INTEGRITY-SHA256 and, through HMAC, for the long term
+     // credentials a TURN server asks for.
+     PRNLSHA256Context=^TRNLSHA256Context;
+     TRNLSHA256Context=record
+      public
+       const // In bytes, both of them, which is what HMAC needs of them
+             BLOCK_SIZE=64;
+             HASH_SIZE=32;
+      private
+       const InitialState:TRNLSHA256State=
+              (
+               TRNLUInt32($6a09e667),TRNLUInt32($bb67ae85),
+               TRNLUInt32($3c6ef372),TRNLUInt32($a54ff53a),
+               TRNLUInt32($510e527f),TRNLUInt32($9b05688c),
+               TRNLUInt32($1f83d9ab),TRNLUInt32($5be0cd19)
+              );
+             RoundK:array[0..63] of TRNLUInt32=
+              (
+               TRNLUInt32($428a2f98),TRNLUInt32($71374491),
+               TRNLUInt32($b5c0fbcf),TRNLUInt32($e9b5dba5),
+               TRNLUInt32($3956c25b),TRNLUInt32($59f111f1),
+               TRNLUInt32($923f82a4),TRNLUInt32($ab1c5ed5),
+               TRNLUInt32($d807aa98),TRNLUInt32($12835b01),
+               TRNLUInt32($243185be),TRNLUInt32($550c7dc3),
+               TRNLUInt32($72be5d74),TRNLUInt32($80deb1fe),
+               TRNLUInt32($9bdc06a7),TRNLUInt32($c19bf174),
+               TRNLUInt32($e49b69c1),TRNLUInt32($efbe4786),
+               TRNLUInt32($0fc19dc6),TRNLUInt32($240ca1cc),
+               TRNLUInt32($2de92c6f),TRNLUInt32($4a7484aa),
+               TRNLUInt32($5cb0a9dc),TRNLUInt32($76f988da),
+               TRNLUInt32($983e5152),TRNLUInt32($a831c66d),
+               TRNLUInt32($b00327c8),TRNLUInt32($bf597fc7),
+               TRNLUInt32($c6e00bf3),TRNLUInt32($d5a79147),
+               TRNLUInt32($06ca6351),TRNLUInt32($14292967),
+               TRNLUInt32($27b70a85),TRNLUInt32($2e1b2138),
+               TRNLUInt32($4d2c6dfc),TRNLUInt32($53380d13),
+               TRNLUInt32($650a7354),TRNLUInt32($766a0abb),
+               TRNLUInt32($81c2c92e),TRNLUInt32($92722c85),
+               TRNLUInt32($a2bfe8a1),TRNLUInt32($a81a664b),
+               TRNLUInt32($c24b8b70),TRNLUInt32($c76c51a3),
+               TRNLUInt32($d192e819),TRNLUInt32($d6990624),
+               TRNLUInt32($f40e3585),TRNLUInt32($106aa070),
+               TRNLUInt32($19a4c116),TRNLUInt32($1e376c08),
+               TRNLUInt32($2748774c),TRNLUInt32($34b0bcb5),
+               TRNLUInt32($391c0cb3),TRNLUInt32($4ed8aa4a),
+               TRNLUInt32($5b9cca4f),TRNLUInt32($682e6ff3),
+               TRNLUInt32($748f82ee),TRNLUInt32($78a5636f),
+               TRNLUInt32($84c87814),TRNLUInt32($8cc70208),
+               TRNLUInt32($90befffa),TRNLUInt32($a4506ceb),
+               TRNLUInt32($bef9a3f7),TRNLUInt32($c67178f2)
+              );
+      private
+       fState:TRNLSHA256State;
+       fInput:TRNLSHA256Input;
+       fInputSize:TRNLUInt64;
+       fInputIndex:TRNLUInt32;
+       class function RotateRight32(const aValue:TRNLUInt32;const aBits:TRNLUInt32):TRNLUInt32; static; inline;
+       procedure ResetInput;
+       procedure Compress;
+       procedure ProcessByte(const aValue:TRNLUInt8);
+       procedure EndBlock;
+      public
+       procedure Initialize;
+       procedure Update(const aMessage;const aMessageSize:TRNLSizeUInt);
+       procedure Finalize(out aHash);
+     end;
+
+     PRNLSHA256=^TRNLSHA256;
+     TRNLSHA256=record
+      public
+       class procedure Process(out aHash;const aMessage;const aMessageSize:TRNLSizeUInt); static;
+       class procedure SelfTest; static;
+     end;
+
+// SHA-1 and MD5 exist here for one reason: a TURN server which speaks RFC 5389 rather than RFC 8489
+// asks for MESSAGE-INTEGRITY over HMAC-SHA-1, and its long term credential key is
+// MD5(username:realm:password). Neither is used for anything RNL itself protects, and neither is
+// offered for that purpose. Switching this off drops both, and with them the ability to talk to a
+// relay that only knows the older revision.
+{$define RNL_TURN_RFC5389_COMPAT}
+
+{$if defined(RNL_TURN_RFC5389_COMPAT)}
+     PRNLSHA1State=^TRNLSHA1State;
+     TRNLSHA1State=array[0..4] of TRNLUInt32;
+
+     PRNLSHA1Hash=^TRNLSHA1Hash;
+     TRNLSHA1Hash=array[0..19] of TRNLUInt8;
+
+     PRNLSHA1Input=^TRNLSHA1Input;
+     TRNLSHA1Input=array[0..15] of TRNLUInt32;
+
+     // FIPS 180-4 as well, and broken as a collision resistant hash since 2017. That is irrelevant
+     // here: HMAC-SHA-1 is not known to be broken, and this only ever appears inside one.
+     PRNLSHA1Context=^TRNLSHA1Context;
+     TRNLSHA1Context=record
+      public
+       const BLOCK_SIZE=64;
+             HASH_SIZE=20;
+      private
+       const InitialState:TRNLSHA1State=
+              (
+               TRNLUInt32($67452301),TRNLUInt32($efcdab89),
+               TRNLUInt32($98badcfe),TRNLUInt32($10325476),
+               TRNLUInt32($c3d2e1f0)
+              );
+             // One per twenty rounds, unlike the one per round of the SHA-2 family
+             RoundK:array[0..3] of TRNLUInt32=
+              (
+               TRNLUInt32($5a827999),TRNLUInt32($6ed9eba1),
+               TRNLUInt32($8f1bbcdc),TRNLUInt32($ca62c1d6)
+              );
+      private
+       fState:TRNLSHA1State;
+       fInput:TRNLSHA1Input;
+       fInputSize:TRNLUInt64;
+       fInputIndex:TRNLUInt32;
+       class function RotateLeft32(const aValue:TRNLUInt32;const aBits:TRNLUInt32):TRNLUInt32; static; inline;
+       procedure ResetInput;
+       procedure Compress;
+       procedure ProcessByte(const aValue:TRNLUInt8);
+       procedure EndBlock;
+      public
+       procedure Initialize;
+       procedure Update(const aMessage;const aMessageSize:TRNLSizeUInt);
+       procedure Finalize(out aHash);
+     end;
+
+     PRNLSHA1=^TRNLSHA1;
+     TRNLSHA1=record
+      public
+       class procedure Process(out aHash;const aMessage;const aMessageSize:TRNLSizeUInt); static;
+       class procedure SelfTest; static;
+     end;
+
+     PRNLMD5State=^TRNLMD5State;
+     TRNLMD5State=array[0..3] of TRNLUInt32;
+
+     PRNLMD5Hash=^TRNLMD5Hash;
+     TRNLMD5Hash=array[0..15] of TRNLUInt8;
+
+     PRNLMD5Input=^TRNLMD5Input;
+     TRNLMD5Input=array[0..15] of TRNLUInt32;
+
+     // RFC 1321, and the only little endian hash in this file, which is where its byte order
+     // differs from everything above: both the message words and the digest are read and written
+     // little endian.
+     //
+     // Thoroughly broken, and used here for exactly one thing which does not depend on collision
+     // resistance: deriving the long term credential key of RFC 5389, which is a fixed shape
+     // MD5(username:realm:password) that a server dictates.
+     PRNLMD5Context=^TRNLMD5Context;
+     TRNLMD5Context=record
+      public
+       const BLOCK_SIZE=64;
+             HASH_SIZE=16;
+      private
+       const InitialState:TRNLMD5State=
+              (
+               TRNLUInt32($67452301),TRNLUInt32($efcdab89),
+               TRNLUInt32($98badcfe),TRNLUInt32($10325476)
+              );
+             // floor(abs(sin(i+1)) * 2^32), the table RFC 1321 prints in its appendix
+             RoundT:array[0..63] of TRNLUInt32=
+              (
+               TRNLUInt32($d76aa478),TRNLUInt32($e8c7b756),
+               TRNLUInt32($242070db),TRNLUInt32($c1bdceee),
+               TRNLUInt32($f57c0faf),TRNLUInt32($4787c62a),
+               TRNLUInt32($a8304613),TRNLUInt32($fd469501),
+               TRNLUInt32($698098d8),TRNLUInt32($8b44f7af),
+               TRNLUInt32($ffff5bb1),TRNLUInt32($895cd7be),
+               TRNLUInt32($6b901122),TRNLUInt32($fd987193),
+               TRNLUInt32($a679438e),TRNLUInt32($49b40821),
+               TRNLUInt32($f61e2562),TRNLUInt32($c040b340),
+               TRNLUInt32($265e5a51),TRNLUInt32($e9b6c7aa),
+               TRNLUInt32($d62f105d),TRNLUInt32($02441453),
+               TRNLUInt32($d8a1e681),TRNLUInt32($e7d3fbc8),
+               TRNLUInt32($21e1cde6),TRNLUInt32($c33707d6),
+               TRNLUInt32($f4d50d87),TRNLUInt32($455a14ed),
+               TRNLUInt32($a9e3e905),TRNLUInt32($fcefa3f8),
+               TRNLUInt32($676f02d9),TRNLUInt32($8d2a4c8a),
+               TRNLUInt32($fffa3942),TRNLUInt32($8771f681),
+               TRNLUInt32($6d9d6122),TRNLUInt32($fde5380c),
+               TRNLUInt32($a4beea44),TRNLUInt32($4bdecfa9),
+               TRNLUInt32($f6bb4b60),TRNLUInt32($bebfbc70),
+               TRNLUInt32($289b7ec6),TRNLUInt32($eaa127fa),
+               TRNLUInt32($d4ef3085),TRNLUInt32($04881d05),
+               TRNLUInt32($d9d4d039),TRNLUInt32($e6db99e5),
+               TRNLUInt32($1fa27cf8),TRNLUInt32($c4ac5665),
+               TRNLUInt32($f4292244),TRNLUInt32($432aff97),
+               TRNLUInt32($ab9423a7),TRNLUInt32($fc93a039),
+               TRNLUInt32($655b59c3),TRNLUInt32($8f0ccc92),
+               TRNLUInt32($ffeff47d),TRNLUInt32($85845dd1),
+               TRNLUInt32($6fa87e4f),TRNLUInt32($fe2ce6e0),
+               TRNLUInt32($a3014314),TRNLUInt32($4e0811a1),
+               TRNLUInt32($f7537e82),TRNLUInt32($bd3af235),
+               TRNLUInt32($2ad7d2bb),TRNLUInt32($eb86d391)
+              );
+             // Which message word each round takes, and by how much it rotates
+             RoundShift:array[0..63] of TRNLUInt8=
+              (
+                7,12,17,22, 7,12,17,22, 7,12,17,22, 7,12,17,22,
+                5, 9,14,20, 5, 9,14,20, 5, 9,14,20, 5, 9,14,20,
+                4,11,16,23, 4,11,16,23, 4,11,16,23, 4,11,16,23,
+                6,10,15,21, 6,10,15,21, 6,10,15,21, 6,10,15,21
+              );
+      private
+       fState:TRNLMD5State;
+       fInput:TRNLMD5Input;
+       fInputSize:TRNLUInt64;
+       fInputIndex:TRNLUInt32;
+       class function RotateLeft32(const aValue:TRNLUInt32;const aBits:TRNLUInt32):TRNLUInt32; static; inline;
+       procedure ResetInput;
+       procedure Compress;
+       procedure ProcessByte(const aValue:TRNLUInt8);
+       procedure EndBlock;
+      public
+       procedure Initialize;
+       procedure Update(const aMessage;const aMessageSize:TRNLSizeUInt);
+       procedure Finalize(out aHash);
+     end;
+
+     PRNLMD5=^TRNLMD5;
+     TRNLMD5=record
+      public
+       class procedure Process(out aHash;const aMessage;const aMessageSize:TRNLSizeUInt); static;
+       class procedure SelfTest; static;
+     end;
+{$ifend}
+
+     // Every hash here has the same 64 byte block, so one type covers the padded key of all of them
+     PRNLHMACKeyBlock=^TRNLHMACKeyBlock;
+     TRNLHMACKeyBlock=array[0..63] of TRNLUInt8;
+
+     // RFC 2104. The key handling is the whole of it and is identical for every hash: a key longer
+     // than one block is replaced by its own digest, a shorter one is zero padded, and the block is
+     // then xored with $36 for the inner pass and with $5c for the outer one.
+     //
+     // Deliberately not one generic over the context type. Delphi does not let a method be called on
+     // an unconstrained generic parameter, and a record constraint cannot promise Initialize, Update
+     // and Finalize, so a generic version would compile on FreePascal and not on Delphi. What is
+     // actually shared sits here; what remains per hash is six lines.
+     PRNLHMACUtils=^TRNLHMACUtils;
+     TRNLHMACUtils=record
+      public
+       const InnerPad=TRNLUInt8($36);
+             OuterPad=TRNLUInt8($5c);
+      public
+       class procedure XorKeyBlock(var aKeyBlock:TRNLHMACKeyBlock;const aPad:TRNLUInt8); static;
+     end;
+
+     PRNLHMACSHA256=^TRNLHMACSHA256;
+     TRNLHMACSHA256=record
+      public
+       class procedure Process(out aMAC;
+                               const aKey;const aKeySize:TRNLSizeUInt;
+                               const aMessage;const aMessageSize:TRNLSizeUInt); static;
+       class procedure SelfTest; static;
+     end;
+
+{$if defined(RNL_TURN_RFC5389_COMPAT)}
+     PRNLHMACSHA1=^TRNLHMACSHA1;
+     TRNLHMACSHA1=record
+      public
+       class procedure Process(out aMAC;
+                               const aKey;const aKeySize:TRNLSizeUInt;
+                               const aMessage;const aMessageSize:TRNLSizeUInt); static;
+       class procedure SelfTest; static;
+     end;
+{$ifend}
+
      PRNLBLAKE2BHash=^TRNLBLAKE2BHash;
      TRNLBLAKE2BHash=array[0..63] of TRNLUInt8;
 
@@ -8592,6 +8874,994 @@ begin
 {$ifend}
 
 end;
+
+class function TRNLSHA256Context.RotateRight32(const aValue:TRNLUInt32;const aBits:TRNLUInt32):TRNLUInt32;
+begin
+{$ifdef fpc}
+ result:=RORDWord(aValue,aBits);
+{$else}
+ result:=(aValue shl (32-aBits)) or (aValue shr aBits);
+{$endif}
+end;
+
+procedure TRNLSHA256Context.ResetInput;
+begin
+ FillChar(fInput,SizeOf(fInput),#0);
+ fInputIndex:=0;
+end;
+
+procedure TRNLSHA256Context.Initialize;
+begin
+ fState:=InitialState;
+ ResetInput;
+ fInputSize:=0;
+end;
+
+procedure TRNLSHA256Context.Compress;
+var w:array[0..63] of TRNLUInt32;
+    a,b,c,d,e,f,g,h,t1,t2:TRNLUInt32;
+    i:TRNLInt32;
+begin
+ PRNLSHA256Input(TRNLPointer(@w))^:=fInput;
+ for i:=16 to 63 do begin
+  a:=w[i-2];
+  b:=w[i-15];
+  w[i]:=(RotateRight32(a,17) xor RotateRight32(a,19) xor (a shr 10))+
+        w[i-7]+
+        (RotateRight32(b,7) xor RotateRight32(b,18) xor (b shr 3))+
+        w[i-16];
+ end;
+ a:=fState[0];
+ b:=fState[1];
+ c:=fState[2];
+ d:=fState[3];
+ e:=fState[4];
+ f:=fState[5];
+ g:=fState[6];
+ h:=fState[7];
+ for i:=0 to 63 do begin
+  t1:=(RotateRight32(e,6) xor RotateRight32(e,11) xor RotateRight32(e,25))+
+      ((e and f) xor ((not e) and g))+
+      h+
+      RoundK[i]+
+      w[i];
+  t2:=(RotateRight32(a,2) xor RotateRight32(a,13) xor RotateRight32(a,22))+
+      ((a and b) xor (a and c) xor (b and c));
+  h:=g;
+  g:=f;
+  f:=e;
+  e:=d+t1;
+  d:=c;
+  c:=b;
+  b:=a;
+  a:=t1+t2;
+ end;
+ inc(fState[0],a);
+ inc(fState[1],b);
+ inc(fState[2],c);
+ inc(fState[3],d);
+ inc(fState[4],e);
+ inc(fState[5],f);
+ inc(fState[6],g);
+ inc(fState[7],h);
+end;
+
+procedure TRNLSHA256Context.ProcessByte(const aValue:TRNLUInt8);
+var Index:TRNLUInt32;
+begin
+ Index:=fInputIndex shr 2;
+ fInput[Index]:=fInput[Index] or (TRNLUInt32(aValue) shl ((3-(fInputIndex and 3)) shl 3));
+end;
+
+procedure TRNLSHA256Context.EndBlock;
+begin
+ if fInputIndex=64 then begin
+  inc(fInputSize,512);
+  Compress;
+  ResetInput;
+ end;
+end;
+
+procedure TRNLSHA256Context.Update(const aMessage;const aMessageSize:TRNLSizeUInt);
+var MessagePosition,MessageSize:TRNLSizeUInt;
+begin
+ MessagePosition:=0;
+ MessageSize:=aMessageSize;
+ while ((fInputIndex and 3)<>0) and (MessageSize>0) do begin
+  ProcessByte(PRNLUInt8Array(TRNLPointer(@aMessage))^[MessagePosition]);
+  inc(fInputIndex);
+  inc(MessagePosition);
+  dec(MessageSize);
+ end;
+ EndBlock;
+ while MessageSize>=4 do begin
+  fInput[fInputIndex shr 2]:=TRNLMemoryAccess.LoadBigEndianUInt32(PRNLUInt8Array(TRNLPointer(@aMessage))^[MessagePosition]);
+  inc(fInputIndex,4);
+  inc(MessagePosition,4);
+  dec(MessageSize,4);
+  EndBlock;
+ end;
+ while MessageSize>0 do begin
+  ProcessByte(PRNLUInt8Array(TRNLPointer(@aMessage))^[MessagePosition]);
+  inc(fInputIndex);
+  inc(MessagePosition);
+  dec(MessageSize);
+ end;
+end;
+
+procedure TRNLSHA256Context.Finalize(out aHash);
+var Index:TRNLInt32;
+begin
+ inc(fInputSize,fInputIndex shl 3);
+ ProcessByte($80);
+ if fInputIndex>55 then begin
+  Compress;
+  ResetInput;
+ end;
+ fInput[14]:=TRNLUInt32(fInputSize shr 32);
+ fInput[15]:=TRNLUInt32(fInputSize and TRNLUInt64($ffffffff));
+ Compress;
+ for Index:=0 to 7 do begin
+  TRNLMemoryAccess.StoreBigEndianUInt32(PRNLUInt32Array(TRNLPointer(@aHash))^[Index],fState[Index]);
+ end;
+end;
+
+class procedure TRNLSHA256.Process(out aHash;const aMessage;const aMessageSize:TRNLSizeUInt);
+var Context:TRNLSHA256Context;
+begin
+ Context.Initialize;
+ Context.Update(aMessage,aMessageSize);
+ Context.Finalize(aHash);
+end;
+
+{$if defined(RNL_TURN_RFC5389_COMPAT)}
+class function TRNLSHA1Context.RotateLeft32(const aValue:TRNLUInt32;const aBits:TRNLUInt32):TRNLUInt32;
+begin
+{$ifdef fpc}
+ result:=ROLDWord(aValue,aBits);
+{$else}
+ result:=(aValue shl aBits) or (aValue shr (32-aBits));
+{$endif}
+end;
+
+procedure TRNLSHA1Context.ResetInput;
+begin
+ FillChar(fInput,SizeOf(fInput),#0);
+ fInputIndex:=0;
+end;
+
+procedure TRNLSHA1Context.Initialize;
+begin
+ fState:=InitialState;
+ ResetInput;
+ fInputSize:=0;
+end;
+
+procedure TRNLSHA1Context.Compress;
+var w:array[0..79] of TRNLUInt32;
+    a,b,c,d,e,t:TRNLUInt32;
+    i:TRNLInt32;
+begin
+ PRNLSHA1Input(TRNLPointer(@w))^:=fInput;
+ for i:=16 to 79 do begin
+  w[i]:=RotateLeft32(w[i-3] xor w[i-8] xor w[i-14] xor w[i-16],1);
+ end;
+ a:=fState[0];
+ b:=fState[1];
+ c:=fState[2];
+ d:=fState[3];
+ e:=fState[4];
+ for i:=0 to 79 do begin
+  // Twenty rounds per group, not sixteen: SHA-1 changes its function and its constant every
+  // twenty rounds, which is why this cannot be a shift the way the sixteen round groups of MD5
+  // can be
+  case i div 20 of
+   0:begin
+    t:=((b and c) or ((not b) and d))+RoundK[0];
+   end;
+   1:begin
+    t:=(b xor c xor d)+RoundK[1];
+   end;
+   2:begin
+    t:=((b and c) or (b and d) or (c and d))+RoundK[2];
+   end;
+   else begin
+    t:=(b xor c xor d)+RoundK[3];
+   end;
+  end;
+  inc(t,RotateLeft32(a,5)+e+w[i]);
+  e:=d;
+  d:=c;
+  c:=RotateLeft32(b,30);
+  b:=a;
+  a:=t;
+ end;
+ inc(fState[0],a);
+ inc(fState[1],b);
+ inc(fState[2],c);
+ inc(fState[3],d);
+ inc(fState[4],e);
+end;
+
+procedure TRNLSHA1Context.ProcessByte(const aValue:TRNLUInt8);
+var Index:TRNLUInt32;
+begin
+ Index:=fInputIndex shr 2;
+ fInput[Index]:=fInput[Index] or (TRNLUInt32(aValue) shl ((3-(fInputIndex and 3)) shl 3));
+end;
+
+procedure TRNLSHA1Context.EndBlock;
+begin
+ if fInputIndex=64 then begin
+  inc(fInputSize,512);
+  Compress;
+  ResetInput;
+ end;
+end;
+
+procedure TRNLSHA1Context.Update(const aMessage;const aMessageSize:TRNLSizeUInt);
+var MessagePosition,MessageSize:TRNLSizeUInt;
+begin
+ MessagePosition:=0;
+ MessageSize:=aMessageSize;
+ while ((fInputIndex and 3)<>0) and (MessageSize>0) do begin
+  ProcessByte(PRNLUInt8Array(TRNLPointer(@aMessage))^[MessagePosition]);
+  inc(fInputIndex);
+  inc(MessagePosition);
+  dec(MessageSize);
+ end;
+ EndBlock;
+ while MessageSize>=4 do begin
+  fInput[fInputIndex shr 2]:=TRNLMemoryAccess.LoadBigEndianUInt32(PRNLUInt8Array(TRNLPointer(@aMessage))^[MessagePosition]);
+  inc(fInputIndex,4);
+  inc(MessagePosition,4);
+  dec(MessageSize,4);
+  EndBlock;
+ end;
+ while MessageSize>0 do begin
+  ProcessByte(PRNLUInt8Array(TRNLPointer(@aMessage))^[MessagePosition]);
+  inc(fInputIndex);
+  inc(MessagePosition);
+  dec(MessageSize);
+ end;
+end;
+
+procedure TRNLSHA1Context.Finalize(out aHash);
+var Index:TRNLInt32;
+begin
+ inc(fInputSize,fInputIndex shl 3);
+ ProcessByte($80);
+ if fInputIndex>55 then begin
+  Compress;
+  ResetInput;
+ end;
+ fInput[14]:=TRNLUInt32(fInputSize shr 32);
+ fInput[15]:=TRNLUInt32(fInputSize and TRNLUInt64($ffffffff));
+ Compress;
+ for Index:=0 to 4 do begin
+  TRNLMemoryAccess.StoreBigEndianUInt32(PRNLUInt32Array(TRNLPointer(@aHash))^[Index],fState[Index]);
+ end;
+end;
+
+class procedure TRNLSHA1.Process(out aHash;const aMessage;const aMessageSize:TRNLSizeUInt);
+var Context:TRNLSHA1Context;
+begin
+ Context.Initialize;
+ Context.Update(aMessage,aMessageSize);
+ Context.Finalize(aHash);
+end;
+
+class function TRNLMD5Context.RotateLeft32(const aValue:TRNLUInt32;const aBits:TRNLUInt32):TRNLUInt32;
+begin
+{$ifdef fpc}
+ result:=ROLDWord(aValue,aBits);
+{$else}
+ result:=(aValue shl aBits) or (aValue shr (32-aBits));
+{$endif}
+end;
+
+procedure TRNLMD5Context.ResetInput;
+begin
+ FillChar(fInput,SizeOf(fInput),#0);
+ fInputIndex:=0;
+end;
+
+procedure TRNLMD5Context.Initialize;
+begin
+ fState:=InitialState;
+ ResetInput;
+ fInputSize:=0;
+end;
+
+procedure TRNLMD5Context.Compress;
+var a,b,c,d,t:TRNLUInt32;
+    i,WordIndex:TRNLInt32;
+begin
+ a:=fState[0];
+ b:=fState[1];
+ c:=fState[2];
+ d:=fState[3];
+ for i:=0 to 63 do begin
+  case i shr 4 of
+   0:begin
+    t:=(b and c) or ((not b) and d);
+    WordIndex:=i;
+   end;
+   1:begin
+    t:=(d and b) or ((not d) and c);
+    WordIndex:=((i*5)+1) and 15;
+   end;
+   2:begin
+    t:=b xor c xor d;
+    WordIndex:=((i*3)+5) and 15;
+   end;
+   else begin
+    t:=c xor (b or (not d));
+    WordIndex:=(i*7) and 15;
+   end;
+  end;
+  inc(t,a+RoundT[i]+fInput[WordIndex]);
+  a:=d;
+  d:=c;
+  c:=b;
+  inc(b,RotateLeft32(t,RoundShift[i]));
+ end;
+ inc(fState[0],a);
+ inc(fState[1],b);
+ inc(fState[2],c);
+ inc(fState[3],d);
+end;
+
+procedure TRNLMD5Context.ProcessByte(const aValue:TRNLUInt8);
+var Index:TRNLUInt32;
+begin
+ // Little endian, which is where MD5 parts ways with every other hash in this file
+ Index:=fInputIndex shr 2;
+ fInput[Index]:=fInput[Index] or (TRNLUInt32(aValue) shl ((fInputIndex and 3) shl 3));
+end;
+
+procedure TRNLMD5Context.EndBlock;
+begin
+ if fInputIndex=64 then begin
+  inc(fInputSize,512);
+  Compress;
+  ResetInput;
+ end;
+end;
+
+procedure TRNLMD5Context.Update(const aMessage;const aMessageSize:TRNLSizeUInt);
+var MessagePosition,MessageSize:TRNLSizeUInt;
+begin
+ MessagePosition:=0;
+ MessageSize:=aMessageSize;
+ while ((fInputIndex and 3)<>0) and (MessageSize>0) do begin
+  ProcessByte(PRNLUInt8Array(TRNLPointer(@aMessage))^[MessagePosition]);
+  inc(fInputIndex);
+  inc(MessagePosition);
+  dec(MessageSize);
+ end;
+ EndBlock;
+ while MessageSize>=4 do begin
+  fInput[fInputIndex shr 2]:=TRNLMemoryAccess.LoadLittleEndianUInt32(PRNLUInt8Array(TRNLPointer(@aMessage))^[MessagePosition]);
+  inc(fInputIndex,4);
+  inc(MessagePosition,4);
+  dec(MessageSize,4);
+  EndBlock;
+ end;
+ while MessageSize>0 do begin
+  ProcessByte(PRNLUInt8Array(TRNLPointer(@aMessage))^[MessagePosition]);
+  inc(fInputIndex);
+  inc(MessagePosition);
+  dec(MessageSize);
+ end;
+end;
+
+procedure TRNLMD5Context.Finalize(out aHash);
+var Index:TRNLInt32;
+begin
+ inc(fInputSize,fInputIndex shl 3);
+ ProcessByte($80);
+ if fInputIndex>55 then begin
+  Compress;
+  ResetInput;
+ end;
+ // The length goes in little endian too, low word first
+ fInput[14]:=TRNLUInt32(fInputSize and TRNLUInt64($ffffffff));
+ fInput[15]:=TRNLUInt32(fInputSize shr 32);
+ Compress;
+ for Index:=0 to 3 do begin
+  TRNLMemoryAccess.StoreLittleEndianUInt32(PRNLUInt32Array(TRNLPointer(@aHash))^[Index],fState[Index]);
+ end;
+end;
+
+class procedure TRNLMD5.Process(out aHash;const aMessage;const aMessageSize:TRNLSizeUInt);
+var Context:TRNLMD5Context;
+begin
+ Context.Initialize;
+ Context.Update(aMessage,aMessageSize);
+ Context.Finalize(aHash);
+end;
+{$ifend}
+
+class procedure TRNLHMACUtils.XorKeyBlock(var aKeyBlock:TRNLHMACKeyBlock;const aPad:TRNLUInt8);
+var Index:TRNLSizeInt;
+begin
+ for Index:=0 to SizeOf(TRNLHMACKeyBlock)-1 do begin
+  aKeyBlock[Index]:=aKeyBlock[Index] xor aPad;
+ end;
+end;
+
+class procedure TRNLHMACSHA256.Process(out aMAC;
+                                       const aKey;const aKeySize:TRNLSizeUInt;
+                                       const aMessage;const aMessageSize:TRNLSizeUInt);
+var KeyBlock:TRNLHMACKeyBlock;
+    Inner:TRNLSHA256Hash;
+    Context:TRNLSHA256Context;
+begin
+ FillChar(KeyBlock,SizeOf(TRNLHMACKeyBlock),#0);
+ if aKeySize>TRNLSizeUInt(SizeOf(TRNLHMACKeyBlock)) then begin
+  // A key longer than one block stands in for its own digest, which is shorter than a block for
+  // every hash here and therefore zero padded like any short key
+  TRNLSHA256.Process(KeyBlock,aKey,aKeySize);
+ end else if aKeySize>0 then begin
+  Move(aKey,KeyBlock[0],aKeySize);
+ end;
+ TRNLHMACUtils.XorKeyBlock(KeyBlock,TRNLHMACUtils.InnerPad);
+ Context.Initialize;
+ Context.Update(KeyBlock,SizeOf(TRNLHMACKeyBlock));
+ Context.Update(aMessage,aMessageSize);
+ Context.Finalize(Inner);
+ // From the inner pad to the outer one, so that the key block does not have to be built twice
+ TRNLHMACUtils.XorKeyBlock(KeyBlock,TRNLHMACUtils.InnerPad xor TRNLHMACUtils.OuterPad);
+ Context.Initialize;
+ Context.Update(KeyBlock,SizeOf(TRNLHMACKeyBlock));
+ Context.Update(Inner,SizeOf(TRNLSHA256Hash));
+ Context.Finalize(aMAC);
+ FillChar(KeyBlock,SizeOf(TRNLHMACKeyBlock),#0);
+ FillChar(Context,SizeOf(TRNLSHA256Context),#0);
+end;
+
+{$if defined(RNL_TURN_RFC5389_COMPAT)}
+class procedure TRNLHMACSHA1.Process(out aMAC;
+                                     const aKey;const aKeySize:TRNLSizeUInt;
+                                     const aMessage;const aMessageSize:TRNLSizeUInt);
+var KeyBlock:TRNLHMACKeyBlock;
+    Inner:TRNLSHA1Hash;
+    Context:TRNLSHA1Context;
+begin
+ FillChar(KeyBlock,SizeOf(TRNLHMACKeyBlock),#0);
+ if aKeySize>TRNLSizeUInt(SizeOf(TRNLHMACKeyBlock)) then begin
+  TRNLSHA1.Process(KeyBlock,aKey,aKeySize);
+ end else if aKeySize>0 then begin
+  Move(aKey,KeyBlock[0],aKeySize);
+ end;
+ TRNLHMACUtils.XorKeyBlock(KeyBlock,TRNLHMACUtils.InnerPad);
+ Context.Initialize;
+ Context.Update(KeyBlock,SizeOf(TRNLHMACKeyBlock));
+ Context.Update(aMessage,aMessageSize);
+ Context.Finalize(Inner);
+ TRNLHMACUtils.XorKeyBlock(KeyBlock,TRNLHMACUtils.InnerPad xor TRNLHMACUtils.OuterPad);
+ Context.Initialize;
+ Context.Update(KeyBlock,SizeOf(TRNLHMACKeyBlock));
+ Context.Update(Inner,SizeOf(TRNLSHA1Hash));
+ Context.Finalize(aMAC);
+ FillChar(KeyBlock,SizeOf(TRNLHMACKeyBlock),#0);
+ FillChar(Context,SizeOf(TRNLSHA1Context),#0);
+end;
+{$ifend}
+class procedure TRNLSHA256.SelfTest;
+const Expected0:TRNLSHA256Hash=
+       (
+        $e3,$b0,$c4,$42,$98,$fc,$1c,$14,
+        $9a,$fb,$f4,$c8,$99,$6f,$b9,$24,
+        $27,$ae,$41,$e4,$64,$9b,$93,$4c,
+        $a4,$95,$99,$1b,$78,$52,$b8,$55
+       );
+       Expected1:TRNLSHA256Hash=
+       (
+        $ba,$78,$16,$bf,$8f,$01,$cf,$ea,
+        $41,$41,$40,$de,$5d,$ae,$22,$23,
+        $b0,$03,$61,$a3,$96,$17,$7a,$9c,
+        $b4,$10,$ff,$61,$f2,$00,$15,$ad
+       );
+       Data1:array[0..2] of TRNLUInt8=
+        (
+         $61,$62,$63
+        );
+       Expected2:TRNLSHA256Hash=
+       (
+        $24,$8d,$6a,$61,$d2,$06,$38,$b8,
+        $e5,$c0,$26,$93,$0c,$3e,$60,$39,
+        $a3,$3c,$e4,$59,$64,$ff,$21,$67,
+        $f6,$ec,$ed,$d4,$19,$db,$06,$c1
+       );
+       Data2:array[0..55] of TRNLUInt8=
+        (
+         $61,$62,$63,$64,$62,$63,$64,$65,$63,$64,$65,$66,
+         $64,$65,$66,$67,$65,$66,$67,$68,$66,$67,$68,$69,
+         $67,$68,$69,$6a,$68,$69,$6a,$6b,$69,$6a,$6b,$6c,
+         $6a,$6b,$6c,$6d,$6b,$6c,$6d,$6e,$6c,$6d,$6e,$6f,
+         $6d,$6e,$6f,$70,$6e,$6f,$70,$71
+        );
+       Expected3:TRNLSHA256Hash=
+       (
+        $41,$ed,$ec,$e4,$2d,$63,$e8,$d9,
+        $bf,$51,$5a,$9b,$a6,$93,$2e,$1c,
+        $20,$cb,$c9,$f5,$a5,$d1,$34,$64,
+        $5a,$db,$5d,$b1,$b9,$73,$7e,$a3
+       );
+       Data3:array[0..999] of TRNLUInt8=
+        (
+         $61,$61,$61,$61,$61,$61,$61,$61,$61,$61,$61,$61,
+         $61,$61,$61,$61,$61,$61,$61,$61,$61,$61,$61,$61,
+         $61,$61,$61,$61,$61,$61,$61,$61,$61,$61,$61,$61,
+         $61,$61,$61,$61,$61,$61,$61,$61,$61,$61,$61,$61,
+         $61,$61,$61,$61,$61,$61,$61,$61,$61,$61,$61,$61,
+         $61,$61,$61,$61,$61,$61,$61,$61,$61,$61,$61,$61,
+         $61,$61,$61,$61,$61,$61,$61,$61,$61,$61,$61,$61,
+         $61,$61,$61,$61,$61,$61,$61,$61,$61,$61,$61,$61,
+         $61,$61,$61,$61,$61,$61,$61,$61,$61,$61,$61,$61,
+         $61,$61,$61,$61,$61,$61,$61,$61,$61,$61,$61,$61,
+         $61,$61,$61,$61,$61,$61,$61,$61,$61,$61,$61,$61,
+         $61,$61,$61,$61,$61,$61,$61,$61,$61,$61,$61,$61,
+         $61,$61,$61,$61,$61,$61,$61,$61,$61,$61,$61,$61,
+         $61,$61,$61,$61,$61,$61,$61,$61,$61,$61,$61,$61,
+         $61,$61,$61,$61,$61,$61,$61,$61,$61,$61,$61,$61,
+         $61,$61,$61,$61,$61,$61,$61,$61,$61,$61,$61,$61,
+         $61,$61,$61,$61,$61,$61,$61,$61,$61,$61,$61,$61,
+         $61,$61,$61,$61,$61,$61,$61,$61,$61,$61,$61,$61,
+         $61,$61,$61,$61,$61,$61,$61,$61,$61,$61,$61,$61,
+         $61,$61,$61,$61,$61,$61,$61,$61,$61,$61,$61,$61,
+         $61,$61,$61,$61,$61,$61,$61,$61,$61,$61,$61,$61,
+         $61,$61,$61,$61,$61,$61,$61,$61,$61,$61,$61,$61,
+         $61,$61,$61,$61,$61,$61,$61,$61,$61,$61,$61,$61,
+         $61,$61,$61,$61,$61,$61,$61,$61,$61,$61,$61,$61,
+         $61,$61,$61,$61,$61,$61,$61,$61,$61,$61,$61,$61,
+         $61,$61,$61,$61,$61,$61,$61,$61,$61,$61,$61,$61,
+         $61,$61,$61,$61,$61,$61,$61,$61,$61,$61,$61,$61,
+         $61,$61,$61,$61,$61,$61,$61,$61,$61,$61,$61,$61,
+         $61,$61,$61,$61,$61,$61,$61,$61,$61,$61,$61,$61,
+         $61,$61,$61,$61,$61,$61,$61,$61,$61,$61,$61,$61,
+         $61,$61,$61,$61,$61,$61,$61,$61,$61,$61,$61,$61,
+         $61,$61,$61,$61,$61,$61,$61,$61,$61,$61,$61,$61,
+         $61,$61,$61,$61,$61,$61,$61,$61,$61,$61,$61,$61,
+         $61,$61,$61,$61,$61,$61,$61,$61,$61,$61,$61,$61,
+         $61,$61,$61,$61,$61,$61,$61,$61,$61,$61,$61,$61,
+         $61,$61,$61,$61,$61,$61,$61,$61,$61,$61,$61,$61,
+         $61,$61,$61,$61,$61,$61,$61,$61,$61,$61,$61,$61,
+         $61,$61,$61,$61,$61,$61,$61,$61,$61,$61,$61,$61,
+         $61,$61,$61,$61,$61,$61,$61,$61,$61,$61,$61,$61,
+         $61,$61,$61,$61,$61,$61,$61,$61,$61,$61,$61,$61,
+         $61,$61,$61,$61,$61,$61,$61,$61,$61,$61,$61,$61,
+         $61,$61,$61,$61,$61,$61,$61,$61,$61,$61,$61,$61,
+         $61,$61,$61,$61,$61,$61,$61,$61,$61,$61,$61,$61,
+         $61,$61,$61,$61,$61,$61,$61,$61,$61,$61,$61,$61,
+         $61,$61,$61,$61,$61,$61,$61,$61,$61,$61,$61,$61,
+         $61,$61,$61,$61,$61,$61,$61,$61,$61,$61,$61,$61,
+         $61,$61,$61,$61,$61,$61,$61,$61,$61,$61,$61,$61,
+         $61,$61,$61,$61,$61,$61,$61,$61,$61,$61,$61,$61,
+         $61,$61,$61,$61,$61,$61,$61,$61,$61,$61,$61,$61,
+         $61,$61,$61,$61,$61,$61,$61,$61,$61,$61,$61,$61,
+         $61,$61,$61,$61,$61,$61,$61,$61,$61,$61,$61,$61,
+         $61,$61,$61,$61,$61,$61,$61,$61,$61,$61,$61,$61,
+         $61,$61,$61,$61,$61,$61,$61,$61,$61,$61,$61,$61,
+         $61,$61,$61,$61,$61,$61,$61,$61,$61,$61,$61,$61,
+         $61,$61,$61,$61,$61,$61,$61,$61,$61,$61,$61,$61,
+         $61,$61,$61,$61,$61,$61,$61,$61,$61,$61,$61,$61,
+         $61,$61,$61,$61,$61,$61,$61,$61,$61,$61,$61,$61,
+         $61,$61,$61,$61,$61,$61,$61,$61,$61,$61,$61,$61,
+         $61,$61,$61,$61,$61,$61,$61,$61,$61,$61,$61,$61,
+         $61,$61,$61,$61,$61,$61,$61,$61,$61,$61,$61,$61,
+         $61,$61,$61,$61,$61,$61,$61,$61,$61,$61,$61,$61,
+         $61,$61,$61,$61,$61,$61,$61,$61,$61,$61,$61,$61,
+         $61,$61,$61,$61,$61,$61,$61,$61,$61,$61,$61,$61,
+         $61,$61,$61,$61,$61,$61,$61,$61,$61,$61,$61,$61,
+         $61,$61,$61,$61,$61,$61,$61,$61,$61,$61,$61,$61,
+         $61,$61,$61,$61,$61,$61,$61,$61,$61,$61,$61,$61,
+         $61,$61,$61,$61,$61,$61,$61,$61,$61,$61,$61,$61,
+         $61,$61,$61,$61,$61,$61,$61,$61,$61,$61,$61,$61,
+         $61,$61,$61,$61,$61,$61,$61,$61,$61,$61,$61,$61,
+         $61,$61,$61,$61,$61,$61,$61,$61,$61,$61,$61,$61,
+         $61,$61,$61,$61,$61,$61,$61,$61,$61,$61,$61,$61,
+         $61,$61,$61,$61,$61,$61,$61,$61,$61,$61,$61,$61,
+         $61,$61,$61,$61,$61,$61,$61,$61,$61,$61,$61,$61,
+         $61,$61,$61,$61,$61,$61,$61,$61,$61,$61,$61,$61,
+         $61,$61,$61,$61,$61,$61,$61,$61,$61,$61,$61,$61,
+         $61,$61,$61,$61,$61,$61,$61,$61,$61,$61,$61,$61,
+         $61,$61,$61,$61,$61,$61,$61,$61,$61,$61,$61,$61,
+         $61,$61,$61,$61,$61,$61,$61,$61,$61,$61,$61,$61,
+         $61,$61,$61,$61,$61,$61,$61,$61,$61,$61,$61,$61,
+         $61,$61,$61,$61,$61,$61,$61,$61,$61,$61,$61,$61,
+         $61,$61,$61,$61,$61,$61,$61,$61,$61,$61,$61,$61,
+         $61,$61,$61,$61,$61,$61,$61,$61,$61,$61,$61,$61,
+         $61,$61,$61,$61,$61,$61,$61,$61,$61,$61,$61,$61,
+         $61,$61,$61,$61
+        );
+var Value:TRNLSHA256Hash;
+begin
+ write('[SHA256] Hashing "" ... ');
+ Process(Value,TRNLPointer(nil)^,0);
+ if TRNLMemory.SecureIsEqual(Value,Expected0,SizeOf(TRNLSHA256Hash)) then begin
+  writeln('OK!');
+ end else begin
+  RNLSelfTestFailure;
+ end;
+ write('[SHA256] Hashing "abc" ... ');
+ Process(Value,Data1,SizeOf(Data1));
+ if TRNLMemory.SecureIsEqual(Value,Expected1,SizeOf(TRNLSHA256Hash)) then begin
+  writeln('OK!');
+ end else begin
+  RNLSelfTestFailure;
+ end;
+ write('[SHA256] Hashing the 56 byte FIPS 180-2 message ... ');
+ Process(Value,Data2,SizeOf(Data2));
+ if TRNLMemory.SecureIsEqual(Value,Expected2,SizeOf(TRNLSHA256Hash)) then begin
+  writeln('OK!');
+ end else begin
+  RNLSelfTestFailure;
+ end;
+ write('[SHA256] Hashing 1000 bytes, which spans several blocks ... ');
+ Process(Value,Data3,SizeOf(Data3));
+ if TRNLMemory.SecureIsEqual(Value,Expected3,SizeOf(TRNLSHA256Hash)) then begin
+  writeln('OK!');
+ end else begin
+  RNLSelfTestFailure;
+ end;
+
+end;
+
+{$if defined(RNL_TURN_RFC5389_COMPAT)}
+class procedure TRNLSHA1.SelfTest;
+const Expected0:TRNLSHA1Hash=
+       (
+        $da,$39,$a3,$ee,$5e,$6b,$4b,$0d,
+        $32,$55,$bf,$ef,$95,$60,$18,$90,
+        $af,$d8,$07,$09
+       );
+       Expected1:TRNLSHA1Hash=
+       (
+        $a9,$99,$3e,$36,$47,$06,$81,$6a,
+        $ba,$3e,$25,$71,$78,$50,$c2,$6c,
+        $9c,$d0,$d8,$9d
+       );
+       Data1:array[0..2] of TRNLUInt8=
+        (
+         $61,$62,$63
+        );
+       Expected2:TRNLSHA1Hash=
+       (
+        $84,$98,$3e,$44,$1c,$3b,$d2,$6e,
+        $ba,$ae,$4a,$a1,$f9,$51,$29,$e5,
+        $e5,$46,$70,$f1
+       );
+       Data2:array[0..55] of TRNLUInt8=
+        (
+         $61,$62,$63,$64,$62,$63,$64,$65,$63,$64,$65,$66,
+         $64,$65,$66,$67,$65,$66,$67,$68,$66,$67,$68,$69,
+         $67,$68,$69,$6a,$68,$69,$6a,$6b,$69,$6a,$6b,$6c,
+         $6a,$6b,$6c,$6d,$6b,$6c,$6d,$6e,$6c,$6d,$6e,$6f,
+         $6d,$6e,$6f,$70,$6e,$6f,$70,$71
+        );
+var Value:TRNLSHA1Hash;
+begin
+ write('[SHA1] Hashing "" ... ');
+ Process(Value,TRNLPointer(nil)^,0);
+ if TRNLMemory.SecureIsEqual(Value,Expected0,SizeOf(TRNLSHA1Hash)) then begin
+  writeln('OK!');
+ end else begin
+  RNLSelfTestFailure;
+ end;
+ write('[SHA1] Hashing "abc" ... ');
+ Process(Value,Data1,SizeOf(Data1));
+ if TRNLMemory.SecureIsEqual(Value,Expected1,SizeOf(TRNLSHA1Hash)) then begin
+  writeln('OK!');
+ end else begin
+  RNLSelfTestFailure;
+ end;
+ write('[SHA1] Hashing the 56 byte FIPS 180-2 message ... ');
+ Process(Value,Data2,SizeOf(Data2));
+ if TRNLMemory.SecureIsEqual(Value,Expected2,SizeOf(TRNLSHA1Hash)) then begin
+  writeln('OK!');
+ end else begin
+  RNLSelfTestFailure;
+ end;
+
+end;
+
+class procedure TRNLMD5.SelfTest;
+const Expected0:TRNLMD5Hash=
+       (
+        $d4,$1d,$8c,$d9,$8f,$00,$b2,$04,
+        $e9,$80,$09,$98,$ec,$f8,$42,$7e
+       );
+       Expected1:TRNLMD5Hash=
+       (
+        $90,$01,$50,$98,$3c,$d2,$4f,$b0,
+        $d6,$96,$3f,$7d,$28,$e1,$7f,$72
+       );
+       Data1:array[0..2] of TRNLUInt8=
+        (
+         $61,$62,$63
+        );
+       Expected2:TRNLMD5Hash=
+       (
+        $f9,$6b,$69,$7d,$7c,$b7,$93,$8d,
+        $52,$5a,$2f,$31,$aa,$f1,$61,$d0
+       );
+       Data2:array[0..13] of TRNLUInt8=
+        (
+         $6d,$65,$73,$73,$61,$67,$65,$20,$64,$69,$67,$65,
+         $73,$74
+        );
+       Expected3:TRNLMD5Hash=
+       (
+        $c3,$fc,$d3,$d7,$61,$92,$e4,$00,
+        $7d,$fb,$49,$6c,$ca,$67,$e1,$3b
+       );
+       Data3:array[0..25] of TRNLUInt8=
+        (
+         $61,$62,$63,$64,$65,$66,$67,$68,$69,$6a,$6b,$6c,
+         $6d,$6e,$6f,$70,$71,$72,$73,$74,$75,$76,$77,$78,
+         $79,$7a
+        );
+       Expected4:TRNLMD5Hash=
+       (
+        $57,$ed,$f4,$a2,$2b,$e3,$c9,$55,
+        $ac,$49,$da,$2e,$21,$07,$b6,$7a
+       );
+       Data4:array[0..79] of TRNLUInt8=
+        (
+         $31,$32,$33,$34,$35,$36,$37,$38,$39,$30,$31,$32,
+         $33,$34,$35,$36,$37,$38,$39,$30,$31,$32,$33,$34,
+         $35,$36,$37,$38,$39,$30,$31,$32,$33,$34,$35,$36,
+         $37,$38,$39,$30,$31,$32,$33,$34,$35,$36,$37,$38,
+         $39,$30,$31,$32,$33,$34,$35,$36,$37,$38,$39,$30,
+         $31,$32,$33,$34,$35,$36,$37,$38,$39,$30,$31,$32,
+         $33,$34,$35,$36,$37,$38,$39,$30
+        );
+var Value:TRNLMD5Hash;
+begin
+ write('[MD5] Hashing "" ... ');
+ Process(Value,TRNLPointer(nil)^,0);
+ if TRNLMemory.SecureIsEqual(Value,Expected0,SizeOf(TRNLMD5Hash)) then begin
+  writeln('OK!');
+ end else begin
+  RNLSelfTestFailure;
+ end;
+ write('[MD5] Hashing "abc" ... ');
+ Process(Value,Data1,SizeOf(Data1));
+ if TRNLMemory.SecureIsEqual(Value,Expected1,SizeOf(TRNLMD5Hash)) then begin
+  writeln('OK!');
+ end else begin
+  RNLSelfTestFailure;
+ end;
+ write('[MD5] Hashing "message digest" ... ');
+ Process(Value,Data2,SizeOf(Data2));
+ if TRNLMemory.SecureIsEqual(Value,Expected2,SizeOf(TRNLMD5Hash)) then begin
+  writeln('OK!');
+ end else begin
+  RNLSelfTestFailure;
+ end;
+ write('[MD5] Hashing the lower case alphabet ... ');
+ Process(Value,Data3,SizeOf(Data3));
+ if TRNLMemory.SecureIsEqual(Value,Expected3,SizeOf(TRNLMD5Hash)) then begin
+  writeln('OK!');
+ end else begin
+  RNLSelfTestFailure;
+ end;
+ write('[MD5] Hashing the 80 byte RFC 1321 digit string ... ');
+ Process(Value,Data4,SizeOf(Data4));
+ if TRNLMemory.SecureIsEqual(Value,Expected4,SizeOf(TRNLMD5Hash)) then begin
+  writeln('OK!');
+ end else begin
+  RNLSelfTestFailure;
+ end;
+
+end;
+
+{$ifend}
+class procedure TRNLHMACSHA256.SelfTest;
+const Expected0:TRNLSHA256Hash=
+       (
+        $b0,$34,$4c,$61,$d8,$db,$38,$53,
+        $5c,$a8,$af,$ce,$af,$0b,$f1,$2b,
+        $88,$1d,$c2,$00,$c9,$83,$3d,$a7,
+        $26,$e9,$37,$6c,$2e,$32,$cf,$f7
+       );
+       Data0:array[0..7] of TRNLUInt8=
+        (
+         $48,$69,$20,$54,$68,$65,$72,$65
+        );
+       Key0:array[0..19] of TRNLUInt8=
+        (
+         $0b,$0b,$0b,$0b,$0b,$0b,$0b,$0b,$0b,$0b,$0b,$0b,
+         $0b,$0b,$0b,$0b,$0b,$0b,$0b,$0b
+        );
+       Expected1:TRNLSHA256Hash=
+       (
+        $5b,$dc,$c1,$46,$bf,$60,$75,$4e,
+        $6a,$04,$24,$26,$08,$95,$75,$c7,
+        $5a,$00,$3f,$08,$9d,$27,$39,$83,
+        $9d,$ec,$58,$b9,$64,$ec,$38,$43
+       );
+       Data1:array[0..27] of TRNLUInt8=
+        (
+         $77,$68,$61,$74,$20,$64,$6f,$20,$79,$61,$20,$77,
+         $61,$6e,$74,$20,$66,$6f,$72,$20,$6e,$6f,$74,$68,
+         $69,$6e,$67,$3f
+        );
+       Key1:array[0..3] of TRNLUInt8=
+        (
+         $4a,$65,$66,$65
+        );
+       Expected2:TRNLSHA256Hash=
+       (
+        $77,$3e,$a9,$1e,$36,$80,$0e,$46,
+        $85,$4d,$b8,$eb,$d0,$91,$81,$a7,
+        $29,$59,$09,$8b,$3e,$f8,$c1,$22,
+        $d9,$63,$55,$14,$ce,$d5,$65,$fe
+       );
+       Data2:array[0..49] of TRNLUInt8=
+        (
+         $dd,$dd,$dd,$dd,$dd,$dd,$dd,$dd,$dd,$dd,$dd,$dd,
+         $dd,$dd,$dd,$dd,$dd,$dd,$dd,$dd,$dd,$dd,$dd,$dd,
+         $dd,$dd,$dd,$dd,$dd,$dd,$dd,$dd,$dd,$dd,$dd,$dd,
+         $dd,$dd,$dd,$dd,$dd,$dd,$dd,$dd,$dd,$dd,$dd,$dd,
+         $dd,$dd
+        );
+       Key2:array[0..19] of TRNLUInt8=
+        (
+         $aa,$aa,$aa,$aa,$aa,$aa,$aa,$aa,$aa,$aa,$aa,$aa,
+         $aa,$aa,$aa,$aa,$aa,$aa,$aa,$aa
+        );
+       Expected3:TRNLSHA256Hash=
+       (
+        $60,$e4,$31,$59,$1e,$e0,$b6,$7f,
+        $0d,$8a,$26,$aa,$cb,$f5,$b7,$7f,
+        $8e,$0b,$c6,$21,$37,$28,$c5,$14,
+        $05,$46,$04,$0f,$0e,$e3,$7f,$54
+       );
+       Data3:array[0..53] of TRNLUInt8=
+        (
+         $54,$65,$73,$74,$20,$55,$73,$69,$6e,$67,$20,$4c,
+         $61,$72,$67,$65,$72,$20,$54,$68,$61,$6e,$20,$42,
+         $6c,$6f,$63,$6b,$2d,$53,$69,$7a,$65,$20,$4b,$65,
+         $79,$20,$2d,$20,$48,$61,$73,$68,$20,$4b,$65,$79,
+         $20,$46,$69,$72,$73,$74
+        );
+       Key3:array[0..130] of TRNLUInt8=
+        (
+         $aa,$aa,$aa,$aa,$aa,$aa,$aa,$aa,$aa,$aa,$aa,$aa,
+         $aa,$aa,$aa,$aa,$aa,$aa,$aa,$aa,$aa,$aa,$aa,$aa,
+         $aa,$aa,$aa,$aa,$aa,$aa,$aa,$aa,$aa,$aa,$aa,$aa,
+         $aa,$aa,$aa,$aa,$aa,$aa,$aa,$aa,$aa,$aa,$aa,$aa,
+         $aa,$aa,$aa,$aa,$aa,$aa,$aa,$aa,$aa,$aa,$aa,$aa,
+         $aa,$aa,$aa,$aa,$aa,$aa,$aa,$aa,$aa,$aa,$aa,$aa,
+         $aa,$aa,$aa,$aa,$aa,$aa,$aa,$aa,$aa,$aa,$aa,$aa,
+         $aa,$aa,$aa,$aa,$aa,$aa,$aa,$aa,$aa,$aa,$aa,$aa,
+         $aa,$aa,$aa,$aa,$aa,$aa,$aa,$aa,$aa,$aa,$aa,$aa,
+         $aa,$aa,$aa,$aa,$aa,$aa,$aa,$aa,$aa,$aa,$aa,$aa,
+         $aa,$aa,$aa,$aa,$aa,$aa,$aa,$aa,$aa,$aa,$aa
+        );
+var Value:TRNLSHA256Hash;
+begin
+ write('[HMAC-SHA256] RFC 4231 case 1 ... ');
+ Process(Value,Key0,SizeOf(Key0),Data0,SizeOf(Data0));
+ if TRNLMemory.SecureIsEqual(Value,Expected0,SizeOf(TRNLSHA256Hash)) then begin
+  writeln('OK!');
+ end else begin
+  RNLSelfTestFailure;
+ end;
+ write('[HMAC-SHA256] RFC 4231 case 2 ... ');
+ Process(Value,Key1,SizeOf(Key1),Data1,SizeOf(Data1));
+ if TRNLMemory.SecureIsEqual(Value,Expected1,SizeOf(TRNLSHA256Hash)) then begin
+  writeln('OK!');
+ end else begin
+  RNLSelfTestFailure;
+ end;
+ write('[HMAC-SHA256] RFC 4231 case 3 ... ');
+ Process(Value,Key2,SizeOf(Key2),Data2,SizeOf(Data2));
+ if TRNLMemory.SecureIsEqual(Value,Expected2,SizeOf(TRNLSHA256Hash)) then begin
+  writeln('OK!');
+ end else begin
+  RNLSelfTestFailure;
+ end;
+ write('[HMAC-SHA256] RFC 4231 case 6, key longer than one block ... ');
+ Process(Value,Key3,SizeOf(Key3),Data3,SizeOf(Data3));
+ if TRNLMemory.SecureIsEqual(Value,Expected3,SizeOf(TRNLSHA256Hash)) then begin
+  writeln('OK!');
+ end else begin
+  RNLSelfTestFailure;
+ end;
+
+end;
+
+{$if defined(RNL_TURN_RFC5389_COMPAT)}
+class procedure TRNLHMACSHA1.SelfTest;
+const Expected0:TRNLSHA1Hash=
+       (
+        $b6,$17,$31,$86,$55,$05,$72,$64,
+        $e2,$8b,$c0,$b6,$fb,$37,$8c,$8e,
+        $f1,$46,$be,$00
+       );
+       Data0:array[0..7] of TRNLUInt8=
+        (
+         $48,$69,$20,$54,$68,$65,$72,$65
+        );
+       Key0:array[0..19] of TRNLUInt8=
+        (
+         $0b,$0b,$0b,$0b,$0b,$0b,$0b,$0b,$0b,$0b,$0b,$0b,
+         $0b,$0b,$0b,$0b,$0b,$0b,$0b,$0b
+        );
+       Expected1:TRNLSHA1Hash=
+       (
+        $ef,$fc,$df,$6a,$e5,$eb,$2f,$a2,
+        $d2,$74,$16,$d5,$f1,$84,$df,$9c,
+        $25,$9a,$7c,$79
+       );
+       Data1:array[0..27] of TRNLUInt8=
+        (
+         $77,$68,$61,$74,$20,$64,$6f,$20,$79,$61,$20,$77,
+         $61,$6e,$74,$20,$66,$6f,$72,$20,$6e,$6f,$74,$68,
+         $69,$6e,$67,$3f
+        );
+       Key1:array[0..3] of TRNLUInt8=
+        (
+         $4a,$65,$66,$65
+        );
+       Expected2:TRNLSHA1Hash=
+       (
+        $e8,$e9,$9d,$0f,$45,$23,$7d,$78,
+        $6d,$6b,$ba,$a7,$96,$5c,$78,$08,
+        $bb,$ff,$1a,$91
+       );
+       Data2:array[0..72] of TRNLUInt8=
+        (
+         $54,$65,$73,$74,$20,$55,$73,$69,$6e,$67,$20,$4c,
+         $61,$72,$67,$65,$72,$20,$54,$68,$61,$6e,$20,$42,
+         $6c,$6f,$63,$6b,$2d,$53,$69,$7a,$65,$20,$4b,$65,
+         $79,$20,$61,$6e,$64,$20,$4c,$61,$72,$67,$65,$72,
+         $20,$54,$68,$61,$6e,$20,$4f,$6e,$65,$20,$42,$6c,
+         $6f,$63,$6b,$2d,$53,$69,$7a,$65,$20,$44,$61,$74,
+         $61
+        );
+       Key2:array[0..79] of TRNLUInt8=
+        (
+         $aa,$aa,$aa,$aa,$aa,$aa,$aa,$aa,$aa,$aa,$aa,$aa,
+         $aa,$aa,$aa,$aa,$aa,$aa,$aa,$aa,$aa,$aa,$aa,$aa,
+         $aa,$aa,$aa,$aa,$aa,$aa,$aa,$aa,$aa,$aa,$aa,$aa,
+         $aa,$aa,$aa,$aa,$aa,$aa,$aa,$aa,$aa,$aa,$aa,$aa,
+         $aa,$aa,$aa,$aa,$aa,$aa,$aa,$aa,$aa,$aa,$aa,$aa,
+         $aa,$aa,$aa,$aa,$aa,$aa,$aa,$aa,$aa,$aa,$aa,$aa,
+         $aa,$aa,$aa,$aa,$aa,$aa,$aa,$aa
+        );
+var Value:TRNLSHA1Hash;
+begin
+ write('[HMAC-SHA1] RFC 2202 case 1 ... ');
+ Process(Value,Key0,SizeOf(Key0),Data0,SizeOf(Data0));
+ if TRNLMemory.SecureIsEqual(Value,Expected0,SizeOf(TRNLSHA1Hash)) then begin
+  writeln('OK!');
+ end else begin
+  RNLSelfTestFailure;
+ end;
+ write('[HMAC-SHA1] RFC 2202 case 2 ... ');
+ Process(Value,Key1,SizeOf(Key1),Data1,SizeOf(Data1));
+ if TRNLMemory.SecureIsEqual(Value,Expected1,SizeOf(TRNLSHA1Hash)) then begin
+  writeln('OK!');
+ end else begin
+  RNLSelfTestFailure;
+ end;
+ write('[HMAC-SHA1] RFC 2202 case 7, key and data both longer than one block ... ');
+ Process(Value,Key2,SizeOf(Key2),Data2,SizeOf(Data2));
+ if TRNLMemory.SecureIsEqual(Value,Expected2,SizeOf(TRNLSHA1Hash)) then begin
+  writeln('OK!');
+ end else begin
+  RNLSelfTestFailure;
+ end;
+
+end;
+
+{$ifend}
 
 class function TRNLBLAKE2BContext.RotateRight64(const aValue:TRNLUInt64;const aBits:TRNLUInt32):TRNLUInt64;
 begin
@@ -16590,6 +17860,13 @@ begin
  TRNLChaCha20.SelfTest;
  TRNLPoly1305.SelfTest;
  TRNLSHA512.SelfTest;
+ TRNLSHA256.SelfTest;
+ TRNLHMACSHA256.SelfTest;
+{$if defined(RNL_TURN_RFC5389_COMPAT)}
+ TRNLSHA1.SelfTest;
+ TRNLHMACSHA1.SelfTest;
+ TRNLMD5.SelfTest;
+{$ifend}
  TRNLBLAKE2B.SelfTest;
  result:=RNLCountSelfTestFailures=0;
 end;
