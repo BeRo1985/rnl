@@ -3069,6 +3069,268 @@ begin
 
 end;
 
+procedure TestGatherCandidatesFindsHostAndServerReflexive;
+const HOST_PORT=18440;
+      STUN_PORT=18441;
+      REFLEXIVE_HOST='203.0.113.7';
+      REFLEXIVE_PORT=51234;
+var Instance:TRNLInstance;
+    Network:TRNLVirtualNetwork;
+    STUNServer:TRNLTestSTUNServer;
+    Host:TRNLHost;
+    STUNServerAddress,ReportedAddress:TRNLAddress;
+    STUNServers:array[0..0] of TRNLAddress;
+    Candidates:TRNLCandidates;
+    Index,CountHost,CountReflexive:TRNLSizeInt;
+    ReflexiveCorrect:boolean;
+    Watchdog:TRNLTestWatchdog;
+begin
+
+ TestBegin('gathering candidates finds the host and the server reflexive one');
+ Watchdog:=TRNLTestWatchdog.Create('gather candidates',60000);
+ try
+
+  Instance:=TRNLInstance.Create;
+  try
+   Network:=TRNLVirtualNetwork.Create(Instance);
+   try
+
+    FillChar(ReportedAddress,SizeOf(TRNLAddress),#0);
+    Network.AddressSetHost(ReportedAddress,REFLEXIVE_HOST);
+    ReportedAddress.Port:=REFLEXIVE_PORT;
+
+    STUNServer:=TRNLTestSTUNServer.Create(Instance,Network,STUN_PORT,
+                                          RNL_TEST_STUN_SERVER_CORRECT,ReportedAddress);
+    try
+
+     Host:=TRNLHost.Create(Instance,Network);
+     try
+
+      Host.Address.Host:=RNL_HOST_ANY;
+      Host.Address.Port:=HOST_PORT;
+      Host.Start(RNL_HOST_ADDRESS_FAMILY_WORK_MODE_IPV4_ONLY);
+
+      FillChar(STUNServerAddress,SizeOf(TRNLAddress),#0);
+      Network.AddressSetHost(STUNServerAddress,'127.0.0.1');
+      STUNServerAddress.Port:=STUN_PORT;
+      STUNServers[0]:=STUNServerAddress;
+
+      // Between Start and the first Service, which is the only place this belongs: it reads from the
+      // host's own socket while it waits for the answer
+      if not Check(Host.GatherCandidates(STUNServers,Candidates,1000),
+                   'gathering has to come up with something') then begin
+       exit;
+      end;
+
+      CountHost:=0;
+      CountReflexive:=0;
+      ReflexiveCorrect:=false;
+      for Index:=0 to length(Candidates)-1 do begin
+       case Candidates[Index].Kind of
+        RNL_CANDIDATE_KIND_HOST:begin
+         inc(CountHost);
+        end;
+        RNL_CANDIDATE_KIND_SERVER_REFLEXIVE:begin
+         inc(CountReflexive);
+         ReflexiveCorrect:=Candidates[Index].Address.Host.Equals(ReportedAddress.Host) and
+                           (Candidates[Index].Address.Port=REFLEXIVE_PORT);
+        end;
+        else begin
+        end;
+       end;
+       Info('candidate '+TRNLRawByteString(IntToStr(Index))+': kind '+
+            TRNLRawByteString(IntToStr(TRNLInt32(Candidates[Index].Kind)))+
+            ', socket '+TRNLRawByteString(IntToStr(Candidates[Index].SocketIndex))+
+            ', priority '+TRNLRawByteString(IntToStr(Candidates[Index].Priority))+
+            ', address '+TRNLRawByteString(Candidates[Index].Address.ToString));
+      end;
+
+      CheckAtLeastInt64(CountHost,1,
+                        'there has to be at least one host candidate. The virtual network has no '+
+                        'interfaces to enumerate, so what the socket is bound to is the only one, '+
+                        'and it is a true one');
+
+      CheckEqualsInt64(CountReflexive,1,
+                       'and exactly one server reflexive candidate, since one stun server answered');
+
+      Check(ReflexiveCorrect,
+            'which carries the address the stun server reported and not the local one');
+
+      // Host beats server reflexive, always, which is what makes the direct path get tried first
+      Check((length(Candidates)>1) and
+            (Candidates[0].Kind=RNL_CANDIDATE_KIND_HOST),
+            'and the list comes back with a host candidate in front');
+
+      CheckEqualsInt64(length(Host.LocalCandidates),length(Candidates),
+                       'the host remembers what was gathered');
+
+     finally
+      FreeAndNil(Host);
+     end;
+
+    finally
+     FreeAndNil(STUNServer);
+    end;
+
+   finally
+    FreeAndNil(Network);
+   end;
+  finally
+   FreeAndNil(Instance);
+  end;
+
+ finally
+  FreeAndNil(Watchdog);
+  TestEnd;
+ end;
+
+end;
+
+procedure TestCandidatePriorityOrderAndSerialisation;
+var Candidates,Restored:TRNLCandidates;
+    Bytes:TBytes;
+    Index:TRNLSizeInt;
+    HostPriority,ReflexivePriority,RelayedPriority:TRNLUInt32;
+    BaseA,BaseB,ServerA,ServerB:TRNLHostAddress;
+    Truncated,Overlong,Tampered:TBytes;
+begin
+
+ TestBegin('candidate priority, order and serialisation');
+ try
+
+  // The type has to dominate the priority, otherwise a local preference could push a relayed
+  // candidate ahead of a host one and every path would be tried in the wrong order
+  HostPriority:=TRNLCandidateUtils.Priority(RNL_CANDIDATE_KIND_HOST,0);
+  ReflexivePriority:=TRNLCandidateUtils.Priority(RNL_CANDIDATE_KIND_SERVER_REFLEXIVE,65535);
+  RelayedPriority:=TRNLCandidateUtils.Priority(RNL_CANDIDATE_KIND_RELAYED,65535);
+
+  Check(HostPriority>ReflexivePriority,
+        'a host candidate outranks a server reflexive one even at the lowest local preference');
+
+  Check(ReflexivePriority>RelayedPriority,
+        'and a server reflexive one outranks a relayed one');
+
+  Check(TRNLCandidateUtils.Priority(RNL_CANDIDATE_KIND_HOST,1)>
+        TRNLCandidateUtils.Priority(RNL_CANDIDATE_KIND_HOST,0),
+        'within one type the local preference is what orders them');
+
+  // The foundation groups candidates which share a fate, so it has to depend on all three of kind,
+  // base and server, and on nothing else
+  FillChar(BaseA,SizeOf(TRNLHostAddress),#0);
+  FillChar(BaseB,SizeOf(TRNLHostAddress),#0);
+  FillChar(ServerA,SizeOf(TRNLHostAddress),#0);
+  FillChar(ServerB,SizeOf(TRNLHostAddress),#0);
+  BaseA.Addr[15]:=1;
+  BaseB.Addr[15]:=2;
+  ServerA.Addr[15]:=10;
+  ServerB.Addr[15]:=11;
+
+  CheckEqualsInt64(TRNLCandidateUtils.Foundation(RNL_CANDIDATE_KIND_HOST,BaseA,ServerA),
+                   TRNLCandidateUtils.Foundation(RNL_CANDIDATE_KIND_HOST,BaseA,ServerA),
+                   'the same kind, base and server always give the same foundation');
+
+  Check(TRNLCandidateUtils.Foundation(RNL_CANDIDATE_KIND_HOST,BaseA,ServerA)<>
+        TRNLCandidateUtils.Foundation(RNL_CANDIDATE_KIND_HOST,BaseB,ServerA),
+        'a different base gives a different one');
+
+  Check(TRNLCandidateUtils.Foundation(RNL_CANDIDATE_KIND_HOST,BaseA,ServerA)<>
+        TRNLCandidateUtils.Foundation(RNL_CANDIDATE_KIND_HOST,BaseA,ServerB),
+        'and so does a different server');
+
+  Check(TRNLCandidateUtils.Foundation(RNL_CANDIDATE_KIND_HOST,BaseA,ServerA)<>
+        TRNLCandidateUtils.Foundation(RNL_CANDIDATE_KIND_SERVER_REFLEXIVE,BaseA,ServerA),
+        'and so does a different kind');
+
+  // Deliberately built in the wrong order, so that sorting has something to do
+  SetLength(Candidates,3);
+  FillChar(Candidates[0],SizeOf(TRNLCandidate)*3,#0);
+  Candidates[0].Kind:=RNL_CANDIDATE_KIND_RELAYED;
+  Candidates[0].SocketIndex:=2;
+  Candidates[0].Address.Port:=3000;
+  Candidates[0].Priority:=RelayedPriority;
+  Candidates[0].Foundation:=1;
+  Candidates[1].Kind:=RNL_CANDIDATE_KIND_HOST;
+  Candidates[1].SocketIndex:=0;
+  Candidates[1].Address.Port:=3001;
+  Candidates[1].Priority:=HostPriority;
+  Candidates[1].Foundation:=2;
+  Candidates[2].Kind:=RNL_CANDIDATE_KIND_SERVER_REFLEXIVE;
+  Candidates[2].SocketIndex:=1;
+  Candidates[2].Address.Port:=3002;
+  Candidates[2].Priority:=ReflexivePriority;
+  Candidates[2].Foundation:=3;
+
+  TRNLCandidateUtils.SortByPriority(Candidates);
+
+  Check((Candidates[0].Kind=RNL_CANDIDATE_KIND_HOST) and
+        (Candidates[1].Kind=RNL_CANDIDATE_KIND_SERVER_REFLEXIVE) and
+        (Candidates[2].Kind=RNL_CANDIDATE_KIND_RELAYED),
+        'sorting puts the highest priority first, which is the order they are meant to be tried in');
+
+  // Round trip
+  Bytes:=TRNLCandidateUtils.Serialize(Candidates);
+
+  if not Check(TRNLCandidateUtils.Deserialize(Bytes,Restored),
+               'a serialised candidate list can be read back') then begin
+   exit;
+  end;
+
+  if not CheckEqualsInt64(length(Restored),length(Candidates),
+                          'with the same number of entries') then begin
+   exit;
+  end;
+
+  for Index:=0 to length(Candidates)-1 do begin
+   Check((Restored[Index].Kind=Candidates[Index].Kind) and
+         (Restored[Index].SocketIndex=Candidates[Index].SocketIndex) and
+         (Restored[Index].Priority=Candidates[Index].Priority) and
+         (Restored[Index].Foundation=Candidates[Index].Foundation) and
+         (Restored[Index].Address.Port=Candidates[Index].Address.Port) and
+         Restored[Index].Address.Host.Equals(Candidates[Index].Address.Host),
+         'and every field of entry '+TRNLRawByteString(IntToStr(Index))+' survives unchanged');
+  end;
+
+  // And the part that matters: this comes in over whatever channel the application chose, so it is
+  // untrusted, and a length field must never be believed further than the buffer goes
+  Truncated:=Copy(Bytes,0,length(Bytes)-1);
+  Check(not TRNLCandidateUtils.Deserialize(Truncated,Restored),
+        'a buffer one byte short of what its count announces is refused');
+
+  SetLength(Overlong,length(Bytes)+1);
+  Move(Bytes[0],Overlong[0],length(Bytes));
+  Overlong[length(Bytes)]:=0;
+  Check(not TRNLCandidateUtils.Deserialize(Overlong,Restored),
+        'and so is one byte too many, since then it is not the message it claims to be');
+
+  SetLength(Tampered,length(Bytes));
+  Move(Bytes[0],Tampered[0],length(Bytes));
+  Tampered[0]:=Tampered[0] xor $ff;
+  Check(not TRNLCandidateUtils.Deserialize(Tampered,Restored),
+        'a wrong signature is refused rather than read as candidates');
+
+  SetLength(Tampered,length(Bytes));
+  Move(Bytes[0],Tampered[0],length(Bytes));
+  Tampered[4]:=99;
+  Check(not TRNLCandidateUtils.Deserialize(Tampered,Restored),
+        'and so is a version nobody knows');
+
+  SetLength(Tampered,length(Bytes));
+  Move(Bytes[0],Tampered[0],length(Bytes));
+  // The kind field of the first entry, straight after the header and the address
+  Tampered[8+SizeOf(TRNLAddress)]:=99;
+  Check(not TRNLCandidateUtils.Deserialize(Tampered,Restored),
+        'a candidate kind nobody defined is refused, since the priority arithmetic would otherwise '+
+        'run on a value with no meaning');
+
+  Check(not TRNLCandidateUtils.Deserialize(nil,Restored),
+        'and an empty buffer is not a candidate list either');
+
+ finally
+  TestEnd;
+ end;
+
+end;
+
 procedure TestNATNetworkSimulatesTheFourNATKinds;
 const EXTERNAL_HOST='198.51.100.1';
       INSIDE_HOST='10.0.0.2';
@@ -4296,6 +4558,10 @@ begin
 
  // The NAT simulator, which every later punching test will rest on
  TestNATNetworkSimulatesTheFourNATKinds;
+
+ // The candidate types, which are pure arithmetic plus one more parser for untrusted input
+ TestCandidatePriorityOrderAndSerialisation;
+ TestGatherCandidatesFindsHostAndServerReflexive;
 
  // The rate limiters, on their own before anything drives them over a network
  TestBandwidthRateLimiterHonoursItsPeriodLength;

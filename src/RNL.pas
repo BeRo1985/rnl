@@ -2816,6 +2816,73 @@ type PRNLVersion=^TRNLVersion;
        RNL_INTERFACE_HOST_ADDRESS_MULTICAST
       );
 
+     PRNLHostAddresses=^TRNLHostAddresses;
+     TRNLHostAddresses=array of TRNLHostAddress;
+
+     // Where an address a peer could be reached at came from. The order matters: it is the order of
+     // decreasing preference, and the numbers below are derived from it.
+     PRNLCandidateKind=^TRNLCandidateKind;
+     TRNLCandidateKind=
+      (
+       // An address of a local interface. Reachable directly, so first choice, and free
+       RNL_CANDIDATE_KIND_HOST,
+       // What a STUN server saw this socket as, which is the address a NAT presents it under
+       RNL_CANDIDATE_KIND_SERVER_REFLEXIVE,
+       // An address on a relay. Always works and always costs, so last choice
+       RNL_CANDIDATE_KIND_RELAYED
+      );
+
+     // One address a peer might be reachable at.
+     //
+     // Deliberately named without "Connection" in it: TRNLConnectionCandidate and
+     // TRNLConnectionKnownCandidateHostAddress already exist and mean a half finished handshake,
+     // which is something else entirely.
+     PRNLCandidate=^TRNLCandidate;
+     TRNLCandidate=packed record
+      Address:TRNLAddress;
+      Kind:TRNLCandidateKind;
+      // Which local socket this candidate belongs to. A mapping belongs to the socket it was
+      // learned through, so pairing it with any other one would describe a path that does not
+      // exist.
+      SocketIndex:TRNLUInt16;
+      // As RFC 8445 computes it, so that the order candidates get tried in is reproducible and
+      // comparable with what other implementations would do
+      Priority:TRNLUInt32;
+      // Candidates which share a foundation share a fate: same kind, same base, same server. Trying
+      // more than one of them buys nothing, which is what makes this worth carrying.
+      Foundation:TRNLUInt32;
+     end;
+
+     PRNLCandidates=^TRNLCandidates;
+     TRNLCandidates=array of TRNLCandidate;
+
+     // Priority and foundation are pure arithmetic over the fields above, so they sit here rather
+     // than on the host: nothing about them needs a socket or a network.
+     PRNLCandidateUtils=^TRNLCandidateUtils;
+     TRNLCandidateUtils=record
+      public
+       const // RFC 8445 section 5.1.2.2, the recommended type preferences
+             TypePreferenceHost=126;
+             TypePreferenceServerReflexive=100;
+             TypePreferenceRelayed=0;
+             // RNL has one component per candidate, there is no second stream to number
+             ComponentID=1;
+      public
+       class function TypePreference(const aKind:TRNLCandidateKind):TRNLUInt32; static;
+       // priority = 2^24 * type preference + 2^8 * local preference + (256 - component id)
+       class function Priority(const aKind:TRNLCandidateKind;
+                               const aLocalPreference:TRNLUInt32):TRNLUInt32; static;
+       class function Foundation(const aKind:TRNLCandidateKind;
+                                 const aBase:TRNLHostAddress;
+                                 const aServer:TRNLHostAddress):TRNLUInt32; static;
+       // Highest priority first, which is the order they are meant to be tried in
+       class procedure SortByPriority(var aCandidates:TRNLCandidates); static;
+       class function Serialize(const aCandidates:TRNLCandidates):TBytes; static;
+       // Everything here arrives from whatever channel the application used to exchange candidates,
+       // so it is untrusted input and every length is checked before it is believed
+       class function Deserialize(const aBytes:TBytes;out aCandidates:TRNLCandidates):boolean; static;
+     end;
+
      TRNLNetwork=class
       private
        fInstance:TRNLInstance;
@@ -2826,6 +2893,14 @@ type PRNLVersion=^TRNLVersion;
        function AddressGetHost(const aAddress:TRNLAddress;out aName;const aNameLength:TRNLInt32;const aFlags:TRNLInt32=0):boolean; virtual;
        function AddressGetHostIP(const aAddress:TRNLAddress;out aName;const aNameLength:TRNLInt32):boolean; virtual;
        function AddressGetPrimaryInterfaceHostIP(var aAddress:TRNLAddress;const aFamily:TRNLAddressFamily;const aInterfaceHostAddressType:TRNLInterfaceHostAddressType=RNL_INTERFACE_HOST_ADDRESS_UNICAST):boolean; virtual;
+       // Every address of every interface, where AddressGetPrimaryInterfaceHostIP stops at the
+       // first one. That is what host candidates for NAT traversal are made of: one per local
+       // interface, not just one for the machine.
+       //
+       // Loopback and interfaces which are down are left out, since neither is any use to a peer.
+       // Link local addresses are kept, because on a LAN they may be the only thing that works,
+       // and telling them apart is left to the caller.
+       function AddressGetInterfaceHostIPs(out aAddresses:TRNLHostAddresses;const aFamily:TRNLAddressFamily;const aInterfaceHostAddressType:TRNLInterfaceHostAddressType=RNL_INTERFACE_HOST_ADDRESS_UNICAST):boolean; virtual;
        function SocketCreate(const aType:TRNLSocketType;const aFamily:TRNLAddressFamily):TRNLSocket; virtual;
        function SocketCreateWithProtocol(const aType:TRNLSocketType;const aFamily:TRNLAddressFamily;const aProtocol:TRNLInt32):TRNLSocket; virtual;
        procedure SocketDestroy(const aSocket:TRNLSocket); virtual;
@@ -2897,6 +2972,7 @@ type PRNLVersion=^TRNLVersion;
        function AddressGetHost(const aAddress:TRNLAddress;out aName;const aNameLength:TRNLInt32;const aFlags:TRNLInt32=0):boolean; override;
        function AddressGetHostIP(const aAddress:TRNLAddress;out aName;const aNameLength:TRNLInt32):boolean; override;
        function AddressGetPrimaryInterfaceHostIP(var aAddress:TRNLAddress;const aFamily:TRNLAddressFamily;const aInterfaceHostAddressType:TRNLInterfaceHostAddressType=RNL_INTERFACE_HOST_ADDRESS_UNICAST):boolean; override;
+       function AddressGetInterfaceHostIPs(out aAddresses:TRNLHostAddresses;const aFamily:TRNLAddressFamily;const aInterfaceHostAddressType:TRNLInterfaceHostAddressType=RNL_INTERFACE_HOST_ADDRESS_UNICAST):boolean; override;
        function SocketCreate(const aType:TRNLSocketType;const aFamily:TRNLAddressFamily):TRNLSocket; override;
        function SocketCreateWithProtocol(const aType:TRNLSocketType;const aFamily:TRNLAddressFamily;const aProtocol:TRNLInt32):TRNLSocket; override;
        procedure SocketDestroy(const aSocket:TRNLSocket); override;
@@ -4001,6 +4077,8 @@ type PRNLVersion=^TRNLVersion;
        // iteration, which is where it would otherwise cost an allocation each time.
        fWaitSockets:array of TRNLSocket;
 
+       fLocalCandidates:TRNLCandidates;
+
        fTime:TRNLTime;
 
        fNextPeerEventTime:TRNLTime;
@@ -4115,6 +4193,7 @@ type PRNLVersion=^TRNLVersion;
        function AcceptableProtocolVersion(const aProtocolVersion:TRNLUInt64;out aTranscriptBinding:boolean):boolean;
 
        function GetCountSockets:TRNLSizeInt;
+       function GetLocalCandidates:TRNLCandidates;
 
        procedure AddHandshakePacketChecksum(var aHandshakePacket);
 
@@ -4160,6 +4239,16 @@ type PRNLVersion=^TRNLVersion;
        constructor Create(const aInstance:TRNLInstance;const aNetwork:TRNLNetwork); reintroduce;
        destructor Destroy; override;
        procedure Start(const aAddressFamilyWorkMode:TRNLHostAddressFamilyWorkMode=RNL_HOST_ADDRESS_FAMILY_WORK_MODE_IPV4_AND_IPV6);
+       // Collects every address this host might be reachable at: one host candidate per local
+       // interface address and socket, plus one server reflexive candidate per STUN server which
+       // answers. The result also lands in LocalCandidates.
+       //
+       // Blocking, and it reads from the host's own sockets while it waits for the STUN answers,
+       // so it belongs between Start and the first Service call and nowhere else. Servicing the
+       // host at the same time would mean the two of them racing for the same datagrams.
+       function GatherCandidates(const aSTUNServers:array of TRNLAddress;
+                                 out aCandidates:TRNLCandidates;
+                                 const aTimeoutMilliseconds:TRNLInt64=2000):boolean;
        // aExpectedRemoteLongTermPublicKey pins the identity of the counter side. Left at nil,
        // which is the default, nothing is compared and this behaves exactly as before; given a
        // key, the handshake is broken off as soon as the counter side turns out to hold a
@@ -4250,6 +4339,9 @@ type PRNLVersion=^TRNLVersion;
        // address family; now it depends on the work mode and, later, on how many local interfaces
        // are being offered. Read only, and mostly here so that the socket model is observable at
        // all from the outside.
+       // Every address this host might be reachable at, highest priority first. Empty until
+       // GatherCandidates has run.
+       property LocalCandidates:TRNLCandidates read GetLocalCandidates;
        property CountSockets:TRNLSizeInt read GetCountSockets;
        property CountPeers:TRNLUInt32 read fCountPeers;
        property TotalReceivedData:TRNLUInt64 read fTotalReceivedData;
@@ -16748,8 +16840,182 @@ begin
  result:=false;
 end;
 
+class function TRNLCandidateUtils.TypePreference(const aKind:TRNLCandidateKind):TRNLUInt32;
+begin
+ case aKind of
+  RNL_CANDIDATE_KIND_HOST:begin
+   result:=TypePreferenceHost;
+  end;
+  RNL_CANDIDATE_KIND_SERVER_REFLEXIVE:begin
+   result:=TypePreferenceServerReflexive;
+  end;
+  else begin
+   result:=TypePreferenceRelayed;
+  end;
+ end;
+end;
+
+class function TRNLCandidateUtils.Priority(const aKind:TRNLCandidateKind;
+                                           const aLocalPreference:TRNLUInt32):TRNLUInt32;
+begin
+ // The type dominates, the local preference only orders candidates of the same type among
+ // themselves, and the component number occupies the bottom bits. Clamped rather than trusted,
+ // because a local preference out of range would silently spill into the type field above it.
+ result:=(TypePreference(aKind) shl 24) or
+         ((aLocalPreference and $ffff) shl 8) or
+         TRNLUInt32(256-ComponentID);
+end;
+
+class function TRNLCandidateUtils.Foundation(const aKind:TRNLCandidateKind;
+                                             const aBase:TRNLHostAddress;
+                                             const aServer:TRNLHostAddress):TRNLUInt32;
+type PToHash=^TToHash;
+     TToHash=packed record
+      Kind:TRNLUInt8;
+      Base:TRNLHostAddress;
+      Server:TRNLHostAddress;
+     end;
+var ToHash:TToHash;
+begin
+ // Two candidates belong together exactly when all three of these agree, so hashing them together
+ // is the whole definition. A collision would only make two unrelated candidates look related and
+ // cost one redundant attempt, so 32 bits are plenty.
+ FillChar(ToHash,SizeOf(TToHash),#0);
+ ToHash.Kind:=TRNLUInt8(TRNLInt32(aKind));
+ ToHash.Base:=aBase;
+ ToHash.Server:=aServer;
+ result:=TRNLHashUtils.Hash32(ToHash,SizeOf(TToHash));
+end;
+
+class procedure TRNLCandidateUtils.SortByPriority(var aCandidates:TRNLCandidates);
+var Index,OtherIndex:TRNLSizeInt;
+    Temporary:TRNLCandidate;
+begin
+ // Insertion sort, because a candidate list is a handful of entries and this keeps equal priorities
+ // in the order they were gathered in, which makes the outcome reproducible
+ for Index:=1 to length(aCandidates)-1 do begin
+  Temporary:=aCandidates[Index];
+  OtherIndex:=Index;
+  while (OtherIndex>0) and (aCandidates[OtherIndex-1].Priority<Temporary.Priority) do begin
+   aCandidates[OtherIndex]:=aCandidates[OtherIndex-1];
+   dec(OtherIndex);
+  end;
+  aCandidates[OtherIndex]:=Temporary;
+ end;
+end;
+
+class function TRNLCandidateUtils.Serialize(const aCandidates:TRNLCandidates):TBytes;
+type PHeader=^THeader;
+     THeader=packed record
+      Signature:array[0..3] of TRNLUInt8;
+      Version:TRNLUInt16;
+      CountCandidates:TRNLUInt16;
+     end;
+const Signature:array[0..3] of TRNLUInt8=(TRNLUInt8(ord('R')),TRNLUInt8(ord('N')),
+                                          TRNLUInt8(ord('L')),TRNLUInt8(ord('C')));
+      Version=1;
+var Header:PHeader;
+    Index:TRNLSizeInt;
+    Entry:PRNLCandidate;
+begin
+ // A signature and a version, so that something which is not a candidate list, or one from a
+ // future version, is recognised as such rather than read as garbage
+ SetLength(result,SizeOf(THeader)+(length(aCandidates)*SizeOf(TRNLCandidate)));
+ Header:=@result[0];
+ Header^.Signature[0]:=Signature[0];
+ Header^.Signature[1]:=Signature[1];
+ Header^.Signature[2]:=Signature[2];
+ Header^.Signature[3]:=Signature[3];
+ Header^.Version:=TRNLEndianness.HostToLittleEndian16(Version);
+ Header^.CountCandidates:=TRNLEndianness.HostToLittleEndian16(TRNLUInt16(length(aCandidates)));
+ for Index:=0 to length(aCandidates)-1 do begin
+  Entry:=@result[SizeOf(THeader)+(Index*SizeOf(TRNLCandidate))];
+  Entry^:=aCandidates[Index];
+  Entry^.SocketIndex:=TRNLEndianness.HostToLittleEndian16(aCandidates[Index].SocketIndex);
+  Entry^.Priority:=TRNLEndianness.HostToLittleEndian32(aCandidates[Index].Priority);
+  Entry^.Foundation:=TRNLEndianness.HostToLittleEndian32(aCandidates[Index].Foundation);
+  Entry^.Address.Port:=TRNLEndianness.HostToLittleEndian16(aCandidates[Index].Address.Port);
+ end;
+end;
+
+class function TRNLCandidateUtils.Deserialize(const aBytes:TBytes;out aCandidates:TRNLCandidates):boolean;
+type PHeader=^THeader;
+     THeader=packed record
+      Signature:array[0..3] of TRNLUInt8;
+      Version:TRNLUInt16;
+      CountCandidates:TRNLUInt16;
+     end;
+const Version=1;
+      // A candidate list is a handful of entries. A number far above that is not a list worth
+      // reading, and refusing it here is what keeps a length field from turning into an allocation
+      MaximumCountCandidates=256;
+var Header:PHeader;
+    Count,Index:TRNLSizeInt;
+    Entry:PRNLCandidate;
+begin
+
+ result:=false;
+ aCandidates:=nil;
+
+ if length(aBytes)<TRNLSizeInt(SizeOf(THeader)) then begin
+  exit;
+ end;
+
+ Header:=@aBytes[0];
+
+ if (Header^.Signature[0]<>TRNLUInt8(ord('R'))) or
+    (Header^.Signature[1]<>TRNLUInt8(ord('N'))) or
+    (Header^.Signature[2]<>TRNLUInt8(ord('L'))) or
+    (Header^.Signature[3]<>TRNLUInt8(ord('C'))) then begin
+  exit;
+ end;
+
+ if TRNLEndianness.LittleEndianToHost16(Header^.Version)<>Version then begin
+  exit;
+ end;
+
+ Count:=TRNLEndianness.LittleEndianToHost16(Header^.CountCandidates);
+
+ if Count>MaximumCountCandidates then begin
+  exit;
+ end;
+
+ // The count has to match what really arrived, exactly. A shorter buffer would otherwise be read
+ // past its end, and a longer one means this is not the message it claims to be.
+ if length(aBytes)<>TRNLSizeInt(SizeOf(THeader)+(Count*SizeOf(TRNLCandidate))) then begin
+  exit;
+ end;
+
+ SetLength(aCandidates,Count);
+ for Index:=0 to Count-1 do begin
+  Entry:=@aBytes[SizeOf(THeader)+(Index*SizeOf(TRNLCandidate))];
+  aCandidates[Index]:=Entry^;
+  aCandidates[Index].SocketIndex:=TRNLEndianness.LittleEndianToHost16(Entry^.SocketIndex);
+  aCandidates[Index].Priority:=TRNLEndianness.LittleEndianToHost32(Entry^.Priority);
+  aCandidates[Index].Foundation:=TRNLEndianness.LittleEndianToHost32(Entry^.Foundation);
+  aCandidates[Index].Address.Port:=TRNLEndianness.LittleEndianToHost16(Entry^.Address.Port);
+  // An unknown kind cannot be paired sensibly, and letting it through would mean the priority
+  // arithmetic runs on a value nobody defined
+  if TRNLInt32(aCandidates[Index].Kind)>TRNLInt32(RNL_CANDIDATE_KIND_RELAYED) then begin
+   aCandidates:=nil;
+   exit;
+  end;
+ end;
+
+ result:=true;
+
+end;
+
 function TRNLNetwork.AddressGetPrimaryInterfaceHostIP(var aAddress:TRNLAddress;const aFamily:TRNLAddressFamily;const aInterfaceHostAddressType:TRNLInterfaceHostAddressType=RNL_INTERFACE_HOST_ADDRESS_UNICAST):boolean;
 begin
+ result:=false;
+end;
+
+function TRNLNetwork.AddressGetInterfaceHostIPs(out aAddresses:TRNLHostAddresses;const aFamily:TRNLAddressFamily;const aInterfaceHostAddressType:TRNLInterfaceHostAddressType=RNL_INTERFACE_HOST_ADDRESS_UNICAST):boolean;
+begin
+ // A network which is not the real one has no interfaces to enumerate, and a virtual one in
+ // particular has exactly one address which every socket shares
+ aAddresses:=nil;
  result:=false;
 end;
 
@@ -17394,6 +17660,179 @@ end;
 {$else}
 begin
  result:=false;
+end;
+{$ifend}
+
+{$if not defined(Windows)}
+// getifaddrs is the only portable way to enumerate interfaces on a Unix, and neither FreePascal nor
+// Delphi declares it, so it is declared here. Everything RNL needs from the structure is in the
+// first six fields, which Linux, macOS and the BSDs lay out identically. Deliberately not a packed
+// record: the natural alignment is what C uses, and packing it would move every pointer after the
+// flags on a 64 bit target.
+type PRNLIfAddrs=^TRNLIfAddrs;
+     TRNLIfAddrs=record
+      ifa_next:PRNLIfAddrs;
+      ifa_name:PAnsiChar;
+      ifa_flags:TRNLUInt32;
+      ifa_addr:TRNLPointer;
+      ifa_netmask:TRNLPointer;
+      ifa_dstaddr:TRNLPointer;
+      ifa_data:TRNLPointer;
+     end;
+
+const RNL_IFF_UP=$0001;
+      RNL_IFF_LOOPBACK=$0008;
+
+function RNLGetIfAddrs(out aIfAddrs:PRNLIfAddrs):TRNLInt32; cdecl; external name 'getifaddrs';
+procedure RNLFreeIfAddrs(const aIfAddrs:PRNLIfAddrs); cdecl; external name 'freeifaddrs';
+{$ifend}
+
+function TRNLRealNetwork.AddressGetInterfaceHostIPs(out aAddresses:TRNLHostAddresses;const aFamily:TRNLAddressFamily;const aInterfaceHostAddressType:TRNLInterfaceHostAddressType=RNL_INTERFACE_HOST_ADDRESS_UNICAST):boolean;
+var Count:TRNLSizeInt;
+
+ // Appends unless the very same address is in already. A machine can have one address on more than
+ // one interface, and an interface can list it more than once, and either way a duplicate candidate
+ // would only cost a redundant connectivity check.
+ procedure Add(const aHost:TRNLHostAddress);
+ var Index:TRNLSizeInt;
+ begin
+  for Index:=0 to Count-1 do begin
+   if aAddresses[Index].Equals(aHost) then begin
+    exit;
+   end;
+  end;
+  if Count>=length(aAddresses) then begin
+   SetLength(aAddresses,(Count+8)*2);
+  end;
+  aAddresses[Count]:=aHost;
+  inc(Count);
+ end;
+
+{$if defined(Windows)}
+var AdapterSize:DWORD;
+    Adapters,Adapter:PIP_ADAPTER_ADDRESSES;
+    AdapterUnicastAddress:PIP_ADAPTER_UNICAST_ADDRESS;
+    AdapterMulticastAddress:PIP_ADAPTER_MULTICAST_ADDRESS;
+    Address:TRNLAddress;
+begin
+
+ aAddresses:=nil;
+ Count:=0;
+ result:=false;
+
+ if not (aFamily in [RNL_IPV4,RNL_IPV6]) then begin
+  exit;
+ end;
+
+ AdapterSize:=20000;
+ Adapters:=nil;
+ try
+  repeat
+   GetMem(Adapters,AdapterSize);
+   case GetAdaptersAddresses(AF_UNSPEC,GAA_FLAG_INCLUDE_PREFIX,nil,Adapters,@AdapterSize) of
+    ERROR_BUFFER_OVERFLOW:begin
+     FreeMem(Adapters);
+     Adapters:=nil;
+    end;
+    ERROR_SUCCESS:begin
+     break;
+    end;
+    else begin
+     FreeMem(Adapters);
+     Adapters:=nil;
+     break;
+    end;
+   end;
+  until assigned(Adapters);
+  Adapter:=Adapters;
+  // The same walk AddressGetPrimaryInterfaceHostIP does, except that it collects instead of stopping
+  // at the first hit
+  while assigned(Adapter) do begin
+   if (Adapter^.IfType<>24{IF_TYPE_SOFTWARE_LOOPBACK}) and
+      (Adapter^.OperStatus=IfOperStatusUp) then begin
+    case aInterfaceHostAddressType of
+     RNL_INTERFACE_HOST_ADDRESS_UNICAST:begin
+      AdapterUnicastAddress:=Adapter^.FirstUnicastAddress;
+      while assigned(AdapterUnicastAddress) do begin
+       if ((aFamily=RNL_IPV4) and (AdapterUnicastAddress^.Address.lpSockaddr^.sa_family=AF_INET)) or
+          ((aFamily=RNL_IPV6) and (AdapterUnicastAddress^.Address.lpSockaddr^.sa_family=AF_INET6)) then begin
+        if Address.SetAddress(AdapterUnicastAddress^.Address.lpSockaddr)<>RNL_NO_ADDRESS_FAMILY then begin
+         Add(Address.Host);
+        end;
+       end;
+       AdapterUnicastAddress:=AdapterUnicastAddress^.Next;
+      end;
+     end;
+     RNL_INTERFACE_HOST_ADDRESS_MULTICAST:begin
+      AdapterMulticastAddress:=Adapter^.FirstMulticastAddress;
+      while assigned(AdapterMulticastAddress) do begin
+       if ((aFamily=RNL_IPV4) and (AdapterMulticastAddress^.Address.lpSockaddr^.sa_family=AF_INET)) or
+          ((aFamily=RNL_IPV6) and (AdapterMulticastAddress^.Address.lpSockaddr^.sa_family=AF_INET6)) then begin
+        if Address.SetAddress(AdapterMulticastAddress^.Address.lpSockaddr)<>RNL_NO_ADDRESS_FAMILY then begin
+         Add(Address.Host);
+        end;
+       end;
+       AdapterMulticastAddress:=AdapterMulticastAddress^.Next;
+      end;
+     end;
+    end;
+   end;
+   Adapter:=Adapter^.Next;
+  end;
+ finally
+  if assigned(Adapters) then begin
+   FreeMem(Adapters);
+  end;
+ end;
+
+ SetLength(aAddresses,Count);
+ result:=Count>0;
+
+end;
+{$else}
+var IfAddrs,IfAddr:PRNLIfAddrs;
+    Address:TRNLAddress;
+    AddressFamily:TRNLAddressFamily;
+begin
+
+ aAddresses:=nil;
+ Count:=0;
+ result:=false;
+
+ if not (aFamily in [RNL_IPV4,RNL_IPV6]) then begin
+  exit;
+ end;
+
+ // getifaddrs reports the addresses assigned to interfaces, and multicast group memberships are not
+ // among them, so there is nothing honest to return for that case
+ if aInterfaceHostAddressType<>RNL_INTERFACE_HOST_ADDRESS_UNICAST then begin
+  exit;
+ end;
+
+ IfAddrs:=nil;
+ if RNLGetIfAddrs(IfAddrs)<>0 then begin
+  exit;
+ end;
+ try
+  IfAddr:=IfAddrs;
+  while assigned(IfAddr) do begin
+   if assigned(IfAddr^.ifa_addr) and
+      ((IfAddr^.ifa_flags and RNL_IFF_UP)<>0) and
+      ((IfAddr^.ifa_flags and RNL_IFF_LOOPBACK)=0) then begin
+    AddressFamily:=Address.SetAddress(IfAddr^.ifa_addr);
+    if AddressFamily=aFamily then begin
+     Add(Address.Host);
+    end;
+   end;
+   IfAddr:=IfAddr^.ifa_next;
+  end;
+ finally
+  RNLFreeIfAddrs(IfAddrs);
+ end;
+
+ SetLength(aAddresses,Count);
+ result:=Count>0;
+
 end;
 {$ifend}
 
@@ -26079,6 +26518,128 @@ begin
  end else begin
   result:=false;
  end;
+end;
+
+function TRNLHost.GetLocalCandidates:TRNLCandidates;
+begin
+ result:=fLocalCandidates;
+end;
+
+function TRNLHost.GatherCandidates(const aSTUNServers:array of TRNLAddress;
+                                   out aCandidates:TRNLCandidates;
+                                   const aTimeoutMilliseconds:TRNLInt64=2000):boolean;
+var Count:TRNLSizeInt;
+
+ procedure Add(const aAddress:TRNLAddress;
+               const aKind:TRNLCandidateKind;
+               const aSocketIndex:TRNLSizeInt;
+               const aBase:TRNLHostAddress;
+               const aServer:TRNLHostAddress;
+               const aOrdinal:TRNLSizeInt);
+ var Index:TRNLSizeInt;
+     LocalPreference:TRNLUInt32;
+ begin
+  // The very same address twice is one redundant connectivity check and nothing else, so it is
+  // dropped here rather than paired later
+  for Index:=0 to Count-1 do begin
+   if (aCandidates[Index].Kind=aKind) and
+      aCandidates[Index].Address.Host.Equals(aAddress.Host) and
+      (aCandidates[Index].Address.Port=aAddress.Port) then begin
+    exit;
+   end;
+  end;
+  if Count>=length(aCandidates) then begin
+   SetLength(aCandidates,(Count+8)*2);
+  end;
+  // Earlier ones rank higher, so the order they were gathered in survives into the order they get
+  // tried in. Clamped, because the local preference occupies a fixed field in the priority.
+  if aOrdinal>=65535 then begin
+   LocalPreference:=0;
+  end else begin
+   LocalPreference:=65535-TRNLUInt32(aOrdinal);
+  end;
+  FillChar(aCandidates[Count],SizeOf(TRNLCandidate),#0);
+  aCandidates[Count].Address:=aAddress;
+  aCandidates[Count].Kind:=aKind;
+  aCandidates[Count].SocketIndex:=TRNLUInt16(aSocketIndex);
+  aCandidates[Count].Priority:=TRNLCandidateUtils.Priority(aKind,LocalPreference);
+  aCandidates[Count].Foundation:=TRNLCandidateUtils.Foundation(aKind,aBase,aServer);
+  inc(Count);
+ end;
+
+var SocketIndex,AddressIndex,ServerIndex,Ordinal:TRNLSizeInt;
+    InterfaceAddresses:TRNLHostAddresses;
+    BoundAddress,Candidate:TRNLAddress;
+    EmptyHost:TRNLHostAddress;
+    STUNResult:TRNLSTUNResult;
+begin
+
+ aCandidates:=nil;
+ Count:=0;
+ Ordinal:=0;
+ FillChar(EmptyHost,SizeOf(TRNLHostAddress),#0);
+
+ for SocketIndex:=0 to length(fSockets)-1 do begin
+
+  if fSockets[SocketIndex].Socket=RNL_SOCKET_NULL then begin
+   continue;
+  end;
+
+  if not fNetwork.SocketGetAddress(fSockets[SocketIndex].Socket,
+                                   BoundAddress,
+                                   fSockets[SocketIndex].Family) then begin
+   continue;
+  end;
+
+  // Host candidates: every address of every interface, carrying the port this socket is bound to,
+  // because that is what a peer would have to send to
+  if fNetwork.AddressGetInterfaceHostIPs(InterfaceAddresses,fSockets[SocketIndex].Family) then begin
+   for AddressIndex:=0 to length(InterfaceAddresses)-1 do begin
+    Candidate.Host:=InterfaceAddresses[AddressIndex];
+    Candidate.ScopeID:=BoundAddress.ScopeID;
+    Candidate.Port:=BoundAddress.Port;
+    Add(Candidate,RNL_CANDIDATE_KIND_HOST,SocketIndex,Candidate.Host,EmptyHost,Ordinal);
+    inc(Ordinal);
+   end;
+  end else begin
+   // No enumeration available, which is the case for every network that is not the real one. What
+   // the socket is actually bound to is then the only host candidate there is, and it is a true one.
+   Add(BoundAddress,RNL_CANDIDATE_KIND_HOST,SocketIndex,BoundAddress.Host,EmptyHost,Ordinal);
+   inc(Ordinal);
+  end;
+
+  // Server reflexive candidates: what each STUN server sees this socket as. Asked over this very
+  // socket, since a mapping belongs to the socket it was created for and one learned over any other
+  // would describe a path that does not exist.
+  for ServerIndex:=Low(aSTUNServers) to High(aSTUNServers) do begin
+   if (aSTUNServers[ServerIndex].GetAddressFamily and fSockets[SocketIndex].Families)=0 then begin
+    continue;
+   end;
+   STUNResult:=TRNLSTUNClient.QueryOnSocket(fInstance,
+                                            fNetwork,
+                                            fSockets[SocketIndex].Socket,
+                                            aSTUNServers[ServerIndex],
+                                            fSockets[SocketIndex].Family,
+                                            aTimeoutMilliseconds,
+                                            1);
+   if STUNResult.Success then begin
+    Add(STUNResult.MappedAddress,
+        RNL_CANDIDATE_KIND_SERVER_REFLEXIVE,
+        SocketIndex,
+        BoundAddress.Host,
+        aSTUNServers[ServerIndex].Host,
+        Ordinal);
+    inc(Ordinal);
+   end;
+  end;
+
+ end;
+
+ SetLength(aCandidates,Count);
+ TRNLCandidateUtils.SortByPriority(aCandidates);
+ fLocalCandidates:=aCandidates;
+ result:=Count>0;
+
 end;
 
 function TRNLHost.GetCountSockets:TRNLSizeInt;
