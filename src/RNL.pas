@@ -2883,6 +2883,81 @@ type PRNLVersion=^TRNLVersion;
        class function Deserialize(const aBytes:TBytes;out aCandidates:TRNLCandidates):boolean; static;
      end;
 
+     // How the NAT in front of this host chooses the external address it presents a socket under.
+     // RFC 4787 calls this the mapping behaviour, and it is the half that decides whether a server
+     // reflexive candidate is worth anything: only a NAT which keeps one mapping per socket, no
+     // matter who the socket writes to, presents a peer the same address a STUN server saw.
+     //
+     // The other half, the filtering behaviour, decides whether the counter side has to punch
+     // first. It cannot be told from binding requests alone, because it takes a party willing to
+     // answer from an address this host never wrote to, so it is deliberately not guessed at here.
+     //
+     // The order is the order of decreasing usefulness for punching, so comparisons mean something.
+     PRNLNATMappingBehaviour=^TRNLNATMappingBehaviour;
+     TRNLNATMappingBehaviour=
+      (
+       // Nothing was determined, which includes the case of only one server having answered
+       RNL_NAT_MAPPING_BEHAVIOUR_UNKNOWN,
+       // The socket is seen under its own address, so there is no NAT in the way at all
+       RNL_NAT_MAPPING_BEHAVIOUR_NONE,
+       // One mapping per socket, whoever it writes to. The case punching was invented for.
+       RNL_NAT_MAPPING_BEHAVIOUR_ENDPOINT_INDEPENDENT,
+       // The mapping differs by destination, but with what was asked it could not be narrowed down
+       // any further than that. Narrowing it needs a second server on the same host as the first
+       // one but on another port.
+       RNL_NAT_MAPPING_BEHAVIOUR_DESTINATION_DEPENDENT,
+       // One mapping per destination host, the same one for every port of that host
+       RNL_NAT_MAPPING_BEHAVIOUR_ADDRESS_DEPENDENT,
+       // One mapping per destination host and port, which is what is usually called symmetric
+       RNL_NAT_MAPPING_BEHAVIOUR_ADDRESS_AND_PORT_DEPENDENT
+      );
+
+     // What two sides can expect of a direct connection between them. Worth knowing before the
+     // attempt rather than after it, because a doomed one costs the full fPendingConnectionTimeout.
+     PRNLHolePunchingViability=^TRNLHolePunchingViability;
+     TRNLHolePunchingViability=
+      (
+       RNL_HOLE_PUNCHING_VIABILITY_UNKNOWN,
+       // At least one of the two is not behind a NAT, so the other one simply connects to it and
+       // there is nothing to punch
+       RNL_HOLE_PUNCHING_VIABILITY_DIRECT,
+       // Both keep one mapping per socket, so both reflexive candidates describe a path that
+       // exists and punching does what it is supposed to do
+       RNL_HOLE_PUNCHING_VIABILITY_GOOD,
+       // One of the two changes its mapping per destination. Its own reflexive candidate is
+       // therefore worthless, but the connection can still come up if that side is the one which
+       // initiates: the mapping it creates by sending is the address the other side then answers
+       // to, and RNL matches a handshake answer by peer id and salt rather than by address.
+       RNL_HOLE_PUNCHING_VIABILITY_POOR,
+       // Both change their mapping per destination, so neither one has an address to offer the
+       // other. This is the case a relay exists for.
+       RNL_HOLE_PUNCHING_VIABILITY_HOPELESS
+      );
+
+     PRNLNATDetectionResult=^TRNLNATDetectionResult;
+     TRNLNATDetectionResult=record
+      // Whether a single server answered at all. The behaviour can still be UNKNOWN with this set,
+      // which is the case where the mapping is known but nothing could be concluded about it.
+      Success:boolean;
+      Behaviour:TRNLNATMappingBehaviour;
+      // What the socket is bound to and what the first answering server saw it as. The difference
+      // between the two is the NAT.
+      LocalAddress:TRNLAddress;
+      MappedAddress:TRNLAddress;
+      CountAnsweringServers:TRNLSizeInt;
+      // Which of this host's sockets the answer describes, since a mapping belongs to exactly one
+      SocketIndex:TRNLSizeInt;
+     end;
+
+     // Pure arithmetic over the two behaviours, so it sits here and not on the host
+     PRNLNATUtils=^TRNLNATUtils;
+     TRNLNATUtils=record
+      public
+       // The counter side's behaviour travels over the same signalling as its candidates do, so
+       // both are available before the first packet is sent.
+       class function PredictHolePunchingViability(const aLocal,aRemote:TRNLNATMappingBehaviour):TRNLHolePunchingViability; static;
+     end;
+
      TRNLNetwork=class
       private
        fInstance:TRNLInstance;
@@ -4293,6 +4368,17 @@ type PRNLVersion=^TRNLVersion;
        // which ran into its timeout does, and the connection arrives as an ordinary incoming one
        // with a peer of its own. So a caller which may be called at the same time has to be
        // prepared for its connection to show up as RNL_HOST_EVENT_TYPE_PEER_CONNECT.
+       // Two binding requests from the same socket to two servers on different hosts tell apart a
+       // NAT which keeps one mapping per socket from one which picks a new one per destination,
+       // which is what decides whether a server reflexive candidate is of any use. A third server,
+       // on the same host as the first one but on another port, narrows the second case down
+       // further; without it the answer stays at DESTINATION_DEPENDENT rather than guessing.
+       //
+       // Blocking and reading from the host's own socket, exactly like GatherCandidates and for
+       // the same reason, so it belongs between Start and the first Service call.
+       function DetectNATMappingBehaviour(const aSTUNServers:array of TRNLAddress;
+                                          out aResult:TRNLNATDetectionResult;
+                                          const aTimeoutMilliseconds:TRNLInt64=1000):boolean;
        function ConnectViaCandidates(const aRemoteCandidates:TRNLCandidates;
                                      const aCountChannels:TRNLUInt32=1;
                                      const aData:TRNLUInt64=0;
@@ -16918,6 +17004,27 @@ begin
  result:=false;
 end;
 
+class function TRNLNATUtils.PredictHolePunchingViability(const aLocal,aRemote:TRNLNATMappingBehaviour):TRNLHolePunchingViability;
+begin
+ if (aLocal=RNL_NAT_MAPPING_BEHAVIOUR_UNKNOWN) or
+    (aRemote=RNL_NAT_MAPPING_BEHAVIOUR_UNKNOWN) then begin
+  result:=RNL_HOLE_PUNCHING_VIABILITY_UNKNOWN;
+ end else if (aLocal=RNL_NAT_MAPPING_BEHAVIOUR_NONE) or
+             (aRemote=RNL_NAT_MAPPING_BEHAVIOUR_NONE) then begin
+  // Whoever is behind the NAT connects outwards to the one which is not, and that is the whole
+  // exercise. Which of the two it is does not matter, since the one without a NAT is reachable.
+  result:=RNL_HOLE_PUNCHING_VIABILITY_DIRECT;
+ end else if (aLocal=RNL_NAT_MAPPING_BEHAVIOUR_ENDPOINT_INDEPENDENT) and
+             (aRemote=RNL_NAT_MAPPING_BEHAVIOUR_ENDPOINT_INDEPENDENT) then begin
+  result:=RNL_HOLE_PUNCHING_VIABILITY_GOOD;
+ end else if (aLocal=RNL_NAT_MAPPING_BEHAVIOUR_ENDPOINT_INDEPENDENT) or
+             (aRemote=RNL_NAT_MAPPING_BEHAVIOUR_ENDPOINT_INDEPENDENT) then begin
+  result:=RNL_HOLE_PUNCHING_VIABILITY_POOR;
+ end else begin
+  result:=RNL_HOLE_PUNCHING_VIABILITY_HOPELESS;
+ end;
+end;
+
 class function TRNLCandidateUtils.TypePreference(const aKind:TRNLCandidateKind):TRNLUInt32;
 begin
  case aKind of
@@ -19500,6 +19607,17 @@ begin
  result:=RNL_SOCKET_NULL;
 end;
 
+// fNewDataEvent is one auto reset event for the whole virtual network, so a single SetEvent wakes
+// exactly one waiter. With more than one thread waiting on the same network - several hosts, or a
+// test server thread alongside a host - the wake up meant for one of them is consumed by another,
+// and the one whose datagram it was sleeps out its entire timeout while the data is already
+// sitting in its queue. Measured at a full second per STUN query with three server threads around.
+//
+// Both loops below re-examine the queues after every wait, so bounding the wait turns a lost wake
+// up into a delay of at most this long instead of the whole timeout. Waiting is still what carries
+// the normal case; this only puts a floor under the pathological one.
+const RNL_VIRTUAL_NETWORK_MAXIMUM_WAIT_MILLISECONDS=10;
+
 function TRNLVirtualNetwork.SocketSelect(const aMaxSocket:TRNLSocket;var aReadSet,aWriteSet:TRNLSocketSet;const aTimeout:TRNLInt64;const aEvent:TRNLNetworkEvent=nil):TRNLInt32;
 var SocketInstanceListNode:TRNLVirtualNetworkSocketInstanceListNode;
     Socket:TRNLSocket;
@@ -19559,7 +19677,7 @@ begin
       break;
      end;
     end else begin
-     fNewDataEvent.WaitFor(TimeoutDifference);
+     fNewDataEvent.WaitFor(Min(TimeoutDifference,RNL_VIRTUAL_NETWORK_MAXIMUM_WAIT_MILLISECONDS));
     end;
    end;
   end else begin
@@ -19571,7 +19689,7 @@ begin
       break;
      end;
     end else begin
-     fNewDataEvent.WaitFor(-1);
+     fNewDataEvent.WaitFor(RNL_VIRTUAL_NETWORK_MAXIMUM_WAIT_MILLISECONDS);
     end;
    end;
   end;
@@ -19616,7 +19734,7 @@ begin
       break;
      end;
     end else begin
-     fNewDataEvent.WaitFor(TimeoutDifference);
+     fNewDataEvent.WaitFor(Min(TimeoutDifference,RNL_VIRTUAL_NETWORK_MAXIMUM_WAIT_MILLISECONDS));
     end;
    end;
   end else begin
@@ -19631,7 +19749,7 @@ begin
       break;
      end;
     end else begin
-     fNewDataEvent.WaitFor(-1);
+     fNewDataEvent.WaitFor(RNL_VIRTUAL_NETWORK_MAXIMUM_WAIT_MILLISECONDS);
     end;
    end;
   end;
@@ -26659,6 +26777,156 @@ begin
  end else begin
   result:=false;
  end;
+end;
+
+function TRNLHost.DetectNATMappingBehaviour(const aSTUNServers:array of TRNLAddress;
+                                            out aResult:TRNLNATDetectionResult;
+                                            const aTimeoutMilliseconds:TRNLInt64=1000):boolean;
+var SocketIndex,ServerIndex,ChosenSocket,FirstServerIndex:TRNLSizeInt;
+    BoundAddress,OtherMapped:TRNLAddress;
+    InterfaceAddresses:TRNLHostAddresses;
+    STUNResult:TRNLSTUNResult;
+
+ // Whether that address is one this host is sitting on itself, which is what tells a missing NAT
+ // from one that happens to preserve the port. Bound to a concrete address it is a plain
+ // comparison; bound to the wildcard the interface list is what the socket stands for.
+ function IsOwnAddress(const aAddress:TRNLAddress):boolean;
+ var Index:TRNLSizeInt;
+ begin
+  result:=false;
+  if aAddress.Port<>BoundAddress.Port then begin
+   exit;
+  end;
+  if aAddress.Host.Equals(BoundAddress.Host) then begin
+   result:=true;
+  end else if BoundAddress.Host.Equals(RNL_HOST_ANY) then begin
+   for Index:=0 to length(InterfaceAddresses)-1 do begin
+    if aAddress.Host.Equals(InterfaceAddresses[Index]) then begin
+     result:=true;
+     exit;
+    end;
+   end;
+  end;
+ end;
+
+ // One binding request over the chosen socket, so that what comes back describes the mapping the
+ // payload is going to travel through and not one belonging to some other socket
+ function Ask(const aServerIndex:TRNLSizeInt;out aMapped:TRNLAddress):boolean;
+ begin
+  result:=false;
+  if (aSTUNServers[aServerIndex].GetAddressFamily and fSockets[ChosenSocket].Families)=0 then begin
+   exit;
+  end;
+  STUNResult:=TRNLSTUNClient.QueryOnSocket(fInstance,
+                                           fNetwork,
+                                           fSockets[ChosenSocket].Socket,
+                                           aSTUNServers[aServerIndex],
+                                           fSockets[ChosenSocket].Family,
+                                           aTimeoutMilliseconds,
+                                           1);
+  if STUNResult.Success then begin
+   aMapped:=STUNResult.MappedAddress;
+   inc(aResult.CountAnsweringServers);
+   result:=true;
+  end;
+ end;
+
+begin
+
+ FillChar(aResult,SizeOf(TRNLNATDetectionResult),#0);
+ aResult.Behaviour:=RNL_NAT_MAPPING_BEHAVIOUR_UNKNOWN;
+ aResult.SocketIndex:=-1;
+ result:=false;
+
+ InterfaceAddresses:=nil;
+
+ if length(aSTUNServers)=0 then begin
+  exit;
+ end;
+
+ // The first socket which can reach the first server. A mapping belongs to one socket, so the whole
+ // question is asked over one and the answer says so.
+ ChosenSocket:=-1;
+ for SocketIndex:=0 to length(fSockets)-1 do begin
+  if (fSockets[SocketIndex].Socket<>RNL_SOCKET_NULL) and
+     ((aSTUNServers[Low(aSTUNServers)].GetAddressFamily and fSockets[SocketIndex].Families)<>0) then begin
+   ChosenSocket:=SocketIndex;
+   break;
+  end;
+ end;
+
+ if (ChosenSocket<0) or
+    not fNetwork.SocketGetAddress(fSockets[ChosenSocket].Socket,
+                                  BoundAddress,
+                                  fSockets[ChosenSocket].Family) then begin
+  exit;
+ end;
+
+ aResult.SocketIndex:=ChosenSocket;
+ aResult.LocalAddress:=BoundAddress;
+
+ if BoundAddress.Host.Equals(RNL_HOST_ANY) then begin
+  fNetwork.AddressGetInterfaceHostIPs(InterfaceAddresses,fSockets[ChosenSocket].Family);
+ end;
+
+ // The first server which answers at all is the reference every further answer is compared against
+ FirstServerIndex:=-1;
+ for ServerIndex:=Low(aSTUNServers) to High(aSTUNServers) do begin
+  if Ask(ServerIndex,aResult.MappedAddress) then begin
+   FirstServerIndex:=ServerIndex;
+   break;
+  end;
+ end;
+
+ if FirstServerIndex<0 then begin
+  exit;
+ end;
+
+ aResult.Success:=true;
+ result:=true;
+
+ if IsOwnAddress(aResult.MappedAddress) then begin
+  aResult.Behaviour:=RNL_NAT_MAPPING_BEHAVIOUR_NONE;
+  exit;
+ end;
+
+ // A server on another host. Only a different host answers the question; a different port of the
+ // same host would answer the follow up question instead and is used for that below.
+ for ServerIndex:=Low(aSTUNServers) to High(aSTUNServers) do begin
+  if (ServerIndex<>FirstServerIndex) and
+     not aSTUNServers[ServerIndex].Host.Equals(aSTUNServers[FirstServerIndex].Host) and
+     Ask(ServerIndex,OtherMapped) then begin
+   if OtherMapped.Host.Equals(aResult.MappedAddress.Host) and
+      (OtherMapped.Port=aResult.MappedAddress.Port) then begin
+    aResult.Behaviour:=RNL_NAT_MAPPING_BEHAVIOUR_ENDPOINT_INDEPENDENT;
+   end else begin
+    aResult.Behaviour:=RNL_NAT_MAPPING_BEHAVIOUR_DESTINATION_DEPENDENT;
+   end;
+   break;
+  end;
+ end;
+
+ if aResult.Behaviour<>RNL_NAT_MAPPING_BEHAVIOUR_DESTINATION_DEPENDENT then begin
+  exit;
+ end;
+
+ // It does depend on the destination, so the remaining question is whether the port of that
+ // destination is part of it. Another port of the host already asked answers exactly that.
+ for ServerIndex:=Low(aSTUNServers) to High(aSTUNServers) do begin
+  if (ServerIndex<>FirstServerIndex) and
+     aSTUNServers[ServerIndex].Host.Equals(aSTUNServers[FirstServerIndex].Host) and
+     (aSTUNServers[ServerIndex].Port<>aSTUNServers[FirstServerIndex].Port) and
+     Ask(ServerIndex,OtherMapped) then begin
+   if OtherMapped.Host.Equals(aResult.MappedAddress.Host) and
+      (OtherMapped.Port=aResult.MappedAddress.Port) then begin
+    aResult.Behaviour:=RNL_NAT_MAPPING_BEHAVIOUR_ADDRESS_DEPENDENT;
+   end else begin
+    aResult.Behaviour:=RNL_NAT_MAPPING_BEHAVIOUR_ADDRESS_AND_PORT_DEPENDENT;
+   end;
+   break;
+  end;
+ end;
+
 end;
 
 function TRNLHost.ConnectViaCandidates(const aRemoteCandidates:TRNLCandidates;

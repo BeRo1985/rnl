@@ -2936,6 +2936,232 @@ begin
 end;
 
 // ---------------------------------------------------------------------------------------
+// What kind of NAT is in the way
+// ---------------------------------------------------------------------------------------
+
+// A server reflexive candidate is only worth something if the address a STUN server saw is also
+// the address a peer will see. That holds for a NAT which keeps one mapping per socket and fails
+// for one which picks a new one per destination, and the difference is not visible from a single
+// binding request: one answer is just an address, and every NAT produces one.
+//
+// Two servers on different hosts make it visible. Same answer twice means the mapping does not
+// depend on who is being written to; two different answers mean it does. A third server, on the
+// host already asked but on another port, then says whether the port is part of it too.
+//
+// All four simulated NAT kinds are put through it, which is what makes the result meaningful: the
+// three restricting ones differ in their filtering and share their mapping, so a detection which
+// confused the two halves would have to get at least one of them wrong.
+procedure TestNATMappingBehaviourIsDetectedForEveryNATKind;
+const INSIDE_HOST='127.0.0.1';
+      INSIDE_PORT=18530;
+      EXTERNAL_HOST='198.51.100.9';
+      STUN_HOST_A='203.0.113.1';
+      STUN_HOST_B='203.0.113.2';
+      STUN_PORT_A=3478;
+      STUN_PORT_B=3479;
+var Watchdog:TRNLTestWatchdog;
+    Behaviour:TRNLNATMappingBehaviour;
+
+ function NameOf(const aBehaviour:TRNLNATMappingBehaviour):TRNLRawByteString;
+ begin
+  case aBehaviour of
+   RNL_NAT_MAPPING_BEHAVIOUR_NONE:begin
+    result:='none';
+   end;
+   RNL_NAT_MAPPING_BEHAVIOUR_ENDPOINT_INDEPENDENT:begin
+    result:='endpoint independent';
+   end;
+   RNL_NAT_MAPPING_BEHAVIOUR_DESTINATION_DEPENDENT:begin
+    result:='destination dependent';
+   end;
+   RNL_NAT_MAPPING_BEHAVIOUR_ADDRESS_DEPENDENT:begin
+    result:='address dependent';
+   end;
+   RNL_NAT_MAPPING_BEHAVIOUR_ADDRESS_AND_PORT_DEPENDENT:begin
+    result:='address and port dependent';
+   end;
+   else begin
+    result:='unknown';
+   end;
+  end;
+ end;
+
+ // aBehindNAT false runs the very same thing on the bare virtual network, which is the reference
+ // point: whatever the detection reports there is what no NAT looks like.
+ function Detect(const aBehindNAT:boolean;
+                 const aKind:TRNLTestNATKind;
+                 out aResult:TRNLNATDetectionResult):boolean;
+ var Instance:TRNLInstance;
+     VirtualNetwork:TRNLVirtualNetwork;
+     NAT:TRNLTestNATNetwork;
+     Network:TRNLNetwork;
+     ServerA,ServerB,ServerC:TRNLTestSTUNServer;
+     Host:TRNLHost;
+     Inside,Unused:TRNLAddress;
+     Servers:array[0..2] of TRNLAddress;
+     ExternalHost:TRNLHostAddress;
+
+  function AddressOf(const aHost:TRNLRawByteString;const aPort:TRNLUInt16):TRNLAddress;
+  begin
+   FillChar(result,SizeOf(TRNLAddress),#0);
+   VirtualNetwork.AddressSetHost(result,aHost);
+   result.Port:=aPort;
+  end;
+
+ begin
+
+  result:=false;
+  FillChar(aResult,SizeOf(TRNLNATDetectionResult),#0);
+
+  Instance:=TRNLInstance.Create;
+  try
+   VirtualNetwork:=TRNLVirtualNetwork.Create(Instance);
+   try
+
+    Inside:=AddressOf(INSIDE_HOST,INSIDE_PORT);
+    ExternalHost:=AddressOf(EXTERNAL_HOST,0).Host;
+    Servers[0]:=AddressOf(STUN_HOST_A,STUN_PORT_A);
+    Servers[1]:=AddressOf(STUN_HOST_B,STUN_PORT_A);
+    Servers[2]:=AddressOf(STUN_HOST_A,STUN_PORT_B);
+
+    NAT:=nil;
+    try
+
+     if aBehindNAT then begin
+      NAT:=TRNLTestNATNetwork.Create(Instance,VirtualNetwork,aKind,ExternalHost,Inside.Host);
+      NAT.AddInside(Inside);
+      Network:=NAT;
+     end else begin
+      Network:=VirtualNetwork;
+     end;
+
+     // The servers report what they actually see, which behind a NAT is the translated address and
+     // in front of one is the sender itself. Nothing else about them differs.
+     FillChar(Unused,SizeOf(TRNLAddress),#0);
+     ServerA:=TRNLTestSTUNServer.Create(Instance,Network,STUN_PORT_A,
+                                        RNL_TEST_STUN_SERVER_REPORTING_SENDER,Unused,
+                                        Servers[0].Host);
+     try
+      ServerB:=TRNLTestSTUNServer.Create(Instance,Network,STUN_PORT_A,
+                                         RNL_TEST_STUN_SERVER_REPORTING_SENDER,Unused,
+                                         Servers[1].Host);
+      try
+       ServerC:=TRNLTestSTUNServer.Create(Instance,Network,STUN_PORT_B,
+                                          RNL_TEST_STUN_SERVER_REPORTING_SENDER,Unused,
+                                          Servers[2].Host);
+       try
+
+        Host:=TRNLHost.Create(Instance,Network);
+        try
+         Host.Address.Host:=Inside.Host;
+         Host.Address.Port:=Inside.Port;
+         Host.Start(RNL_HOST_ADDRESS_FAMILY_WORK_MODE_IPV4_ONLY);
+
+         result:=Host.DetectNATMappingBehaviour(Servers,aResult,1000);
+
+        finally
+         FreeAndNil(Host);
+        end;
+
+       finally
+        FreeAndNil(ServerC);
+       end;
+      finally
+       FreeAndNil(ServerB);
+      end;
+     finally
+      FreeAndNil(ServerA);
+     end;
+
+    finally
+     FreeAndNil(NAT);
+    end;
+
+   finally
+    FreeAndNil(VirtualNetwork);
+   end;
+  finally
+   FreeAndNil(Instance);
+  end;
+
+ end;
+
+ procedure CheckKind(const aBehindNAT:boolean;
+                     const aKind:TRNLTestNATKind;
+                     const aExpected:TRNLNATMappingBehaviour;
+                     const aWhat:TRNLRawByteString);
+ var DetectionResult:TRNLNATDetectionResult;
+ begin
+  if not Check(Detect(aBehindNAT,aKind,DetectionResult),aWhat+': a server answers at all') then begin
+   exit;
+  end;
+  Info(aWhat+': seen as '+TRNLRawByteString(DetectionResult.MappedAddress.ToString)+
+       ' while bound to '+TRNLRawByteString(DetectionResult.LocalAddress.ToString)+
+       ', '+TRNLRawByteString(IntToStr(DetectionResult.CountAnsweringServers))+
+       ' server(s) answered, mapping is '+NameOf(DetectionResult.Behaviour));
+  Check(DetectionResult.Behaviour=aExpected,
+        aWhat+': mapping has to come out as '+NameOf(aExpected)+
+        ', not as '+NameOf(DetectionResult.Behaviour));
+ end;
+
+begin
+
+ TestBegin('the nat mapping behaviour is detected for every simulated nat kind');
+ Watchdog:=TRNLTestWatchdog.Create('nat mapping detection',180000);
+ try
+
+  // No NAT at all: the socket is seen under the address it is bound to, and nothing else in the
+  // detection may claim otherwise
+  CheckKind(false,RNL_TEST_NAT_FULL_CONE,RNL_NAT_MAPPING_BEHAVIOUR_NONE,'without a nat');
+
+  // The three restricting kinds differ in what they let back in, not in how they map, so all three
+  // have to come out the same here. That is the point of running all of them.
+  CheckKind(true,RNL_TEST_NAT_FULL_CONE,
+            RNL_NAT_MAPPING_BEHAVIOUR_ENDPOINT_INDEPENDENT,'full cone');
+  CheckKind(true,RNL_TEST_NAT_ADDRESS_RESTRICTED,
+            RNL_NAT_MAPPING_BEHAVIOUR_ENDPOINT_INDEPENDENT,'address restricted');
+  CheckKind(true,RNL_TEST_NAT_PORT_RESTRICTED,
+            RNL_NAT_MAPPING_BEHAVIOUR_ENDPOINT_INDEPENDENT,'port restricted');
+
+  // The symmetric one hands out a fresh external port per destination host and port, so the third
+  // server is what separates it from a merely address dependent one
+  CheckKind(true,RNL_TEST_NAT_SYMMETRIC,
+            RNL_NAT_MAPPING_BEHAVIOUR_ADDRESS_AND_PORT_DEPENDENT,'symmetric');
+
+  // And what all of that is for: saying beforehand whether a direct connection is worth trying
+  Check(TRNLNATUtils.PredictHolePunchingViability(RNL_NAT_MAPPING_BEHAVIOUR_ENDPOINT_INDEPENDENT,
+                                                  RNL_NAT_MAPPING_BEHAVIOUR_ENDPOINT_INDEPENDENT)=
+        RNL_HOLE_PUNCHING_VIABILITY_GOOD,
+        'two nats which keep one mapping per socket are the good case');
+
+  Check(TRNLNATUtils.PredictHolePunchingViability(RNL_NAT_MAPPING_BEHAVIOUR_ADDRESS_AND_PORT_DEPENDENT,
+                                                  RNL_NAT_MAPPING_BEHAVIOUR_ADDRESS_AND_PORT_DEPENDENT)=
+        RNL_HOLE_PUNCHING_VIABILITY_HOPELESS,
+        'two which do not are the case a relay exists for');
+
+  Check(TRNLNATUtils.PredictHolePunchingViability(RNL_NAT_MAPPING_BEHAVIOUR_ADDRESS_AND_PORT_DEPENDENT,
+                                                  RNL_NAT_MAPPING_BEHAVIOUR_ENDPOINT_INDEPENDENT)=
+        RNL_HOLE_PUNCHING_VIABILITY_POOR,
+        'one of each is worth a try, but only from the right side');
+
+  Check(TRNLNATUtils.PredictHolePunchingViability(RNL_NAT_MAPPING_BEHAVIOUR_NONE,
+                                                  RNL_NAT_MAPPING_BEHAVIOUR_ADDRESS_AND_PORT_DEPENDENT)=
+        RNL_HOLE_PUNCHING_VIABILITY_DIRECT,
+        'and a side without a nat is reachable whatever the other one does');
+
+  Check(TRNLNATUtils.PredictHolePunchingViability(RNL_NAT_MAPPING_BEHAVIOUR_UNKNOWN,
+                                                  RNL_NAT_MAPPING_BEHAVIOUR_ENDPOINT_INDEPENDENT)=
+        RNL_HOLE_PUNCHING_VIABILITY_UNKNOWN,
+        'while one unknown side makes the whole prediction unknown');
+
+ finally
+  FreeAndNil(Watchdog);
+  TestEnd;
+ end;
+
+end;
+
+// ---------------------------------------------------------------------------------------
 // What a candidate list costs
 // ---------------------------------------------------------------------------------------
 
@@ -5288,6 +5514,7 @@ begin
  TestGatherCandidatesFindsHostAndServerReflexive;
  TestHolePunchingOpensTheWayForAnIncomingConnection;
  TestCandidateFanOutStaysBoundedForALongCandidateList;
+ TestNATMappingBehaviourIsDetectedForEveryNATKind;
  TestSimultaneousConnectResolvesToOneConnection;
 
  // The rate limiters, on their own before anything drives them over a network
