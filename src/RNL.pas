@@ -25575,8 +25575,8 @@ begin
                                                                                           true);
  if assigned(ConnectionKnownCandidateHostAddress) then begin
   if ConnectionKnownCandidateHostAddress^.RateLimiter.RateLimit(fInstance.Time,
-                                                                 fRateLimiterHostAddressBurst,
-                                                                 fRateLimiterHostAddressPeriod) then begin
+                                                                fRateLimiterHostAddressBurst,
+                                                                fRateLimiterHostAddressPeriod) then begin
    exit;
   end;
  end else begin
