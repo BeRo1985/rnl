@@ -3067,6 +3067,93 @@ begin
 
 end;
 
+procedure TestHostBringsUpTheExpectedSockets;
+const FIRST_PORT=18380;
+type TExpectation=record
+      Name:TRNLRawByteString;
+      Mode:TRNLHostAddressFamilyWorkMode;
+      CountSockets:TRNLSizeInt;
+     end;
+const EXPECTATIONS:array[0..4] of TExpectation=
+       ((Name:'ipv4 only';    Mode:RNL_HOST_ADDRESS_FAMILY_WORK_MODE_IPV4_ONLY;     CountSockets:1),
+        (Name:'ipv6 only';    Mode:RNL_HOST_ADDRESS_FAMILY_WORK_MODE_IPV6_ONLY;     CountSockets:1),
+        (Name:'ipv4 and ipv6';Mode:RNL_HOST_ADDRESS_FAMILY_WORK_MODE_IPV4_AND_IPV6; CountSockets:2),
+        (Name:'ipv4 on ipv6'; Mode:RNL_HOST_ADDRESS_FAMILY_WORK_MODE_IPV4_ON_IPV6;  CountSockets:1),
+        (Name:'automatic';    Mode:RNL_HOST_ADDRESS_FAMILY_WORK_MODE_AUTOMATIC;     CountSockets:1));
+var Instance:TRNLInstance;
+    Network:TRNLVirtualNetwork;
+    Host:TRNLHost;
+    Index:TRNLSizeInt;
+    Watchdog:TRNLTestWatchdog;
+begin
+
+ TestBegin('a host brings up the expected sockets for every address family work mode');
+ Watchdog:=TRNLTestWatchdog.Create('socket bring up',60000);
+ try
+
+  // The sockets of a host are no longer one fixed slot per address family but a list which is built
+  // up as they come. That list has to come out of every work mode with exactly what the fixed slots
+  // used to hold, which is what this pins down: a dual stack mode ends up with one socket serving
+  // both families, and only the mode which really wants two separate ones gets two.
+  for Index:=Low(EXPECTATIONS) to High(EXPECTATIONS) do begin
+
+   Instance:=TRNLInstance.Create;
+   try
+    Network:=TRNLVirtualNetwork.Create(Instance);
+    try
+     Host:=TRNLHost.Create(Instance,Network);
+     try
+      Host.Address.Host:=RNL_HOST_ANY;
+      Host.Address.Port:=FIRST_PORT+Index;
+      Host.Start(EXPECTATIONS[Index].Mode);
+
+      Info(EXPECTATIONS[Index].Name+': '+TRNLRawByteString(IntToStr(Host.CountSockets))+' socket(s)');
+
+      CheckEqualsInt64(Host.CountSockets,EXPECTATIONS[Index].CountSockets,
+                       'work mode '+EXPECTATIONS[Index].Name+' has to end up with the expected '+
+                       'number of sockets');
+
+     finally
+      FreeAndNil(Host);
+     end;
+    finally
+     FreeAndNil(Network);
+    end;
+   finally
+    FreeAndNil(Instance);
+   end;
+
+  end;
+
+ finally
+  FreeAndNil(Watchdog);
+  TestEnd;
+ end;
+
+end;
+
+procedure TestCryptographySelfTestsPass;
+var Succeeded:boolean;
+begin
+
+ TestBegin('the cryptographic self tests pass');
+ try
+
+  // Writes its whole report to standard output on the way, which is a lot of lines. It runs first
+  // for that reason, so the noise stays in one place, and it is worth having: until this call
+  // existed nothing in RNL ever ran these vectors, so the primitives everything else here relies
+  // on were entirely unverified.
+  Succeeded:=TRNLInstance.SelfTestCryptography;
+
+  Check(Succeeded,'every cryptographic self test and checksum check vector in the library has to '+
+                  'come out right');
+
+ finally
+  TestEnd;
+ end;
+
+end;
+
 procedure TestRemoteLongTermPublicKeyIsVisibleAndPinnable;
 const SERVER_PORT=18360;
       CLIENT_PORT=18361;
@@ -3892,9 +3979,14 @@ end;
 procedure RunRegressionTests;
 begin
 
+ // The cryptographic primitives first of all, because everything else rests on them and
+ // because until now nothing ever checked them
+ TestCryptographySelfTestsPass;
+
  // Pure configuration invariants first, they are instant and their failure explains a lot of
  // what the behavioural tests below would otherwise report in a much noisier way
  TestRetransmissionTimeoutConfigurationIsConsistent;
+ TestHostBringsUpTheExpectedSockets;
 
  // The rate limiters, on their own before anything drives them over a network
  TestBandwidthRateLimiterHonoursItsPeriodLength;

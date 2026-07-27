@@ -713,6 +713,14 @@ const RNL_PROTOCOL_VERSION_MAJOR=1;
 
       RNL_MAXIMUM_PEER_CHANNELS=32;
 
+      // How many sockets one wait can cover. There used to be exactly one socket per address
+      // family, so the poll descriptor arrays were sized for two of them plus an event, and the
+      // loops filling them had no bound of their own. A host with more sockets than that would
+      // have written past the end of those arrays. Now the arrays are sized from here, the loops
+      // stop here, and TRNLHost.Start refuses to bring up more than this, so a limit is a limit
+      // rather than a silent overflow.
+      RNL_MAXIMUM_SOCKETS_PER_WAIT=64;
+
       RNL_MINIMUM_MTU=576;
       RNL_MAXIMUM_MTU=4096;
 
@@ -2688,9 +2696,33 @@ type PRNLVersion=^TRNLVersion;
        RNL_HOST_SERVICE_STATUS_EVENT
       );
 
-     TRNLHostSockets=array[0..1] of TRNLSocket;
+     // Exactly one socket per address family, index 0 being IPv4 and index 1 IPv6. That positional
+     // meaning is what the name says, and it is all TRNLDiscoveryServer and TRNLTCPToUDPBridge need:
+     // they speak on the LAN and have no reason to hold one socket per local interface.
+     TRNLDualStackSockets=array[0..1] of TRNLSocket;
 
-     TRNLHostSocketFamilies=array[0..1] of TRNLAddressFamily;
+     TRNLDualStackSocketFamilies=array[0..1] of TRNLAddressFamily;
+
+
+     // A host socket carries the families it serves along with it, rather than deriving them from
+     // its position in an array. A socket bound for IPv6 may serve IPv4 as well, which is why this
+     // is a set of families and not one; and there can be more than one socket per family, one per
+     // local interface, which is what NAT traversal needs in order to offer host candidates.
+     PRNLHostSocket=^TRNLHostSocket;
+     TRNLHostSocket=record
+      Socket:TRNLSocket;
+      // Which families this socket can be used for, so a set. A dual stack IPv6 socket serves both.
+      // This is what picking a socket for a destination goes by.
+      Families:TRNLAddressFamily;
+      // Which family it was created and bound as, so exactly one. This is what has to be handed to
+      // the network layer along with the socket. The old code kept the two apart as well, one in
+      // fSocketFamilies and one in a constant indexed by position, which is why they are two fields
+      // here rather than one.
+      Family:TRNLAddressFamily;
+     end;
+
+     PRNLHostSockets=^TRNLHostSockets;
+     TRNLHostSockets=array of TRNLHostSocket;
 
      TRNLHostOnPeerCheckConnectionToken=function(const aHost:TRNLHost;const aAddress:TRNLAddress;const aConnectionToken:TRNLConnectionToken):boolean of object;
 
@@ -2733,6 +2765,17 @@ type PRNLVersion=^TRNLVersion;
       public
        constructor Create; reintroduce;
        destructor Destroy; override;
+       // Runs every cryptographic self test this unit has, plus the checksum ones, and returns
+       // whether all of them came out right. Returns false at the first sign of trouble rather than
+       // stopping, so the report below covers everything and not only up to the first failure.
+       //
+       // Written for an application which wants to know at startup that the primitives it is about
+       // to rely on behave as they should, for instance after a compiler or platform change. The
+       // self tests had no way of saying so before, which is why nothing ever called them.
+       //
+       // Writes a human readable report to standard output while it runs, and is not reentrant, so
+       // it belongs at startup and not in a hot path.
+       class function SelfTestCryptography:boolean; static;
        property Time:TRNLTime read GetTime write SetTime;
      end;
 
@@ -3799,7 +3842,10 @@ type PRNLVersion=^TRNLVersion;
 
      TRNLHost=class
       private
-       const HostSocketFamilies:array[0..1] of TRNLInt32=
+       // Which family each of the two fixed socket slots stands for. The host itself no longer has
+       // fixed slots, its sockets carry their families with them; TRNLDiscoveryServer and
+       // TRNLTCPToUDPBridge still work that way and use this.
+       const RNLDualStackSocketFamilies:array[0..1] of TRNLInt32=
               (
                 RNL_IPV4,
                 RNL_IPV6
@@ -3950,7 +3996,10 @@ type PRNLVersion=^TRNLVersion;
 
        fSockets:TRNLHostSockets;
 
-       fSocketFamilies:TRNLHostSocketFamilies;
+       // The very same sockets as a plain array, because TRNLNetwork.SocketWait takes an open
+       // array of TRNLSocket. Built once in Start rather than assembled on every service
+       // iteration, which is where it would otherwise cost an allocation each time.
+       fWaitSockets:array of TRNLSocket;
 
        fTime:TRNLTime;
 
@@ -4064,6 +4113,8 @@ type PRNLVersion=^TRNLVersion;
        function ProtocolVersionForTranscriptBinding(const aTranscriptBinding:boolean):TRNLUInt64;
 
        function AcceptableProtocolVersion(const aProtocolVersion:TRNLUInt64;out aTranscriptBinding:boolean):boolean;
+
+       function GetCountSockets:TRNLSizeInt;
 
        procedure AddHandshakePacketChecksum(var aHandshakePacket);
 
@@ -4195,6 +4246,11 @@ type PRNLVersion=^TRNLVersion;
 {$else}
        property Peers:TRNLPeerListNode read fPeerList;
 {$ifend}
+       // How many sockets this host actually brought up. There used to be exactly one slot per
+       // address family; now it depends on the work mode and, later, on how many local interfaces
+       // are being offered. Read only, and mostly here so that the socket model is observable at
+       // all from the outside.
+       property CountSockets:TRNLSizeInt read GetCountSockets;
        property CountPeers:TRNLUInt32 read fCountPeers;
        property TotalReceivedData:TRNLUInt64 read fTotalReceivedData;
        property TotalReceivedPackets:TRNLUInt64 read fTotalReceivedPackets;
@@ -4307,7 +4363,7 @@ type PRNLVersion=^TRNLVersion;
        fFlags:TRNLDiscoveryServerFlags;
        fOnAccept:TRNLDiscoveryServerOnAccept;
        fMeta:TRNLDiscoveryMeta;
-       fSockets:TRNLHostSockets;
+       fSockets:TRNLDualStackSockets;
        fActiveSockets:TRNLSocketArray;
        fEvent:TRNLNetworkEvent;
        fRecvData:array[0..$ffff] of TRNLUInt8;
@@ -4388,7 +4444,7 @@ type PRNLVersion=^TRNLVersion;
        fBackLog:TRNLInt32;
        fStarted:boolean;
        fEvent:TRNLNetworkEvent;
-       fSockets:TRNLHostSockets;
+       fSockets:TRNLDualStackSockets;
        fClients:TThreadList;
       protected
        procedure Execute; override;
@@ -4458,6 +4514,22 @@ function RNLSocketSend(const aSocket:TRNLSocket;const aAddress:PRNLAddress;const
 function RNLSocketReceive(const aSocket:TRNLSocket;const aAddress:PRNLAddress;out aData;const aDataLength:TRNLSizeInt;const aFamily:TRNLAddressFamily):TRNLSizeInt;
 
 implementation
+
+// How many checks inside the cryptographic self tests came out wrong. They report by writing to the
+// console, which tells a human something but leaves a caller with nothing to act on, and that is
+// why they were never called from anywhere. Counting failures here is what turns them into
+// something TRNLInstance.SelfTestCryptography can return a verdict from.
+//
+// Not reentrant, on purpose: this is meant to be run once at startup, not concurrently.
+var RNLCountSelfTestFailures:TRNLSizeInt=0;
+
+procedure RNLSelfTestFailure;
+begin
+ inc(RNLCountSelfTestFailures);
+{$if not defined(NEXTGEN)}
+ writeln('FAILED!');
+{$ifend}
+end;
 
 const RNLDiscoveryRequestSignature:TRNLDiscoverySignature=('R','N','L','D','R',#0,#0,#0);
 
@@ -7425,7 +7497,7 @@ begin
    if (a=d) and (b=c) then begin
     writeln('OK!');
    end else begin
-    writeln('FAILED!');
+    RNLSelfTestFailure;
    end;
   end;
   begin
@@ -7437,7 +7509,7 @@ begin
    if x=b then begin
     writeln('OK!');
    end else begin
-    writeln('FAILED!');
+    RNLSelfTestFailure;
    end;
   end;
   begin
@@ -7448,7 +7520,7 @@ begin
    if b=c then begin
     writeln('OK!');
    end else begin
-    writeln('FAILED!');
+    RNLSelfTestFailure;
    end;
   end;
   begin
@@ -7459,7 +7531,7 @@ begin
    if b=c then begin
     writeln('OK!');
    end else begin
-    writeln('FAILED!');
+    RNLSelfTestFailure;
    end;
   end;
  finally
@@ -7654,7 +7726,7 @@ begin
  if r=alice_public then begin
   writeln('OK!');
  end else begin
-  writeln('FAILED!');
+  RNLSelfTestFailure;
  end;
 
  write('[Curve25519] Generating private and public key pair for Bob ... ');
@@ -7663,7 +7735,7 @@ begin
  if r=bob_public then begin
   writeln('OK!');
  end else begin
-  writeln('FAILED!');
+  RNLSelfTestFailure;
  end;
 
  write('[Curve25519] Generating shared secret for Alice ... ');
@@ -7671,7 +7743,7 @@ begin
  if r=shared_secret then begin
   writeln('OK!');
  end else begin
-  writeln('FAILED!');
+  RNLSelfTestFailure;
  end;
 
  write('[Curve25519] Generating shared secret for Bob ... ');
@@ -7679,7 +7751,7 @@ begin
  if r=shared_secret then begin
   writeln('OK!');
  end else begin
-  writeln('FAILED!');
+  RNLSelfTestFailure;
  end;
 
 end;
@@ -7717,7 +7789,7 @@ begin
   if GeneratePublicPrivateKeyPair(RandomGenerator,alice_k,alice_f) then begin
    writeln('OK!');
   end else begin
-   writeln('FAILED!');
+   RNLSelfTestFailure;
    exit;
   end;
 
@@ -7725,7 +7797,7 @@ begin
   if GeneratePublicPrivateKeyPair(RandomGenerator,bob_k,bob_f) then begin
    writeln('OK!');
   end else begin
-   writeln('FAILED!');
+   RNLSelfTestFailure;
    exit;
   end;
 
@@ -7733,7 +7805,7 @@ begin
   if GenerateSharedSecretKey(alice_s,bob_k,alice_f) then begin
    writeln('OK!');
   end else begin
-   writeln('FAILED!');
+   RNLSelfTestFailure;
    exit;
   end;
 
@@ -7741,7 +7813,7 @@ begin
   if GenerateSharedSecretKey(bob_s,alice_k,bob_f) then begin
    writeln('OK!');
   end else begin
-   writeln('FAILED!');
+   RNLSelfTestFailure;
    exit;
   end;
 
@@ -7923,7 +7995,7 @@ begin
  if OneTimeAuthenticationVerify(Hash,Data,SizeOf(Data),Key) then begin
   writeln('OK!');
  end else begin
-  writeln('FAILED!');
+  RNLSelfTestFailure;
  end;
 end;
 
@@ -8157,7 +8229,7 @@ begin
  if TRNLMemory.SecureIsEqual(Hash,Hash0,SizeOf(TRNLSHA512Hash)) then begin
   writeln('OK!');
  end else begin
-  writeln('FAILED!');
+  RNLSelfTestFailure;
  end;
 
  write('[SHA512] Hashing "abc" ... ');
@@ -8165,7 +8237,7 @@ begin
  if TRNLMemory.SecureIsEqual(Hash,HashABC,SizeOf(TRNLSHA512Hash)) then begin
   writeln('OK!');
  end else begin
-  writeln('FAILED!');
+  RNLSelfTestFailure;
  end;
 
  write('[SHA512] Hashing "0123456789abcdef" ... ');
@@ -8173,7 +8245,7 @@ begin
  if TRNLMemory.SecureIsEqual(Hash,Hash0123456789abcdef,SizeOf(TRNLSHA512Hash)) then begin
   writeln('OK!');
  end else begin
-  writeln('FAILED!');
+  RNLSelfTestFailure;
  end;
 
 {$if not defined(NEXTGEN)}
@@ -8182,7 +8254,7 @@ begin
  if TRNLMemory.SecureIsEqual(Hash,HashLong,SizeOf(TRNLSHA512Hash)) then begin
   writeln('OK!');
  end else begin
-  writeln('FAILED!');
+  RNLSelfTestFailure;
  end;
 {$ifend}
 
@@ -9232,7 +9304,7 @@ class procedure TRNLBLAKE2B.SelfTest;
   if TRNLMemory.SecureIsEqual(MD,BLACK2B_RES,32) then begin
    writeln('OK!');
   end else begin
-   writeln('FAILED!');
+   RNLSelfTestFailure;
   end;
  end;
  procedure OfficalTest;
@@ -11817,7 +11889,7 @@ class procedure TRNLBLAKE2B.SelfTest;
    if TRNLMemory.SecureIsEqual(Hash,BLAKB2B_KEYED_KAT[Index],SizeOf(TRNLBLAKE2BHash)) then begin
     writeln('OK!');
    end else begin
-    writeln('FAILED!');
+    RNLSelfTestFailure;
    end;
   end;
  end;
@@ -11873,10 +11945,10 @@ begin
    if TRNLMemory.SecureIsEqual(Hash,RefHash,HashLen) then begin
     writeln('OK!');
    end else begin
-    writeln('FAILED!');
+    RNLSelfTestFailure;
    end;
   end else begin
-   writeln('FAILED!');
+   RNLSelfTestFailure;
   end;
  end;
 end;
@@ -12168,14 +12240,14 @@ begin
  if TRNLMemory.SecureIsEqual(Signature,Signature0,64) then begin
   writeln('OK!');
  end else begin
-  writeln('FAILED!');
+  RNLSelfTestFailure;
  end;
 
  write('[ED25519] Verifing message 0 ... ');
  if Verify(Signature,PublicKey0,Message0,MessageSize0) then begin
   writeln('OK!');
  end else begin
-  writeln('FAILED!');
+  RNLSelfTestFailure;
  end;
 
  write('[ED25519] Deriving public key 0 ... ');
@@ -12184,7 +12256,7 @@ begin
  if TRNLMemory.SecureIsEqual(Signature,PublicKey0,32) then begin
   writeln('OK!');
  end else begin
-  writeln('FAILED!');
+  RNLSelfTestFailure;
  end;
 
  write('[ED25519] Signing message 1 ... ');
@@ -12193,14 +12265,14 @@ begin
  if TRNLMemory.SecureIsEqual(Signature,Signature1,64) then begin
   writeln('OK!');
  end else begin
-  writeln('FAILED!');
+  RNLSelfTestFailure;
  end;
 
  write('[ED25519] Verifing message 1 ... ');
  if Verify(Signature,PublicKey1,Message1,MessageSize1) then begin
   writeln('OK!');
  end else begin
-  writeln('FAILED!');
+  RNLSelfTestFailure;
  end;
 
  write('[ED25519] Deriving public key 1 ... ');
@@ -12209,7 +12281,7 @@ begin
  if TRNLMemory.SecureIsEqual(Signature,PublicKey1,32) then begin
   writeln('OK!');
  end else begin
-  writeln('FAILED!');
+  RNLSelfTestFailure;
  end;
 
 end;
@@ -12512,7 +12584,70 @@ begin
 end;
 
 class procedure TRNLChaCha20.SelfTest;
+// RFC 8439, section 2.4.2. The one vector worth having: it runs over 114 bytes, so it covers more
+// than one block and a partial final one, which is where a stream cipher usually goes wrong.
+//
+// The RFC describes a 32 bit block counter followed by a 96 bit nonce, while this implementation
+// uses the original layout of a 64 bit counter followed by a 64 bit nonce. Both fill the same four
+// state words 12 to 15, so a RFC vector maps onto this API without any loss:
+//
+//   counter := RFC counter or (little endian word of RFC nonce bytes 0..3 shl 32)
+//   nonce   := RFC nonce bytes 4..11
+//
+// Here the first four nonce bytes of the vector are zero, so the counter is plainly 1.
+const Key:array[0..31] of TRNLUInt8=
+       ($00,$01,$02,$03,$04,$05,$06,$07,$08,$09,$0a,$0b,$0c,$0d,$0e,$0f,
+        $10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$1a,$1b,$1c,$1d,$1e,$1f);
+      Nonce:array[0..7] of TRNLUInt8=($00,$00,$00,$4a,$00,$00,$00,$00);
+      Counter=TRNLUInt64(1);
+      PlainText:array[0..113] of TRNLUInt8=
+       ($4c,$61,$64,$69,$65,$73,$20,$61,$6e,$64,$20,$47,$65,$6e,$74,$6c,
+        $65,$6d,$65,$6e,$20,$6f,$66,$20,$74,$68,$65,$20,$63,$6c,$61,$73,
+        $73,$20,$6f,$66,$20,$27,$39,$39,$3a,$20,$49,$66,$20,$49,$20,$63,
+        $6f,$75,$6c,$64,$20,$6f,$66,$66,$65,$72,$20,$79,$6f,$75,$20,$6f,
+        $6e,$6c,$79,$20,$6f,$6e,$65,$20,$74,$69,$70,$20,$66,$6f,$72,$20,
+        $74,$68,$65,$20,$66,$75,$74,$75,$72,$65,$2c,$20,$73,$75,$6e,$73,
+        $63,$72,$65,$65,$6e,$20,$77,$6f,$75,$6c,$64,$20,$62,$65,$20,$69,
+        $74,$2e);
+      CipherText:array[0..113] of TRNLUInt8=
+       ($6e,$2e,$35,$9a,$25,$68,$f9,$80,$41,$ba,$07,$28,$dd,$0d,$69,$81,
+        $e9,$7e,$7a,$ec,$1d,$43,$60,$c2,$0a,$27,$af,$cc,$fd,$9f,$ae,$0b,
+        $f9,$1b,$65,$c5,$52,$47,$33,$ab,$8f,$59,$3d,$ab,$cd,$62,$b3,$57,
+        $16,$39,$d6,$24,$e6,$51,$52,$ab,$8f,$53,$0c,$35,$9f,$08,$61,$d8,
+        $07,$ca,$0d,$bf,$50,$0d,$6a,$61,$56,$a3,$8e,$08,$8a,$22,$b6,$5e,
+        $52,$bc,$51,$4d,$16,$cc,$f8,$06,$81,$8c,$e9,$1a,$b7,$79,$37,$36,
+        $5a,$f9,$0b,$bf,$74,$a3,$5b,$e6,$b4,$0b,$8e,$ed,$f2,$78,$5e,$42,
+        $87,$4d);
+var Context:TRNLChaCha20Context;
+    Buffer:array[0..113] of TRNLUInt8;
 begin
+
+{$if not defined(NEXTGEN)}
+ write('[ChaCha20] RFC 8439 2.4.2 encrypting 114 bytes ... ');
+{$ifend}
+ Context.Initialize(Key,Nonce,Counter);
+ Context.Process(Buffer,PlainText,SizeOf(PlainText));
+ if TRNLMemory.SecureIsEqual(Buffer,CipherText,SizeOf(CipherText)) then begin
+{$if not defined(NEXTGEN)}
+  writeln('OK!');
+{$ifend}
+ end else begin
+  RNLSelfTestFailure;
+ end;
+
+{$if not defined(NEXTGEN)}
+ write('[ChaCha20] RFC 8439 2.4.2 decrypting it again ... ');
+{$ifend}
+ Context.Initialize(Key,Nonce,Counter);
+ Context.Process(Buffer,CipherText,SizeOf(CipherText));
+ if TRNLMemory.SecureIsEqual(Buffer,PlainText,SizeOf(PlainText)) then begin
+{$if not defined(NEXTGEN)}
+  writeln('OK!');
+{$ifend}
+ end else begin
+  RNLSelfTestFailure;
+ end;
+
 end;
 
 class function TRNLKeyExchange.Process(out aSharedKey:TRNLKey;const aYourSecretKey,aTheirPublicKey:TRNLKey):boolean;
@@ -15987,6 +16122,77 @@ begin
  result:=not result;
 end;
 
+// CRC-32 in its IEEE 802.3 form, which is a different polynomial from the Castagnoli one above and
+// therefore a different checksum. It exists here because STUN's FINGERPRINT attribute is defined in
+// terms of this one, and FINGERPRINT is what tells a STUN answer apart from a RNL packet arriving on
+// the same socket. It is an addition and replaces nothing: RNL's own packets keep using CRC32C, as
+// the note at the top of this unit says.
+//
+// One table rather than the eight of the sliced version above. FINGERPRINT covers STUN messages of a
+// few dozen bytes, where the setup of a wider inner loop would cost more than it saves.
+var CRC32Table:array[TRNLUInt8] of TRNLUInt32;
+
+procedure InitializeCRC32;
+const ReversedBitOrderPoly=$edb88320;
+var Index,OtherIndex:TRNLInt32;
+    Value:TRNLUInt32;
+begin
+ for Index:=0 to 255 do begin
+  Value:=Index;
+  for OtherIndex:=0 to 7 do begin
+   Value:=(Value shr 1) xor (ReversedBitOrderPoly and (-(Value and 1)));
+  end;
+  CRC32Table[Index]:=Value;
+ end;
+end;
+
+function ChecksumCRC32(const aLocation;const aSize:TRNLUInt32):TRNLUInt32;
+var Remaining:TRNLInt32;
+    Data:PRNLUInt8;
+begin
+ result:=$ffffffff;
+ Remaining:=aSize;
+ if Remaining>0 then begin
+  Data:=@aLocation;
+  while Remaining>0 do begin
+   result:=(result shr 8) xor CRC32Table[(result and $ff) xor Data^];
+   inc(Data);
+   dec(Remaining);
+  end;
+ end;
+ result:=not result;
+end;
+
+procedure RNLSelfTestChecksums;
+const CheckData:array[0..8] of TRNLUInt8=($31,$32,$33,$34,$35,$36,$37,$38,$39); // "123456789"
+      CRC32CCheckValue=TRNLUInt32($e3069283);
+      CRC32CheckValue=TRNLUInt32($cbf43926);
+begin
+
+{$if not defined(NEXTGEN)}
+ write('[CRC32C] Castagnoli check value of "123456789" ... ');
+{$ifend}
+ if ChecksumCRC32C(CheckData,SizeOf(CheckData))=CRC32CCheckValue then begin
+{$if not defined(NEXTGEN)}
+  writeln('OK!');
+{$ifend}
+ end else begin
+  RNLSelfTestFailure;
+ end;
+
+{$if not defined(NEXTGEN)}
+ write('[CRC32] IEEE check value of "123456789" ... ');
+{$ifend}
+ if ChecksumCRC32(CheckData,SizeOf(CheckData))=CRC32CheckValue then begin
+{$if not defined(NEXTGEN)}
+  writeln('OK!');
+{$ifend}
+ end else begin
+  RNLSelfTestFailure;
+ end;
+
+end;
+
 procedure TRNLHostEvent.Initialize;
 begin
  Type_:=RNL_HOST_EVENT_TYPE_NONE;
@@ -16038,6 +16244,21 @@ begin
  FreeAndNil(fDebugLock);
 {$ifend}
  inherited Destroy;
+end;
+
+class function TRNLInstance.SelfTestCryptography:boolean;
+begin
+ RNLCountSelfTestFailures:=0;
+ RNLSelfTestChecksums;
+ TRNLValue25519.SelfTest;
+ TRNLCurve25519.SelfTest;
+ TRNLX25519.SelfTest;
+ TRNLED25519.SelfTest;
+ TRNLChaCha20.SelfTest;
+ TRNLPoly1305.SelfTest;
+ TRNLSHA512.SelfTest;
+ TRNLBLAKE2B.SelfTest;
+ result:=RNLCountSelfTestFailures=0;
 end;
 
 constructor TRNLNetworkEvent.Create;
@@ -17524,7 +17745,7 @@ function TRNLRealNetwork.SocketSelect(const aMaxSocket:TRNLSocket;var aReadSet,a
 {$if defined(Windows)}
 // Under Windows, we use the self-simulated POSIX-style poll function,
 // so that we can also wait on an event additionally, if needed
-type TPollFDs=array[0..63] of TRNLRealNetworkPollFD;
+type TPollFDs=array[0..RNL_MAXIMUM_SOCKETS_PER_WAIT] of TRNLRealNetworkPollFD;
 var Index,SubIndex,Found,CountPollFDs,PollCount:TRNLInt32;
     PollFDs:TPollFDs;
     tv:{$if defined(Windows)}TTimeVal{$elseif defined(fpc)}TTimeVal{$else}TimeVal{$ifend};
@@ -17696,7 +17917,7 @@ function TRNLRealNetwork.SocketWait(const aSockets:array of TRNLSocket;var aCond
 {$if defined(Windows)}
 // Under Windows, we do simulate the POSIX-style poll function ourself,
 // so that we can also wait on an event additionally, if needed
-type TPollFDs=array[0..1] of TRNLRealNetworkPollFD;
+type TPollFDs=array[0..RNL_MAXIMUM_SOCKETS_PER_WAIT] of TRNLRealNetworkPollFD;
 var Index,CountPollFDs,PollCount,SelectCount:TRNLInt32;
     PollFDs:TPollFDs;
     ReadSet,WriteSet:TRNLSocketSet;
@@ -17710,6 +17931,10 @@ begin
   CountPollFDs:=0;
 
   for Index:=0 to length(aSockets)-1 do begin
+   if CountPollFDs>=RNL_MAXIMUM_SOCKETS_PER_WAIT then begin
+    // One slot is kept free for the event descriptor below
+    break;
+   end;
    if aSockets[Index]<>RNL_SOCKET_NULL then begin
     PollFDs[CountPollFDs].fd:=aSockets[Index];
     PollFDs[CountPollFDs].events:=0;
@@ -17821,7 +18046,7 @@ end;
 // So all in all, we should avoid the poll() function on the iOS/macOS targets and use the long-proven
 // select() function instead on these iOS/macOS targets, to be sure that everything will work in the
 // long run.
-type TPollFDs=array[0..2] of pollfd;
+type TPollFDs=array[0..RNL_MAXIMUM_SOCKETS_PER_WAIT] of pollfd;
 var Index,CountPollFDs,PollCount:TRNLInt32;
     PollFDs:TPollFDs;
     ServiceInterrupt:boolean;
@@ -17830,6 +18055,10 @@ begin
  CountPollFDs:=0;
 
  for Index:=0 to length(aSockets)-1 do begin
+  if CountPollFDs>=RNL_MAXIMUM_SOCKETS_PER_WAIT then begin
+   // One slot is kept free for the event descriptor below
+   break;
+  end;
   if aSockets[Index]<>RNL_SOCKET_NULL then begin
    PollFDs[CountPollFDs].fd:=aSockets[Index];
    PollFDs[CountPollFDs].events:=0;
@@ -24976,8 +25205,8 @@ begin
 
  fProtocolID:=0;
 
- fSockets[0]:=RNL_SOCKET_NULL;
- fSockets[1]:=RNL_SOCKET_NULL;
+ fSockets:=nil;
+ fWaitSockets:=nil;
 
  fSalt:=fRandomGenerator.GetUInt64;
 
@@ -25090,12 +25319,15 @@ var Index:TRNLInt32;
     HostEvent:TRNLHostEvent;
 begin
 
- for Index:=Low(TRNLHostSockets) to High(TRNLHostSockets) do begin
-  if fSockets[Index]<>RNL_SOCKET_NULL then begin
-   fNetwork.SocketDestroy(fSockets[Index]);
-   fSockets[Index]:=RNL_SOCKET_NULL;
+ for Index:=0 to length(fSockets)-1 do begin
+  if fSockets[Index].Socket<>RNL_SOCKET_NULL then begin
+   fNetwork.SocketDestroy(fSockets[Index].Socket);
+   fSockets[Index].Socket:=RNL_SOCKET_NULL;
   end;
  end;
+
+ fSockets:=nil;
+ fWaitSockets:=nil;
 
  try
   while fEventQueue.Dequeue(HostEvent) do begin
@@ -25313,11 +25545,11 @@ var Index:TRNLInt32;
 begin
  Socket:=RNL_SOCKET_NULL;
  Family:=aAddress.GetAddressFamily;
- for Index:=Low(TRNLHostSockets) to High(TRNLHostSockets) do begin
-  if (fSockets[Index]<>RNL_SOCKET_NULL) and
-     ((fSocketFamilies[Index] and Family)<>0) then begin
-   Socket:=fSockets[Index];
-   Family:=HostSocketFamilies[Index];
+ for Index:=0 to length(fSockets)-1 do begin
+  if (fSockets[Index].Socket<>RNL_SOCKET_NULL) and
+     ((fSockets[Index].Families and Family)<>0) then begin
+   Socket:=fSockets[Index].Socket;
+   Family:=fSockets[Index].Family;
    break;
   end;
  end;
@@ -25455,10 +25687,31 @@ procedure TRNLHost.Start(const aAddressFamilyWorkMode:TRNLHostAddressFamilyWorkM
    end;
   end;
  end;
-var Index,Families,Family:TRNLInt32;
+ // Creates a socket and, if that worked, appends it to fSockets together with what it serves.
+ // Appending rather than writing to a fixed position is the whole point: there is no longer one slot
+ // per address family, so more than one socket per family becomes possible, which is what host
+ // candidates for NAT traversal need.
+ function AddSocket(const aFamily:TRNLInt32;const aDualStack:boolean):boolean;
+ var Socket:TRNLSocket;
+     Count:TRNLSizeInt;
+ begin
+  Socket:=CreateSocket(aFamily,aDualStack);
+  result:=Socket<>RNL_SOCKET_NULL;
+  if result then begin
+   Count:=length(fSockets);
+   SetLength(fSockets,Count+1);
+   fSockets[Count].Socket:=Socket;
+   fSockets[Count].Family:=aFamily;
+   if aDualStack then begin
+    fSockets[Count].Families:=RNL_IPV4 or RNL_IPV6;
+   end else begin
+    fSockets[Count].Families:=aFamily;
+   end;
+  end;
+ end;
+var Index,Families:TRNLInt32;
     TemporaryAddress:TRNLAddress;
-    Socket:TRNLSocket;
-    IPv6OnIPv4:boolean;
+    HasIPv4:boolean;
 begin
 
  case aAddressFamilyWorkMode of
@@ -25479,104 +25732,60 @@ begin
   Families:=Families and fAddress.GetAddressFamily;
  end;
 
+ fSockets:=nil;
+
  case aAddressFamilyWorkMode of
   RNL_HOST_ADDRESS_FAMILY_WORK_MODE_IPV4_ONLY,
   RNL_HOST_ADDRESS_FAMILY_WORK_MODE_IPV6_ONLY,
   RNL_HOST_ADDRESS_FAMILY_WORK_MODE_IPV4_AND_IPV6:begin
-   for Index:=Low(TRNLHostSockets) to High(TRNLHostSockets) do begin
-    Family:=HostSocketFamilies[Index];
-    if (Families and Family)<>0 then begin
-     IPv6OnIPv4:=(Family=RNL_IPV6) and
-                 ((Families and RNL_IPV4)<>0) and
-                 (aAddressFamilyWorkMode=RNL_HOST_ADDRESS_FAMILY_WORK_MODE_IPV4_AND_IPV6) and
-                 (fSockets[0]=RNL_SOCKET_NULL);
-     fSockets[Index]:=CreateSocket(Family,IPv6OnIPv4);
-     if IPv6OnIPv4 then begin
-      fSocketFamilies[Index]:=RNL_IPV4 or RNL_IPV6;
-     end else begin
-      fSocketFamilies[Index]:=Family;
-     end;
-    end else begin
-     fSockets[Index]:=RNL_SOCKET_NULL;
-     fSocketFamilies[Index]:=0;
-    end;
+   HasIPv4:=false;
+   if (Families and RNL_IPV4)<>0 then begin
+    HasIPv4:=AddSocket(RNL_IPV4,false);
+   end;
+   if (Families and RNL_IPV6)<>0 then begin
+    // The IPv6 socket only takes IPv4 on as well when there is no IPv4 socket to take it, which is
+    // what the previous version expressed by testing its fixed IPv4 slot for null
+    AddSocket(RNL_IPV6,
+              ((Families and RNL_IPV4)<>0) and
+              (aAddressFamilyWorkMode=RNL_HOST_ADDRESS_FAMILY_WORK_MODE_IPV4_AND_IPV6) and
+              not HasIPv4);
    end;
   end;
   RNL_HOST_ADDRESS_FAMILY_WORK_MODE_IPV4_ON_IPV6:begin
-   fSockets[0]:=RNL_SOCKET_NULL;
-   fSocketFamilies[0]:=0;
    if (Families and RNL_IPV6)<>0 then begin
-    fSockets[1]:=CreateSocket(RNL_IPV6,(Families and RNL_IPV4)<>0);
-    if fSockets[1]<>RNL_SOCKET_NULL then begin
-     if (Families and RNL_IPV4)<>0 then begin
-      fSocketFamilies[1]:=RNL_IPV4 or RNL_IPV6;
-     end else begin
-      fSocketFamilies[1]:=RNL_IPV6;
-     end;
-    end else begin
-     fSocketFamilies[1]:=0;
-    end;
-   end else begin
-    fSockets[1]:=RNL_SOCKET_NULL;
-    fSocketFamilies[1]:=0;
+    AddSocket(RNL_IPV6,(Families and RNL_IPV4)<>0);
    end;
   end;
   else {RNL_HOST_ADDRESS_FAMILY_WORK_MODE_AUTOMATIC:}begin
-   if (Families and RNL_IPV6)<>0 then begin
-    fSockets[1]:=CreateSocket(RNL_IPV6,(Families and RNL_IPV4)<>0);
-    if fSockets[1]<>RNL_SOCKET_NULL then begin
-     fSockets[0]:=RNL_SOCKET_NULL;
-     fSocketFamilies[0]:=0;
-     if (Families and RNL_IPV4)<>0 then begin
-      fSocketFamilies[1]:=RNL_IPV4 or RNL_IPV6;
-     end else begin
-      fSocketFamilies[1]:=RNL_IPV6;
-     end;
-    end else begin
-     if (Families and RNL_IPV4)<>0 then begin
-      fSockets[0]:=CreateSocket(RNL_IPV4,false);
-      if fSockets[0]<>RNL_SOCKET_NULL then begin
-       fSocketFamilies[0]:=RNL_IPV4;
-      end else begin
-       fSocketFamilies[0]:=0;
-      end;
-     end else begin
-      fSockets[0]:=RNL_SOCKET_NULL;
-      fSocketFamilies[0]:=0;
-     end;
-     fSockets[1]:=CreateSocket(RNL_IPV6,false);
-     if fSockets[1]<>RNL_SOCKET_NULL then begin
-      fSocketFamilies[1]:=RNL_IPV6;
-     end else begin
-      fSocketFamilies[1]:=0;
-     end;
-    end;
-   end else begin
-    fSockets[1]:=RNL_SOCKET_NULL;
-    fSocketFamilies[1]:=0;
+   // One dual stack socket if that can be had, and one socket per family if it cannot
+   if ((Families and RNL_IPV6)=0) or
+      not AddSocket(RNL_IPV6,(Families and RNL_IPV4)<>0) then begin
     if (Families and RNL_IPV4)<>0 then begin
-     fSockets[0]:=CreateSocket(RNL_IPV4,false);
-     if fSockets[0]<>RNL_SOCKET_NULL then begin
-      fSocketFamilies[0]:=RNL_IPV4;
-     end else begin
-      fSocketFamilies[0]:=0;
-     end;
-    end else begin
-     fSockets[0]:=RNL_SOCKET_NULL;
-     fSocketFamilies[0]:=0;
+     AddSocket(RNL_IPV4,false);
+    end;
+    if (Families and RNL_IPV6)<>0 then begin
+     AddSocket(RNL_IPV6,false);
     end;
    end;
   end;
  end;
 
- if (fSockets[0]=RNL_SOCKET_NULL) and (fSockets[1]=RNL_SOCKET_NULL) then begin
+ if length(fSockets)=0 then begin
   raise ERNLHost.Create('Empty Socket');
  end;
 
+ if length(fSockets)>RNL_MAXIMUM_SOCKETS_PER_WAIT then begin
+  raise ERNLHost.Create('Too many sockets');
+ end;
+
+ SetLength(fWaitSockets,length(fSockets));
+ for Index:=0 to length(fSockets)-1 do begin
+  fWaitSockets[Index]:=fSockets[Index].Socket;
+ end;
+
  if fAddress.Host.Equals(RNL_HOST_ANY) then begin
-  for Index:=Low(TRNLHostSockets) to High(TRNLHostSockets) do begin
-   if (fSockets[Index]<>RNL_SOCKET_NULL) and
-      fNetwork.SocketGetAddress(fSockets[Index],TemporaryAddress,HostSocketFamilies[Index]) then begin
+  for Index:=0 to length(fSockets)-1 do begin
+   if fNetwork.SocketGetAddress(fSockets[Index].Socket,TemporaryAddress,fSockets[Index].Family) then begin
     fAddress:=TemporaryAddress;
     break;
    end;
@@ -25793,6 +26002,11 @@ begin
  end else begin
   result:=false;
  end;
+end;
+
+function TRNLHost.GetCountSockets:TRNLSizeInt;
+begin
+ result:=length(fSockets);
 end;
 
 procedure TRNLHost.AddHandshakePacketChecksum(var aHandshakePacket);
@@ -27206,13 +27420,13 @@ begin
 
   HadReceived:=false;
 
-  for Index:=Low(TRNLHostSockets) to High(TRNLHostSockets) do begin
+  for Index:=0 to length(fSockets)-1 do begin
 
-   Socket:=fSockets[Index];
+   Socket:=fSockets[Index].Socket;
 
    if Socket<>RNL_SOCKET_NULL then begin
 
-    Family:=HostSocketFamilies[Index];
+    Family:=fSockets[Index].Family;
 
     fReceivedBufferLength:=fNetwork.Receive(Socket,
                                             @fReceivedAddress,
@@ -27458,7 +27672,7 @@ begin
    // value. NextTimeout was computed further above with an older fTime, so it can lie in the
    // past by now, and an absolute difference would then make the host wait for exactly as
    // long as it is already overdue, instead of continuing right away
-   if not fNetwork.SocketWait(fSockets,
+   if not fNetwork.SocketWait(fWaitSockets,
                               WaitConditions,
                               Max(0,TRNLTime.RelativeDifference(NextTimeout,fTime)),
                               fNetworkEvent) then begin
@@ -27577,7 +27791,7 @@ var Index,Count,RecvLength:TRNLInt32;
     DiscoveryAnswerPacket:TRNLDiscoveryAnswerPacket;
 begin
 
- for Index:=Low(TRNLHostSockets) to High(TRNLHostSockets) do begin
+ for Index:=Low(TRNLDualStackSockets) to High(TRNLDualStackSockets) do begin
   fSockets[Index]:=RNL_SOCKET_NULL;
  end;
 
@@ -27620,7 +27834,7 @@ begin
 
    MaxSocket:=0;
    ReadSet.Clear;
-   for Index:=Low(TRNLHostSockets) to High(TRNLHostSockets) do begin
+   for Index:=Low(TRNLDualStackSockets) to High(TRNLDualStackSockets) do begin
     if fSockets[Index]<>RNL_SOCKET_NULL then begin
      ReadSet.Add(fSockets[Index]);
      if MaxSocket<fSockets[Index] then begin
@@ -27641,7 +27855,7 @@ begin
      break;
     end else begin
 
-     for Index:=Low(TRNLHostSockets) to High(TRNLHostSockets) do begin
+     for Index:=Low(TRNLDualStackSockets) to High(TRNLDualStackSockets) do begin
 
       if (fSockets[Index]<>RNL_SOCKET_NULL) and ReadSet.Check(fSockets[Index]) then begin
 
@@ -27700,7 +27914,7 @@ begin
 
  finally
 
-  for Index:=Low(TRNLHostSockets) to High(TRNLHostSockets) do begin
+  for Index:=Low(TRNLDualStackSockets) to High(TRNLDualStackSockets) do begin
    if fSockets[Index]<>RNL_SOCKET_NULL then begin
     fNetwork.SocketDestroy(fSockets[Index]);
     fSockets[Index]:=RNL_SOCKET_NULL;
@@ -27728,7 +27942,7 @@ var Index,Count,RecvLength,OtherIndex:TRNLInt32;
     ReadSet,WriteSet:TRNLSocketSet;
     DiscoveryRequestPacket:TRNLDiscoveryRequestPacket;
     DiscoveryAnswerPacket:TRNLDiscoveryAnswerPacket;
-    Sockets:TRNLHostSockets;
+    Sockets:TRNLDualStackSockets;
     NowTime,StartTime,StopTime:TRNLTime;
     TimeOut:TRNLInt64;
     DiscoveryService:TRNLDiscoveryService;
@@ -27746,7 +27960,7 @@ begin
   DiscoveryRequestPacket.ClientPort:=TRNLEndianness.HostToLittleEndian16(aPort);
   DiscoveryRequestPacket.Meta:=aMeta;
 
-  for Index:=Low(TRNLHostSockets) to High(TRNLHostSockets) do begin
+  for Index:=Low(TRNLDualStackSockets) to High(TRNLDualStackSockets) do begin
    Sockets[Index]:=RNL_SOCKET_NULL;
   end;
 
@@ -27787,7 +28001,7 @@ begin
 
    while (NowTime<=StopTime) and (Count<aMaximumServers) do begin
 
-    for Index:=Low(TRNLHostSockets) to High(TRNLHostSockets) do begin
+    for Index:=Low(TRNLDualStackSockets) to High(TRNLDualStackSockets) do begin
      if Sockets[Index]<>RNL_SOCKET_NULL then begin
       case Index of
        0:begin
@@ -27810,7 +28024,7 @@ begin
 
     MaxSocket:=0;
     ReadSet.Clear;
-    for Index:=Low(TRNLHostSockets) to High(TRNLHostSockets) do begin
+    for Index:=Low(TRNLDualStackSockets) to High(TRNLDualStackSockets) do begin
      if Sockets[Index]<>RNL_SOCKET_NULL then begin
       ReadSet.Add(Sockets[Index]);
       if MaxSocket<Sockets[Index] then begin
@@ -27834,7 +28048,7 @@ begin
                              WriteSet,
                              TimeOut)>0 then begin
 
-     for Index:=Low(TRNLHostSockets) to High(TRNLHostSockets) do begin
+     for Index:=Low(TRNLDualStackSockets) to High(TRNLDualStackSockets) do begin
 
       if (Sockets[Index]<>RNL_SOCKET_NULL) and ReadSet.Check(Sockets[Index]) then begin
 
@@ -27893,7 +28107,7 @@ begin
 
   finally
 
-   for Index:=Low(TRNLHostSockets) to High(TRNLHostSockets) do begin
+   for Index:=Low(TRNLDualStackSockets) to High(TRNLDualStackSockets) do begin
     if Sockets[Index]<>RNL_SOCKET_NULL then begin
      aNetwork.SocketDestroy(Sockets[Index]);
      Sockets[Index]:=RNL_SOCKET_NULL;
@@ -27994,8 +28208,8 @@ begin
  if not fAddress.Host.Equals(RNL_HOST_ANY) then begin
   fAddressFamilies:=fAddressFamilies and fAddressFamilies.GetAddressFamily;
  end;
- for Index:=Low(TRNLHostSockets) to High(TRNLHostSockets) do begin
-  Family:=TRNLHost.HostSocketFamilies[Index];
+ for Index:=Low(TRNLDualStackSockets) to High(TRNLDualStackSockets) do begin
+  Family:=TRNLHost.RNLDualStackSocketFamilies[Index];
   if (fAddressFamilies and Family)<>0 then begin
    fSockets[Index]:=CreateSocket(Family);
   end else begin
@@ -28017,7 +28231,7 @@ begin
   fEvent.SetEvent;
   WaitFor;
  end;
- for Index:=Low(TRNLHostSockets) to High(TRNLHostSockets) do begin
+ for Index:=Low(TRNLDualStackSockets) to High(TRNLDualStackSockets) do begin
   if fSockets[Index]<>RNL_SOCKET_NULL then begin
    fNetwork.SocketShutdown(fSockets[Index]);
    fNetwork.SocketDestroy(fSockets[Index]);
@@ -28058,7 +28272,7 @@ begin
    MaxSocket:=0;
    ReadSet:=TRNLSocketSet.Empty;
    WriteSet:=TRNLSocketSet.Empty;
-   for Index:=Low(TRNLHostSockets) to High(TRNLHostSockets) do begin
+   for Index:=Low(TRNLDualStackSockets) to High(TRNLDualStackSockets) do begin
     if fSockets[Index]<>RNL_SOCKET_NULL then begin
      ReadSet.Add(fSockets[Index]);
      if MaxSocket<fSockets[Index] then begin
@@ -28067,13 +28281,13 @@ begin
     end;
    end;
    if fNetwork.SocketSelect(MaxSocket+1,ReadSet,WriteSet,1000,fEvent)>0 then begin
-    for Index:=Low(TRNLHostSockets) to High(TRNLHostSockets) do begin
+    for Index:=Low(TRNLDualStackSockets) to High(TRNLDualStackSockets) do begin
      if ReadSet.Check(fSockets[Index]) then begin
       repeat
        AcceptAddress.Host:=RNL_HOST_ANY_INIT;
        AcceptAddress.Port:=0;
        AcceptAddress.ScopeID:=0;
-       AcceptSocket:=fNetwork.SocketAccept(fSockets[Index],@AcceptAddress,TRNLHost.HostSocketFamilies[Index]);
+       AcceptSocket:=fNetwork.SocketAccept(fSockets[Index],@AcceptAddress,TRNLHost.RNLDualStackSocketFamilies[Index]);
        if AcceptSocket<>RNL_SOCKET_NULL then begin
         TRNLTCPToUDPBridgeClient.Create(self,AcceptSocket);
        end else begin
@@ -28561,6 +28775,7 @@ end;
 
 initialization
  InitializeCRC32C;
+ InitializeCRC32;
 finalization
 end.
 
