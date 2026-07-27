@@ -26279,8 +26279,14 @@ begin
    RemoteChannelTypes[Index]:=TRNLPeerChannelType(TRNLInt32(aIncomingPacket^.Payload.ChannelTypes[Index]));
   end;
 
+  // fCountPeers is the count before this peer would be added, and TRNLPeer.Create increments
+  // it, so there is room for one more exactly while fCountPeers is below the maximum. Asking for
+  // fCountPeers+1 to stay strictly below it accepted one peer fewer than configured, and it also
+  // disagreed with the outgoing path in TRNLHost.Connect, which admits while
+  // fCountPeers<fMaximumCountPeers. With a maximum of 16 that meant 16 outgoing but only 15
+  // incoming connections.
   if Authorized and
-     ((fCountPeers+1)<fMaximumCountPeers) and
+     (fCountPeers<fMaximumCountPeers) and
      ((RemoteCountChannels>0) and (RemoteCountChannels<=fMaximumCountChannels)) and
      TRNLMemory.SecureIsEqual(RemoteChannelTypes,fChannelTypes,SizeOf(TRNLPeerChannelType)*RemoteCountChannels) then begin
 
@@ -26316,7 +26322,7 @@ begin
 
    if not Authorized then begin
     DenialReason:=RNL_CONNECTION_DENIAL_REASON_UNAUTHORIZED;
-   end else if (fCountPeers+1)>=fMaximumCountPeers then begin
+   end else if fCountPeers>=fMaximumCountPeers then begin
     DenialReason:=RNL_CONNECTION_DENIAL_REASON_FULL;
    end else if RemoteCountChannels=0 then begin
     DenialReason:=RNL_CONNECTION_DENIAL_REASON_TOO_LESS_CHANNELS;

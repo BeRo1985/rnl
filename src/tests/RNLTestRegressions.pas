@@ -2753,6 +2753,161 @@ begin
 
 end;
 
+// ---------------------------------------------------------------------------------------
+// Peer capacity
+// ---------------------------------------------------------------------------------------
+
+// A host has to accept exactly as many incoming connections as MaximumCountPeers says, and the
+// incoming path has to agree with the outgoing one about that number. The two are separate pieces
+// of code, so they can and did drift apart: the incoming side asked whether the count would still
+// be strictly below the maximum after adding the peer, which admitted one fewer, while the
+// outgoing side admits while the current count is below the maximum.
+//
+// A capacity which is off by one is easy to miss, because it only shows up once a host is actually
+// full, and it then looks like an ordinary rejection rather than like a defect.
+procedure TestHostAcceptsExactlyItsConfiguredPeerCapacity;
+const SERVER_PORT=18264;
+      FIRST_CLIENT_PORT=18265;
+      MAXIMUM_COUNT_PEERS=3;
+var Instance:TRNLInstance;
+    Network:TRNLVirtualNetwork;
+    Server:TRNLHost;
+    Clients:array of TRNLHost;
+    Peers:array of TRNLPeer;
+    ServerAddress:TRNLAddress;
+    Event:TRNLHostEvent;
+    Index,CountConnected,CountDenied:TRNLSizeInt;
+    StartTime:TRNLTime;
+    Watchdog:TRNLTestWatchdog;
+
+ procedure PumpAll;
+ var HostIndex:TRNLSizeInt;
+ begin
+  Event.Initialize;
+  try
+   while Server.Service(Event,0)=RNL_HOST_SERVICE_STATUS_EVENT do begin
+    Event.Free;
+   end;
+   Event.Free;
+   for HostIndex:=0 to length(Clients)-1 do begin
+    while Clients[HostIndex].Service(Event,0)=RNL_HOST_SERVICE_STATUS_EVENT do begin
+     case Event.Type_ of
+      RNL_HOST_EVENT_TYPE_PEER_APPROVAL:begin
+       inc(CountConnected);
+      end;
+      RNL_HOST_EVENT_TYPE_PEER_DENIAL:begin
+       inc(CountDenied);
+      end;
+      else begin
+      end;
+     end;
+     Event.Free;
+    end;
+    Event.Free;
+   end;
+  finally
+   Event.Free;
+  end;
+ end;
+
+begin
+
+ TestBegin('a host accepts exactly its configured peer capacity');
+ Watchdog:=TRNLTestWatchdog.Create('peer capacity',120000);
+ try
+
+  CountConnected:=0;
+  CountDenied:=0;
+  Clients:=nil;
+  Peers:=nil;
+
+  Instance:=TRNLInstance.Create;
+  try
+   Network:=TRNLVirtualNetwork.Create(Instance);
+   try
+
+    Server:=TRNLHost.Create(Instance,Network);
+    try
+
+     Server.Address.Host:=RNL_HOST_ANY;
+     Server.Address.Port:=SERVER_PORT;
+     Server.MaximumCountPeers:=MAXIMUM_COUNT_PEERS;
+     Server.Start(RNL_HOST_ADDRESS_FAMILY_WORK_MODE_IPV4_ONLY);
+
+     Network.AddressSetHost(ServerAddress,'127.0.0.1');
+     ServerAddress.Port:=SERVER_PORT;
+
+     // One more client than the server may accept, so that the last one has to be turned away and
+     // the boundary is exercised from both sides
+     SetLength(Clients,MAXIMUM_COUNT_PEERS+1);
+     SetLength(Peers,MAXIMUM_COUNT_PEERS+1);
+
+     try
+
+      for Index:=0 to length(Clients)-1 do begin
+       Clients[Index]:=TRNLHost.Create(Instance,Network);
+       Clients[Index].Address.Host:=RNL_HOST_ANY;
+       Clients[Index].Address.Port:=FIRST_CLIENT_PORT+Index;
+       Clients[Index].Start(RNL_HOST_ADDRESS_FAMILY_WORK_MODE_IPV4_ONLY);
+       Peers[Index]:=Clients[Index].Connect(ServerAddress,1,0);
+       if assigned(Peers[Index]) then begin
+        Peers[Index].IncRef;
+       end;
+      end;
+
+      StartTime:=Instance.Time;
+      repeat
+       PumpAll;
+       Sleep(1);
+      until ((CountConnected+CountDenied)>=length(Clients)) or
+            (TRNLTime.RelativeDifference(Instance.Time,StartTime)>=15000);
+
+      Info('MaximumCountPeers: '+TRNLRawByteString(IntToStr(MAXIMUM_COUNT_PEERS))+
+           ', clients attempting: '+TRNLRawByteString(IntToStr(length(Clients))));
+      Info('connected: '+TRNLRawByteString(IntToStr(CountConnected))+
+           ', denied: '+TRNLRawByteString(IntToStr(CountDenied))+
+           ', server CountPeers: '+TRNLRawByteString(IntToStr(Server.CountPeers)));
+
+      CheckEqualsInt64(CountConnected,MAXIMUM_COUNT_PEERS,
+                       'the server must accept exactly as many peers as it was configured for, '+
+                       'no fewer');
+
+      CheckEqualsInt64(Server.CountPeers,MAXIMUM_COUNT_PEERS,
+                       'and it must actually be holding that many peers');
+
+      CheckAtLeastInt64(CountDenied,1,
+                        'the one client beyond the capacity has to be turned away, so the limit '+
+                        'is not simply ignored either');
+
+     finally
+      for Index:=0 to length(Peers)-1 do begin
+       if assigned(Peers[Index]) then begin
+        Peers[Index].DecRef;
+       end;
+      end;
+      for Index:=0 to length(Clients)-1 do begin
+       FreeAndNil(Clients[Index]);
+      end;
+     end;
+
+    finally
+     FreeAndNil(Server);
+    end;
+
+   finally
+    FreeAndNil(Network);
+   end;
+  finally
+   FreeAndNil(Instance);
+  end;
+
+ finally
+  FreeAndNil(Watchdog);
+  TestEnd;
+ end;
+
+end;
+
 procedure RunRegressionTests;
 begin
 
@@ -2791,6 +2946,9 @@ begin
 
  // Container behaviour
  TestQueueGrowthIsNotQuadratic;
+
+ // Peer capacity
+ TestHostAcceptsExactlyItsConfiguredPeerCapacity;
 
  // Address changes, disconnecting and exactly once delivery
  TestPeerFollowsAnAuthenticatedAddressChange;
