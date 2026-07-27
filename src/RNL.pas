@@ -4309,6 +4309,83 @@ type PRNLVersion=^TRNLVersion;
        property OnPeerReceive:TRNLHostOnPeerReceive read fOnPeerReceive write fOnPeerReceive;
      end;
 
+     // What a STUN binding transaction yields: the address a NAT presents this socket to the world
+     // under, which is what a server reflexive candidate for NAT traversal is made of.
+     PRNLSTUNResult=^TRNLSTUNResult;
+     TRNLSTUNResult=record
+      Success:boolean;
+      MappedAddress:TRNLAddress;
+      RoundTripTime:TRNLInt64;
+     end;
+
+     // Only the binding transaction, which is all a server reflexive candidate needs and the one
+     // transaction that requires no authentication: MESSAGE-INTEGRITY is not part of it.
+     //
+     // FINGERPRINT is, and not as a formality. RNL and STUN end up sharing a socket, so being able
+     // to tell a STUN answer apart from a RNL datagram is what makes this usable at all — see
+     // QueryOnSocket.
+     //
+     // Everything here is big endian, as STUN is, which is the opposite of RNL's own packets.
+     TRNLSTUNClient=class
+      public
+       const HeaderSize=20;
+             TransactionIDSize=12;
+             AttributeHeaderSize=4;
+             FingerprintAttributeSize=AttributeHeaderSize+4;
+             MagicCookie=TRNLUInt32($2112a442);
+             FingerprintXORValue=TRNLUInt32($5354554e);
+             MessageTypeBindingRequest=TRNLUInt16($0001);
+             MessageTypeBindingSuccessResponse=TRNLUInt16($0101);
+             AttributeMappedAddress=TRNLUInt16($0001);
+             AttributeXORMappedAddress=TRNLUInt16($0020);
+             AttributeFingerprint=TRNLUInt16($8028);
+             AddressFamilyIPV4=TRNLUInt8($01);
+             AddressFamilyIPV6=TRNLUInt8($02);
+             RequestSize=HeaderSize+FingerprintAttributeSize;
+             // A binding response is a few dozen bytes. This leaves room for one carrying every
+             // optional attribute a server might feel like adding, and is still small enough to sit
+             // on the stack.
+             MaximumMessageSize=1024;
+       type PRNLSTUNTransactionID=^TRNLSTUNTransactionID;
+            TRNLSTUNTransactionID=array[0..TransactionIDSize-1] of TRNLUInt8;
+            PRNLSTUNRequest=^TRNLSTUNRequest;
+            TRNLSTUNRequest=array[0..RequestSize-1] of TRNLUInt8;
+      private
+       class procedure BuildBindingRequest(out aRequest:TRNLSTUNRequest;
+                                           const aTransactionID:TRNLSTUNTransactionID); static;
+       // Everything this touches comes from a stranger, so every length is checked against the
+       // buffer before it is believed. fixplan.md F-22 was this same mistake elsewhere.
+       class function ParseBindingResponse(const aMessage;
+                                           const aMessageSize:TRNLSizeInt;
+                                           const aTransactionID:TRNLSTUNTransactionID;
+                                           out aMappedAddress:TRNLAddress):boolean; static;
+      public
+       // The useful variant. A NAT mapping belongs to one source socket, so the question has to be
+       // asked over the very socket the payload will later travel on, or the answer describes a
+       // mapping nobody is going to use.
+       //
+       // Blocking, and it consumes from that socket while it waits, so it must not run while a host
+       // is servicing the same socket: datagrams which are not the answer are dropped on the floor.
+       // Asking during startup, before the host is serviced, is the intended use. Routing STUN
+       // answers out of a running host is what FINGERPRINT is for and belongs to a later stage.
+       class function QueryOnSocket(const aInstance:TRNLInstance;
+                                    const aNetwork:TRNLNetwork;
+                                    const aSocket:TRNLSocket;
+                                    const aServerAddress:TRNLAddress;
+                                    const aFamily:TRNLAddressFamily;
+                                    const aTimeoutMilliseconds:TRNLInt64=1000;
+                                    const aCountRetries:TRNLSizeInt=3):TRNLSTUNResult; static;
+       // Creates a socket of its own, which is only good for finding out whether a STUN server
+       // answers at all. The mapping it reports belongs to that throwaway socket and says nothing
+       // about the one a host is bound to.
+       class function Query(const aInstance:TRNLInstance;
+                            const aNetwork:TRNLNetwork;
+                            const aServerAddress:TRNLAddress;
+                            const aFamily:TRNLAddressFamily;
+                            const aTimeoutMilliseconds:TRNLInt64=1000;
+                            const aCountRetries:TRNLSizeInt=3):TRNLSTUNResult; static;
+     end;
+
      TRNLDiscoverySignature=array[0..7] of TRNLChar;
 
      TRNLDiscoveryServiceID=array[0..15] of TRNLChar;
@@ -27921,6 +27998,333 @@ begin
    end;
   end;
 
+ end;
+
+end;
+
+class procedure TRNLSTUNClient.BuildBindingRequest(out aRequest:TRNLSTUNRequest;
+                                                   const aTransactionID:TRNLSTUNTransactionID);
+var Fingerprint:TRNLUInt32;
+begin
+
+ TRNLMemoryAccess.StoreBigEndianUInt16(aRequest[0],MessageTypeBindingRequest);
+
+ // The length counts the attributes only, and RFC 5389 wants it to already include the FINGERPRINT
+ // attribute at the point where the fingerprint itself is computed
+ TRNLMemoryAccess.StoreBigEndianUInt16(aRequest[2],FingerprintAttributeSize);
+
+ TRNLMemoryAccess.StoreBigEndianUInt32(aRequest[4],MagicCookie);
+
+ Move(aTransactionID[0],aRequest[8],TransactionIDSize);
+
+ TRNLMemoryAccess.StoreBigEndianUInt16(aRequest[HeaderSize+0],AttributeFingerprint);
+ TRNLMemoryAccess.StoreBigEndianUInt16(aRequest[HeaderSize+2],4);
+
+ // Over everything up to but excluding the attribute itself, which here is exactly the header
+ Fingerprint:=ChecksumCRC32(aRequest[0],HeaderSize) xor FingerprintXORValue;
+ TRNLMemoryAccess.StoreBigEndianUInt32(aRequest[HeaderSize+4],Fingerprint);
+
+end;
+
+class function TRNLSTUNClient.ParseBindingResponse(const aMessage;
+                                                   const aMessageSize:TRNLSizeInt;
+                                                   const aTransactionID:TRNLSTUNTransactionID;
+                                                   out aMappedAddress:TRNLAddress):boolean;
+var Data:PRNLUInt8Array;
+    Position,ValuePosition,AttributeSize,PaddedAttributeSize:TRNLSizeInt;
+    AttributeType:TRNLUInt16;
+    MessageLength:TRNLUInt16;
+    Fingerprint:TRNLUInt32;
+    Index:TRNLSizeInt;
+    XORMask:array[0..15] of TRNLUInt8;
+    Family:TRNLUInt8;
+    Port:TRNLUInt16;
+    HasAddress,HasXORAddress:boolean;
+    Address,XORAddress:TRNLAddress;
+begin
+
+ result:=false;
+ FillChar(aMappedAddress,SizeOf(TRNLAddress),#0);
+
+ if aMessageSize<HeaderSize then begin
+  exit;
+ end;
+
+ Data:=@aMessage;
+
+ if TRNLMemoryAccess.LoadBigEndianUInt16(Data^[0])<>MessageTypeBindingSuccessResponse then begin
+  exit;
+ end;
+
+ if TRNLMemoryAccess.LoadBigEndianUInt32(Data^[4])<>MagicCookie then begin
+  exit;
+ end;
+
+ // 96 bits which the far side cannot guess, so this is what keeps an off path injection from being
+ // taken for the answer
+ if not TRNLMemory.SecureIsEqual(Data^[8],aTransactionID[0],TransactionIDSize) then begin
+  exit;
+ end;
+
+ MessageLength:=TRNLMemoryAccess.LoadBigEndianUInt16(Data^[2]);
+
+ // Attributes are always padded to four bytes, so a length which is not a multiple of four, or one
+ // which disagrees with what actually arrived, means this is not a message worth reading
+ if ((MessageLength and 3)<>0) or
+    (TRNLSizeInt(MessageLength)<>(aMessageSize-HeaderSize)) then begin
+  exit;
+ end;
+
+ // The mask for XOR-MAPPED-ADDRESS is the magic cookie followed by the transaction ID, which covers
+ // the 16 bytes an IPv6 address needs; an IPv4 address uses the first four
+ TRNLMemoryAccess.StoreBigEndianUInt32(XORMask[0],MagicCookie);
+ Move(aTransactionID[0],XORMask[4],TransactionIDSize);
+
+ HasAddress:=false;
+ HasXORAddress:=false;
+ FillChar(Address,SizeOf(TRNLAddress),#0);
+ FillChar(XORAddress,SizeOf(TRNLAddress),#0);
+
+ Position:=HeaderSize;
+ while (Position+AttributeHeaderSize)<=aMessageSize do begin
+
+  AttributeType:=TRNLMemoryAccess.LoadBigEndianUInt16(Data^[Position+0]);
+  AttributeSize:=TRNLMemoryAccess.LoadBigEndianUInt16(Data^[Position+2]);
+  ValuePosition:=Position+AttributeHeaderSize;
+  PaddedAttributeSize:=(AttributeSize+3) and not TRNLSizeInt(3);
+
+  // The one check that matters: a length out of a stranger's message must never be believed far
+  // enough to read past the end of what arrived
+  if (ValuePosition+PaddedAttributeSize)>aMessageSize then begin
+   exit;
+  end;
+
+  case AttributeType of
+
+   AttributeFingerprint:begin
+    if AttributeSize<>4 then begin
+     exit;
+    end;
+    // Over everything before the attribute, which is why it has to be the last one
+    Fingerprint:=ChecksumCRC32(Data^[0],Position) xor FingerprintXORValue;
+    if TRNLMemoryAccess.LoadBigEndianUInt32(Data^[ValuePosition])<>Fingerprint then begin
+     exit;
+    end;
+   end;
+
+   AttributeMappedAddress,
+   AttributeXORMappedAddress:begin
+
+    if AttributeSize<4 then begin
+     exit;
+    end;
+
+    Family:=Data^[ValuePosition+1];
+    Port:=TRNLMemoryAccess.LoadBigEndianUInt16(Data^[ValuePosition+2]);
+
+    if AttributeType=AttributeXORMappedAddress then begin
+     Port:=Port xor TRNLUInt16(MagicCookie shr 16);
+    end;
+
+    case Family of
+     AddressFamilyIPV4:begin
+      if AttributeSize<>8 then begin
+       exit;
+      end;
+      // Held as an IPv4 mapped IPv6 address, like every address in RNL, with the four bytes going
+      // where GetAddressFamily expects to find them
+      if AttributeType=AttributeXORMappedAddress then begin
+       XORAddress.Host:=RNL_IPV4MAPPED_PREFIX_INIT;
+       for Index:=0 to 3 do begin
+        XORAddress.Host.Addr[12+Index]:=Data^[ValuePosition+4+Index] xor XORMask[Index];
+       end;
+       XORAddress.Port:=Port;
+       HasXORAddress:=true;
+      end else begin
+       Address.Host:=RNL_IPV4MAPPED_PREFIX_INIT;
+       for Index:=0 to 3 do begin
+        Address.Host.Addr[12+Index]:=Data^[ValuePosition+4+Index];
+       end;
+       Address.Port:=Port;
+       HasAddress:=true;
+      end;
+     end;
+     AddressFamilyIPV6:begin
+      if AttributeSize<>20 then begin
+       exit;
+      end;
+      if AttributeType=AttributeXORMappedAddress then begin
+       for Index:=0 to 15 do begin
+        XORAddress.Host.Addr[Index]:=Data^[ValuePosition+4+Index] xor XORMask[Index];
+       end;
+       XORAddress.Port:=Port;
+       HasXORAddress:=true;
+      end else begin
+       for Index:=0 to 15 do begin
+        Address.Host.Addr[Index]:=Data^[ValuePosition+4+Index];
+       end;
+       Address.Port:=Port;
+       HasAddress:=true;
+      end;
+     end;
+     else begin
+      // An address family nobody has heard of, which is not a reason to throw the message away
+     end;
+    end;
+
+   end;
+
+   else begin
+    // Unknown attributes are skipped, comprehension required ones included. A binding response
+    // carries nothing this client needs beyond the mapped address, so there is nothing it could
+    // fail to comprehend that would matter.
+   end;
+
+  end;
+
+  inc(Position,AttributeHeaderSize+PaddedAttributeSize);
+
+ end;
+
+ // The obfuscated form is the one to trust: it exists because middleboxes used to rewrite anything
+ // that looked like an address, and the plain one is only there for servers older than that
+ if HasXORAddress then begin
+  aMappedAddress:=XORAddress;
+  result:=true;
+ end else if HasAddress then begin
+  aMappedAddress:=Address;
+  result:=true;
+ end;
+
+end;
+
+class function TRNLSTUNClient.QueryOnSocket(const aInstance:TRNLInstance;
+                                            const aNetwork:TRNLNetwork;
+                                            const aSocket:TRNLSocket;
+                                            const aServerAddress:TRNLAddress;
+                                            const aFamily:TRNLAddressFamily;
+                                            const aTimeoutMilliseconds:TRNLInt64=1000;
+                                            const aCountRetries:TRNLSizeInt=3):TRNLSTUNResult;
+var Request:TRNLSTUNRequest;
+    TransactionID:TRNLSTUNTransactionID;
+    Message_:array[0..MaximumMessageSize-1] of TRNLUInt8;
+    Sockets:array[0..0] of TRNLSocket;
+    WaitConditions:TRNLSocketWaitConditions;
+    ReceivedAddress:TRNLAddress;
+    MessageSize:TRNLSizeInt;
+    Attempt,Index:TRNLSizeInt;
+    StartTime,Deadline:TRNLTime;
+    RandomGenerator:TRNLRandomGenerator;
+begin
+
+ result.Success:=false;
+ FillChar(result.MappedAddress,SizeOf(TRNLAddress),#0);
+ result.RoundTripTime:=0;
+
+ if aSocket=RNL_SOCKET_NULL then begin
+  exit;
+ end;
+
+ Sockets[0]:=aSocket;
+
+ RandomGenerator:=TRNLRandomGenerator.Create;
+ try
+
+  for Attempt:=1 to Max(1,aCountRetries) do begin
+
+   // A fresh transaction ID per attempt, so that a late answer to an earlier attempt cannot be
+   // taken for the answer to this one
+   for Index:=0 to TransactionIDSize-1 do begin
+    TransactionID[Index]:=TRNLUInt8(RandomGenerator.GetUInt32 and $ff);
+   end;
+
+   BuildBindingRequest(Request,TransactionID);
+
+   StartTime:=aInstance.Time;
+
+   if aNetwork.Send(aSocket,@aServerAddress,Request,RequestSize,aFamily)<>TRNLSizeInt(RequestSize) then begin
+    continue;
+   end;
+
+   Deadline:=StartTime+aTimeoutMilliseconds;
+
+   repeat
+
+    WaitConditions:=[RNL_SOCKET_WAIT_CONDITION_IO_RECEIVE];
+
+    if not aNetwork.SocketWait(Sockets,
+                               WaitConditions,
+                               Max(0,TRNLTime.RelativeDifference(Deadline,aInstance.Time)),
+                               nil) then begin
+     break;
+    end;
+
+    if RNL_SOCKET_WAIT_CONDITION_IO_RECEIVE in WaitConditions then begin
+     MessageSize:=aNetwork.Receive(aSocket,@ReceivedAddress,Message_,SizeOf(Message_),aFamily);
+     if MessageSize>0 then begin
+      if ParseBindingResponse(Message_,MessageSize,TransactionID,result.MappedAddress) then begin
+       result.Success:=true;
+       result.RoundTripTime:=TRNLTime.RelativeDifference(aInstance.Time,StartTime);
+       exit;
+      end;
+      // Not the answer, so it was something else arriving on this socket. Keep waiting out the
+      // deadline rather than giving up, since a shared socket sees other traffic by definition.
+     end;
+    end;
+
+   until aInstance.Time>=Deadline;
+
+  end;
+
+ finally
+  RandomGenerator.Free;
+ end;
+
+end;
+
+class function TRNLSTUNClient.Query(const aInstance:TRNLInstance;
+                                    const aNetwork:TRNLNetwork;
+                                    const aServerAddress:TRNLAddress;
+                                    const aFamily:TRNLAddressFamily;
+                                    const aTimeoutMilliseconds:TRNLInt64=1000;
+                                    const aCountRetries:TRNLSizeInt=3):TRNLSTUNResult;
+var Socket:TRNLSocket;
+    Address:TRNLAddress;
+begin
+
+ result.Success:=false;
+ FillChar(result.MappedAddress,SizeOf(TRNLAddress),#0);
+ result.RoundTripTime:=0;
+
+ Socket:=aNetwork.SocketCreate(RNL_SOCKET_TYPE_DATAGRAM,aFamily);
+ if Socket=RNL_SOCKET_NULL then begin
+  exit;
+ end;
+ try
+
+  Address.Host:=RNL_HOST_ANY_INIT;
+  Address.ScopeID:=0;
+  Address.Port:=0;
+
+  if aFamily=RNL_IPV6 then begin
+   aNetwork.SocketSetOption(Socket,RNL_SOCKET_OPTION_IPV6_V6ONLY,1);
+  end;
+  aNetwork.SocketSetOption(Socket,RNL_SOCKET_OPTION_NONBLOCK,1);
+
+  if not aNetwork.SocketBind(Socket,@Address,aFamily) then begin
+   exit;
+  end;
+
+  result:=QueryOnSocket(aInstance,
+                        aNetwork,
+                        Socket,
+                        aServerAddress,
+                        aFamily,
+                        aTimeoutMilliseconds,
+                        aCountRetries);
+
+ finally
+  aNetwork.SocketDestroy(Socket);
  end;
 
 end;

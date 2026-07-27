@@ -27,7 +27,9 @@ uses SysUtils,
      RNL,
      RNLTestFramework,
      RNLTestNetworkFaultInjector,
-     RNLTestHostPair;
+     RNLTestHostPair,
+     RNLTestSTUNServer,
+     RNLTestNATNetwork;
 
 procedure RunRegressionTests;
 
@@ -3067,6 +3069,307 @@ begin
 
 end;
 
+procedure TestNATNetworkSimulatesTheFourNATKinds;
+const EXTERNAL_HOST='198.51.100.1';
+      INSIDE_HOST='10.0.0.2';
+      PEER_A_HOST='203.0.113.10';
+      PEER_B_HOST='203.0.113.11';
+      PEER_C_HOST='203.0.113.12';
+      INSIDE_PORT=18420;
+      PEER_A_PORT=18421;
+      PEER_B_PORT=18422;
+      PEER_C_PORT=18423;
+      PEER_A_OTHER_PORT=18424;
+      PAYLOAD='nat';
+type TExpectation=record
+      Name:TRNLRawByteString;
+      Kind:TRNLTestNATKind;
+      // Whether an inside socket keeps the same external port when it sends somewhere else
+      SameExternalPort:boolean;
+      // Whether a peer which was never written to gets in through an existing mapping
+      StrangerGetsIn:boolean;
+      // Whether the same host which was written to gets in from a different port
+      OtherPortOfKnownHostGetsIn:boolean;
+     end;
+const EXPECTATIONS:array[0..3] of TExpectation=
+       ((Name:'full cone';          Kind:RNL_TEST_NAT_FULL_CONE;          SameExternalPort:true;  StrangerGetsIn:true;  OtherPortOfKnownHostGetsIn:true),
+        (Name:'address restricted'; Kind:RNL_TEST_NAT_ADDRESS_RESTRICTED; SameExternalPort:true;  StrangerGetsIn:false; OtherPortOfKnownHostGetsIn:true),
+        (Name:'port restricted';    Kind:RNL_TEST_NAT_PORT_RESTRICTED;    SameExternalPort:true;  StrangerGetsIn:false; OtherPortOfKnownHostGetsIn:false),
+        (Name:'symmetric';          Kind:RNL_TEST_NAT_SYMMETRIC;          SameExternalPort:false; StrangerGetsIn:false; OtherPortOfKnownHostGetsIn:false));
+var Instance:TRNLInstance;
+    VirtualNetwork:TRNLVirtualNetwork;
+    NAT:TRNLTestNATNetwork;
+    ExternalHost,InsideHost:TRNLHostAddress;
+    Inside,PeerA,PeerB,PeerC,PeerAOther:TRNLAddress;
+    ExternalForA,ExternalForB,SeenSource,Target,ExpiredProbe:TRNLAddress;
+    StartTime:TRNLTime;
+    InsideSocket,SocketA,SocketB,SocketC,SocketAOther:TRNLSocket;
+    Buffer:array[0..63] of TRNLUInt8;
+    Index:TRNLSizeInt;
+    Watchdog:TRNLTestWatchdog;
+
+ function AddressOf(const aHost:TRNLRawByteString;const aPort:TRNLUInt16):TRNLAddress;
+ begin
+  FillChar(result,SizeOf(TRNLAddress),#0);
+  VirtualNetwork.AddressSetHost(result,aHost);
+  result.Port:=aPort;
+ end;
+
+ function BoundSocket(const aAddress:TRNLAddress):TRNLSocket;
+ begin
+  result:=NAT.SocketCreate(RNL_SOCKET_TYPE_DATAGRAM,RNL_IPV4);
+  NAT.SocketBind(result,@aAddress,RNL_IPV4);
+ end;
+
+ // Sends the payload and reports whether it turned up at the other end
+ function Deliver(const aFromSocket:TRNLSocket;const aTo:TRNLAddress;
+                  const aToSocket:TRNLSocket;out aSeenSource:TRNLAddress):boolean;
+ begin
+  FillChar(aSeenSource,SizeOf(TRNLAddress),#0);
+  result:=false;
+  if NAT.Send(aFromSocket,@aTo,PAYLOAD[1],System.Length(PAYLOAD),RNL_IPV4)<>System.Length(PAYLOAD) then begin
+   exit;
+  end;
+  result:=NAT.Receive(aToSocket,@aSeenSource,Buffer,SizeOf(Buffer),RNL_IPV4)=System.Length(PAYLOAD);
+ end;
+
+begin
+
+ TestBegin('the nat network simulates the four nat kinds');
+ Watchdog:=TRNLTestWatchdog.Create('nat simulator',120000);
+ try
+
+  for Index:=Low(EXPECTATIONS) to High(EXPECTATIONS) do begin
+
+   Instance:=TRNLInstance.Create;
+   try
+    VirtualNetwork:=TRNLVirtualNetwork.Create(Instance);
+    try
+
+     // Four distinct outside hosts, because with everything on one host the difference between an
+     // address restricted and a port restricted NAT would not be observable at all
+     Inside:=AddressOf(INSIDE_HOST,INSIDE_PORT);
+     PeerA:=AddressOf(PEER_A_HOST,PEER_A_PORT);
+     PeerB:=AddressOf(PEER_B_HOST,PEER_B_PORT);
+     PeerC:=AddressOf(PEER_C_HOST,PEER_C_PORT);
+     PeerAOther:=AddressOf(PEER_A_HOST,PEER_A_OTHER_PORT);
+     ExternalHost:=AddressOf(EXTERNAL_HOST,0).Host;
+     InsideHost:=Inside.Host;
+
+     NAT:=TRNLTestNATNetwork.Create(Instance,VirtualNetwork,EXPECTATIONS[Index].Kind,
+                                    ExternalHost,InsideHost);
+     try
+
+      NAT.AddInside(Inside);
+
+      InsideSocket:=BoundSocket(Inside);
+      SocketA:=BoundSocket(PeerA);
+      SocketB:=BoundSocket(PeerB);
+      SocketC:=BoundSocket(PeerC);
+      SocketAOther:=BoundSocket(PeerAOther);
+      try
+
+       // Nothing may get in while no mapping exists, not even through a full cone NAT: a mapping is
+       // what an inside socket is reachable through, and none has been opened yet
+       Target:=AddressOf(EXTERNAL_HOST,40000);
+       Check(not Deliver(SocketA,Target,InsideSocket,SeenSource),
+             EXPECTATIONS[Index].Name+': without a mapping nothing reaches the inside');
+
+       // Inside to A, which opens a mapping and lets A answer
+       if not Check(Deliver(InsideSocket,PeerA,SocketA,SeenSource),
+                    EXPECTATIONS[Index].Name+': an inside socket can always send out') then begin
+        exit;
+       end;
+
+       Check(SeenSource.Host.Equals(ExternalHost) and (SeenSource.Port<>INSIDE_PORT),
+             EXPECTATIONS[Index].Name+': what the outside sees is the external address of the nat, '+
+             'not the inside one');
+
+       if not Check(NAT.ExternalAddressOf(Inside,PeerA,ExternalForA),
+                    EXPECTATIONS[Index].Name+': a mapping exists once something has gone out') then begin
+        exit;
+       end;
+
+       // The same inside socket to a second peer, which is where the mapping behaviour parts ways
+       Deliver(InsideSocket,PeerB,SocketB,SeenSource);
+       Check(NAT.ExternalAddressOf(Inside,PeerB,ExternalForB),
+             EXPECTATIONS[Index].Name+': and one for the second peer as well');
+
+       Check((ExternalForA.Port=ExternalForB.Port)=EXPECTATIONS[Index].SameExternalPort,
+             EXPECTATIONS[Index].Name+': the external port for a second peer has to '+
+             EitherText(EXPECTATIONS[Index].SameExternalPort,'stay the same','differ')+
+             ', which is what decides whether an address learned from a third party is any use');
+
+       // The filter. First a peer nobody ever wrote to.
+       Check(Deliver(SocketC,ExternalForA,InsideSocket,SeenSource)=EXPECTATIONS[Index].StrangerGetsIn,
+             EXPECTATIONS[Index].Name+': a peer which was never written to has to '+
+             EitherText(EXPECTATIONS[Index].StrangerGetsIn,'get in','be filtered out'));
+
+       // Then the host which was written to, but from another port of it
+       Check(Deliver(SocketAOther,ExternalForA,InsideSocket,SeenSource)=EXPECTATIONS[Index].OtherPortOfKnownHostGetsIn,
+             EXPECTATIONS[Index].Name+': the known host from another port has to '+
+             EitherText(EXPECTATIONS[Index].OtherPortOfKnownHostGetsIn,'get in','be filtered out')+
+             ', which is the whole difference between address and port restricted');
+
+       // And the endpoint which really was written to, which every kind has to let back in
+       Check(Deliver(SocketA,ExternalForA,InsideSocket,SeenSource),
+             EXPECTATIONS[Index].Name+': the endpoint which was written to always gets back in');
+
+       // Once the mapping has expired, the way back is gone again. Waited for rather than slept
+       // through: the clock underneath has a granularity of its own, and on Windows that can be a
+       // whole timer tick, so a fixed sleep of a few milliseconds need not move it at all. It did
+       // not, which is how this test failed under wine while passing on Linux.
+       NAT.MappingTimeoutMilliseconds:=1;
+       StartTime:=Instance.Time;
+       repeat
+        Sleep(5);
+       until (not NAT.ExternalAddressOf(Inside,PeerA,ExpiredProbe)) or
+             (TRNLTime.RelativeDifference(Instance.Time,StartTime)>=2000);
+
+       if not Check(not NAT.ExternalAddressOf(Inside,PeerA,ExpiredProbe),
+                    EXPECTATIONS[Index].Name+': the mapping is gone once its timeout has passed') then begin
+        exit;
+       end;
+       Check(not Deliver(SocketA,ExternalForA,InsideSocket,SeenSource),
+             EXPECTATIONS[Index].Name+': an expired mapping closes the way back in, which is what '+
+             'makes a rebinding happen at all');
+       CheckAtLeastInt64(NAT.CountExpiredMappings,1,
+                         EXPECTATIONS[Index].Name+': and the expiry really was the reason');
+       NAT.MappingTimeoutMilliseconds:=0;
+
+      finally
+       NAT.SocketDestroy(InsideSocket);
+       NAT.SocketDestroy(SocketA);
+       NAT.SocketDestroy(SocketB);
+       NAT.SocketDestroy(SocketC);
+       NAT.SocketDestroy(SocketAOther);
+      end;
+
+      Info(EXPECTATIONS[Index].Name+': translated out '+
+           TRNLRawByteString(IntToStr(NAT.CountTranslatedOutgoing))+
+           ', delivered in '+TRNLRawByteString(IntToStr(NAT.CountDeliveredInbound))+
+           ', filtered out '+TRNLRawByteString(IntToStr(NAT.CountFilteredInbound))+
+           ', expired '+TRNLRawByteString(IntToStr(NAT.CountExpiredMappings)));
+
+     finally
+      FreeAndNil(NAT);
+     end;
+
+    finally
+     FreeAndNil(VirtualNetwork);
+    end;
+   finally
+    FreeAndNil(Instance);
+   end;
+
+  end;
+
+ finally
+  FreeAndNil(Watchdog);
+  TestEnd;
+ end;
+
+end;
+
+
+procedure TestSTUNClientReadsItsMappedAddressAndRejectsMalformedAnswers;
+const FIRST_PORT=18400;
+      REPORTED_HOST='203.0.113.7';
+      REPORTED_PORT=51234;
+type TExpectation=record
+      Name:TRNLRawByteString;
+      Behaviour:TRNLTestSTUNServerBehaviour;
+      Succeeds:boolean;
+     end;
+const EXPECTATIONS:array[0..8] of TExpectation=
+       ((Name:'a correct answer';                 Behaviour:RNL_TEST_STUN_SERVER_CORRECT;                          Succeeds:true),
+        (Name:'only a plain mapped address';      Behaviour:RNL_TEST_STUN_SERVER_PLAIN_MAPPED_ADDRESS_ONLY;        Succeeds:true),
+        (Name:'an unknown attribute in front';    Behaviour:RNL_TEST_STUN_SERVER_UNKNOWN_ATTRIBUTE_FIRST;          Succeeds:true),
+        (Name:'no answer at all';                 Behaviour:RNL_TEST_STUN_SERVER_SILENT;                           Succeeds:false),
+        (Name:'a foreign transaction id';         Behaviour:RNL_TEST_STUN_SERVER_WRONG_TRANSACTION_ID;             Succeeds:false),
+        (Name:'a wrong fingerprint';              Behaviour:RNL_TEST_STUN_SERVER_WRONG_FINGERPRINT;                Succeeds:false),
+        (Name:'a truncated attribute';            Behaviour:RNL_TEST_STUN_SERVER_TRUNCATED_ATTRIBUTE;              Succeeds:false),
+        (Name:'a length beyond the datagram';     Behaviour:RNL_TEST_STUN_SERVER_ATTRIBUTE_LENGTH_BEYOND_DATAGRAM; Succeeds:false),
+        (Name:'an unaligned message length';      Behaviour:RNL_TEST_STUN_SERVER_UNALIGNED_MESSAGE_LENGTH;         Succeeds:false));
+var Instance:TRNLInstance;
+    Network:TRNLVirtualNetwork;
+    Server:TRNLTestSTUNServer;
+    ServerAddress,ReportedAddress:TRNLAddress;
+    STUNResult:TRNLSTUNResult;
+    Index:TRNLSizeInt;
+    Watchdog:TRNLTestWatchdog;
+begin
+
+ TestBegin('the stun client reads its mapped address and rejects malformed answers');
+ Watchdog:=TRNLTestWatchdog.Create('stun client',120000);
+ try
+
+  for Index:=Low(EXPECTATIONS) to High(EXPECTATIONS) do begin
+
+   Instance:=TRNLInstance.Create;
+   try
+    Network:=TRNLVirtualNetwork.Create(Instance);
+    try
+
+     FillChar(ReportedAddress,SizeOf(TRNLAddress),#0);
+     Network.AddressSetHost(ReportedAddress,REPORTED_HOST);
+     ReportedAddress.Port:=REPORTED_PORT;
+
+     Server:=TRNLTestSTUNServer.Create(Instance,
+                                       Network,
+                                       FIRST_PORT+Index,
+                                       EXPECTATIONS[Index].Behaviour,
+                                       ReportedAddress);
+     try
+
+      FillChar(ServerAddress,SizeOf(TRNLAddress),#0);
+      Network.AddressSetHost(ServerAddress,'127.0.0.1');
+      ServerAddress.Port:=FIRST_PORT+Index;
+
+      // A short deadline and a single attempt, because a rejected answer means waiting the deadline
+      // out; there is nothing else to wait for
+      STUNResult:=TRNLSTUNClient.Query(Instance,Network,ServerAddress,RNL_IPV4,300,1);
+
+      Info(EXPECTATIONS[Index].Name+': success '+
+           TRNLRawByteString(BoolToStr(STUNResult.Success,true))+
+           ', requests seen by the server '+TRNLRawByteString(IntToStr(Server.CountRequests)));
+
+      Check(STUNResult.Success=EXPECTATIONS[Index].Succeeds,
+            EXPECTATIONS[Index].Name+' has to '+
+            EitherText(EXPECTATIONS[Index].Succeeds,'be accepted','be rejected'));
+
+      // The request has to have arrived in every single case, otherwise a rejection would only be
+      // proving that nothing ever happened
+      CheckAtLeastInt64(Server.CountRequests,1,
+                        'and the request has to have reached the server at all');
+
+      if EXPECTATIONS[Index].Succeeds then begin
+       Check(STUNResult.MappedAddress.Host.Equals(ReportedAddress.Host) and
+             (STUNResult.MappedAddress.Port=REPORTED_PORT),
+             'and the address it reports has to be the one the server put into the answer, '+
+             'obfuscated or plain');
+      end;
+
+     finally
+      FreeAndNil(Server);
+     end;
+
+    finally
+     FreeAndNil(Network);
+    end;
+   finally
+    FreeAndNil(Instance);
+   end;
+
+  end;
+
+ finally
+  FreeAndNil(Watchdog);
+  TestEnd;
+ end;
+
+end;
+
 procedure TestHostBringsUpTheExpectedSockets;
 const FIRST_PORT=18380;
 type TExpectation=record
@@ -3987,6 +4290,12 @@ begin
  // what the behavioural tests below would otherwise report in a much noisier way
  TestRetransmissionTimeoutConfigurationIsConsistent;
  TestHostBringsUpTheExpectedSockets;
+
+ // The STUN client, which is where a parser meets datagrams from a stranger
+ TestSTUNClientReadsItsMappedAddressAndRejectsMalformedAnswers;
+
+ // The NAT simulator, which every later punching test will rest on
+ TestNATNetworkSimulatesTheFourNATKinds;
 
  // The rate limiters, on their own before anything drives them over a network
  TestBandwidthRateLimiterHonoursItsPeriodLength;

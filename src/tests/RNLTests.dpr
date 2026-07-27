@@ -29,6 +29,8 @@ uses {$ifdef unix}
      RNLTestFramework in 'RNLTestFramework.pas',
      RNLTestNetworkFaultInjector in 'RNLTestNetworkFaultInjector.pas',
      RNLTestHostPair in 'RNLTestHostPair.pas',
+     RNLTestSTUNServer in 'RNLTestSTUNServer.pas',
+     RNLTestNATNetwork in 'RNLTestNATNetwork.pas',
      RNLTestRegressions in 'RNLTestRegressions.pas';
 
 begin
