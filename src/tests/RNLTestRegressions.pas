@@ -3253,6 +3253,219 @@ begin
 
 end;
 
+procedure TestHolePunchingOpensTheWayForAnIncomingConnection;
+const INSIDE_HOST='10.0.0.2';
+      EXTERNAL_HOST='198.51.100.1';
+      CLIENT_HOST='203.0.113.10';
+      STRANGER_HOST='203.0.113.99';
+      SERVER_PORT=18460;
+      CLIENT_PORT=18461;
+      STRANGER_PORT=18462;
+var Instance:TRNLInstance;
+    VirtualNetwork:TRNLVirtualNetwork;
+    NAT:TRNLTestNATNetwork;
+    Server,Client:TRNLHost;
+    ServerInside,ClientAddress,StrangerAddress,ExternalOfServer:TRNLAddress;
+    ExternalHost,InsideHost:TRNLHostAddress;
+    ServerCandidates,ClientCandidates:TRNLCandidates;
+    StrangerSocket:TRNLSocket;
+    Peer:TRNLPeer;
+    Event:TRNLHostEvent;
+    StartTime:TRNLTime;
+    ConnectedWithoutPermission,ConnectedAfterPunching:boolean;
+    CountPunched:TRNLSizeInt;
+    Watchdog:TRNLTestWatchdog;
+
+ function AddressOf(const aHost:TRNLRawByteString;const aPort:TRNLUInt16):TRNLAddress;
+ begin
+  FillChar(result,SizeOf(TRNLAddress),#0);
+  VirtualNetwork.AddressSetHost(result,aHost);
+  result.Port:=aPort;
+ end;
+
+ function CandidateOf(const aAddress:TRNLAddress):TRNLCandidates;
+ begin
+  SetLength(result,1);
+  FillChar(result[0],SizeOf(TRNLCandidate),#0);
+  result[0].Address:=aAddress;
+  result[0].Kind:=RNL_CANDIDATE_KIND_SERVER_REFLEXIVE;
+  result[0].Priority:=TRNLCandidateUtils.Priority(RNL_CANDIDATE_KIND_SERVER_REFLEXIVE,0);
+ end;
+
+ // Drives both hosts and keeps punching from the inside, the way an application waiting to be
+ // reached would have to: a mapping is not permanent
+ function PumpUntilConnected(const aMilliseconds:TRNLInt64;
+                             const aKeepPunchingAt:TRNLCandidates):boolean;
+ begin
+  result:=false;
+  StartTime:=Instance.Time;
+  Event.Initialize;
+  try
+   repeat
+    if length(aKeepPunchingAt)>0 then begin
+     Server.PunchCandidates(aKeepPunchingAt);
+    end;
+    while Server.Service(Event,0)=RNL_HOST_SERVICE_STATUS_EVENT do begin
+     Event.Free;
+    end;
+    Event.Free;
+    while Client.Service(Event,0)=RNL_HOST_SERVICE_STATUS_EVENT do begin
+     if Event.Type_=RNL_HOST_EVENT_TYPE_PEER_APPROVAL then begin
+      result:=true;
+     end;
+     Event.Free;
+    end;
+    Event.Free;
+    Sleep(1);
+   until result or (TRNLTime.RelativeDifference(Instance.Time,StartTime)>=aMilliseconds);
+  finally
+   Event.Free;
+  end;
+ end;
+
+begin
+
+ TestBegin('hole punching opens the way for an incoming connection');
+ Watchdog:=TRNLTestWatchdog.Create('hole punching',120000);
+ try
+
+  ConnectedWithoutPermission:=false;
+  ConnectedAfterPunching:=false;
+
+  Instance:=TRNLInstance.Create;
+  try
+   VirtualNetwork:=TRNLVirtualNetwork.Create(Instance);
+   try
+
+    ServerInside:=AddressOf(INSIDE_HOST,SERVER_PORT);
+    ClientAddress:=AddressOf(CLIENT_HOST,CLIENT_PORT);
+    StrangerAddress:=AddressOf(STRANGER_HOST,STRANGER_PORT);
+    ExternalHost:=AddressOf(EXTERNAL_HOST,0).Host;
+    InsideHost:=ServerInside.Host;
+
+    // Port restricted, which is the common case and the one where punching is both necessary and
+    // sufficient. Only a sender the inside has written to gets back in.
+    NAT:=TRNLTestNATNetwork.Create(Instance,VirtualNetwork,RNL_TEST_NAT_PORT_RESTRICTED,
+                                   ExternalHost,InsideHost);
+    try
+
+     NAT.AddInside(ServerInside);
+
+     // Somebody has to be listening at the third party, because the virtual network only delivers
+     // to an address a socket is bound to and reports a send to anywhere else as having sent
+     // nothing. A real network swallows a datagram to a black hole and calls it sent; this one
+     // cannot, so the third party gets a socket even though it never says anything.
+     StrangerSocket:=NAT.SocketCreate(RNL_SOCKET_TYPE_DATAGRAM,RNL_IPV4);
+     NAT.SocketBind(StrangerSocket,@StrangerAddress,RNL_IPV4);
+     try
+
+     Server:=TRNLHost.Create(Instance,NAT);
+     try
+      Server.Address.Host:=ServerInside.Host;
+      Server.Address.ScopeID:=ServerInside.ScopeID;
+      Server.Address.Port:=ServerInside.Port;
+      Server.Start(RNL_HOST_ADDRESS_FAMILY_WORK_MODE_IPV4_ONLY);
+
+      Client:=TRNLHost.Create(Instance,NAT);
+      try
+       Client.Address.Host:=ClientAddress.Host;
+       Client.Address.ScopeID:=ClientAddress.ScopeID;
+       Client.Address.Port:=ClientAddress.Port;
+       Client.Start(RNL_HOST_ADDRESS_FAMILY_WORK_MODE_IPV4_ONLY);
+
+       // The server knocks at a third party. That creates its mapping, so it now has an external
+       // address to be told about, but it grants the client nothing.
+       CountPunched:=Server.PunchCandidates(CandidateOf(StrangerAddress));
+       if not CheckEqualsInt64(CountPunched,1,'punching at a third party sends one datagram') then begin
+        exit;
+       end;
+
+       if not Check(NAT.ExternalAddressOf(ServerInside,StrangerAddress,ExternalOfServer),
+                    'and gives the server an external address to be reached at') then begin
+        exit;
+       end;
+
+       Info('server is externally at '+TRNLRawByteString(ExternalOfServer.ToString));
+
+       ServerCandidates:=CandidateOf(ExternalOfServer);
+       ClientCandidates:=CandidateOf(ClientAddress);
+
+       // The client is told that address, exactly as a signalling channel would carry it, and tries
+       // it. The mapping exists, but the client has never been written to, so the filter drops it.
+       Peer:=Client.ConnectViaCandidates(ServerCandidates);
+       if not Check(assigned(Peer),'the client can start a connection attempt') then begin
+        exit;
+       end;
+       Peer.IncRef;
+       try
+        ConnectedWithoutPermission:=PumpUntilConnected(1500,nil);
+       finally
+        Peer.Disconnect;
+        Peer.DecRef;
+       end;
+
+       Info('without the server punching back: connected '+
+            TRNLRawByteString(BoolToStr(ConnectedWithoutPermission,true))+
+            ', filtered by the nat '+TRNLRawByteString(IntToStr(NAT.CountFilteredInbound)));
+
+       Check(not ConnectedWithoutPermission,
+             'knowing the external address is not enough on its own: a restricting nat drops a '+
+             'sender its inside has never written to');
+
+       CheckAtLeastInt64(NAT.CountFilteredInbound,1,
+                         'and the nat really is what dropped it, rather than nothing having been sent');
+
+       // Now the server knocks at the client as well, which is the punch. Same external address,
+       // same everything, only the permission is new.
+       Peer:=Client.ConnectViaCandidates(ServerCandidates);
+       if not Check(assigned(Peer),'a second attempt can be started') then begin
+        exit;
+       end;
+       Peer.IncRef;
+       try
+        ConnectedAfterPunching:=PumpUntilConnected(5000,ClientCandidates);
+       finally
+        Peer.DecRef;
+       end;
+
+       Info('with the server punching back: connected '+
+            TRNLRawByteString(BoolToStr(ConnectedAfterPunching,true))+
+            ', delivered through the nat '+TRNLRawByteString(IntToStr(NAT.CountDeliveredInbound)));
+
+       Check(ConnectedAfterPunching,
+             'once the server has written towards the client the very same attempt gets through, '+
+             'which is the whole of hole punching');
+
+      finally
+       FreeAndNil(Client);
+      end;
+
+     finally
+      FreeAndNil(Server);
+     end;
+
+     finally
+      NAT.SocketDestroy(StrangerSocket);
+     end;
+
+    finally
+     FreeAndNil(NAT);
+    end;
+
+   finally
+    FreeAndNil(VirtualNetwork);
+   end;
+  finally
+   FreeAndNil(Instance);
+  end;
+
+ finally
+  FreeAndNil(Watchdog);
+  TestEnd;
+ end;
+
+end;
+
 procedure TestCandidatePriorityOrderAndSerialisation;
 var Candidates,Restored:TRNLCandidates;
     Bytes:TBytes;
@@ -4629,6 +4842,7 @@ begin
  // The candidate types, which are pure arithmetic plus one more parser for untrusted input
  TestCandidatePriorityOrderAndSerialisation;
  TestGatherCandidatesFindsHostAndServerReflexive;
+ TestHolePunchingOpensTheWayForAnIncomingConnection;
 
  // The rate limiters, on their own before anything drives them over a network
  TestBandwidthRateLimiterHonoursItsPeriodLength;

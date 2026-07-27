@@ -3709,6 +3709,17 @@ type PRNLVersion=^TRNLVersion;
        // The initiator side counterpart of the candidate's transcript
        fTranscript:TRNLProtocolTranscript;
 
+       // The addresses this connection attempt is still fanning out to. Empty for an ordinary
+       // Connect, which has exactly one address and knows it. While this is not empty every
+       // handshake repetition goes to all of them at once, which is what opens a local NAT
+       // mapping towards each of them and is therefore the hole punching.
+       fCandidateAddresses:array of TRNLAddress;
+
+       // Set as soon as one of them has answered. From then on the peer talks to that one
+       // address only, and any later change is the business of the ordinary authenticated
+       // address migration rather than of this.
+       fCandidatesNominated:boolean;
+
        // Likewise on the peer, so that it stays available for the whole connection
        fRemoteLongTermPublicKey:TRNLKey;
 
@@ -3833,6 +3844,7 @@ type PRNLVersion=^TRNLVersion;
 
        procedure UpdateRoundTripTime(const aRoundTripTime:TRNLInt64);
 
+       function SendPacketToAddress(const aAddress:TRNLAddress;const aData;const aDataLength:TRNLSizeUInt):TRNLNetworkSendResult;
        function SendPacket(const aData;const aDataLength:TRNLSizeUInt):TRNLNetworkSendResult;
 
        procedure UpdatePacketLossStatistics;
@@ -4192,6 +4204,7 @@ type PRNLVersion=^TRNLVersion;
 
        function AcceptableProtocolVersion(const aProtocolVersion:TRNLUInt64;out aTranscriptBinding:boolean):boolean;
 
+       function CanReachAddressFamily(const aAddress:TRNLAddress):boolean;
        function GetCountSockets:TRNLSizeInt;
        function GetLocalCandidates:TRNLCandidates;
 
@@ -4249,6 +4262,31 @@ type PRNLVersion=^TRNLVersion;
        function GatherCandidates(const aSTUNServers:array of TRNLAddress;
                                  out aCandidates:TRNLCandidates;
                                  const aTimeoutMilliseconds:TRNLInt64=2000):boolean;
+       // Like Connect, but offered every address the counter side might be reachable at instead of
+       // exactly one. The handshake repetition fans out over all of them, which opens a local NAT
+       // mapping towards each; whichever answers first becomes the path, and the rest are dropped.
+       //
+       // This is the initiating half. For two sides which are both behind a restricting NAT it is
+       // not enough on its own: the request can only reach the counter side once that side has sent
+       // something outwards itself, so the answering side has to call PunchCandidates. Two hosts
+       // both calling this would end up with two connections, which this stage does not solve.
+       function ConnectViaCandidates(const aRemoteCandidates:TRNLCandidates;
+                                     const aCountChannels:TRNLUInt32=1;
+                                     const aData:TRNLUInt64=0;
+                                     const aConnectionToken:PRNLConnectionToken=nil;
+                                     const aAuthenticationToken:PRNLAuthenticationToken=nil;
+                                     const aExpectedRemoteLongTermPublicKey:PRNLKey=nil):TRNLPeer;
+       // Opens a local mapping towards every one of those addresses, without starting a connection.
+       //
+       // A restricting NAT only lets a datagram in from somewhere its inside has already written to,
+       // so the side which is going to be connected *to* has to write first, or the very first
+       // request never arrives. What it sends is a handshake header of type NONE: correctly formed,
+       // so nothing mistakes it for noise, and carrying nothing, so the counter side does nothing
+       // with it. Its only job is to make the NAT remember.
+       //
+       // Has to be repeated for as long as the peer might still be knocking, because a mapping
+       // expires. Returns how many datagrams went out.
+       function PunchCandidates(const aRemoteCandidates:TRNLCandidates):TRNLSizeInt;
        // aExpectedRemoteLongTermPublicKey pins the identity of the counter side. Left at nil,
        // which is the default, nothing is compared and this behaves exactly as before; given a
        // key, the handshake is broken off as soon as the counter side turns out to hold a
@@ -21619,10 +21657,28 @@ end;
 
 function TRNLPeerPendingConnectionHandshakeSendData.Send:boolean;
 var PacketSize:TRNLSizeInt;
+    Index:TRNLSizeInt;
 begin
  fPeer.fHost.AddHandshakePacketChecksum(fHandshakePacket);
  PacketSize:=RNLProtocolHandshakePacketSizes[TRNLProtocolHandshakePacketType(TRNLInt32(fHandshakePacket.Header.PacketType))];
- result:=(PacketSize>0) and (fPeer.SendPacket(fHandshakePacket,PacketSize)<>RNL_NETWORK_SEND_RESULT_ERROR);
+ if PacketSize<=0 then begin
+  result:=false;
+ end else if length(fPeer.fCandidateAddresses)>0 then begin
+  // Fanned out over every candidate at once. Each of these datagrams opens a local mapping
+  // towards the address it goes to, so the repetition which the handshake performs anyway is
+  // already the hole punching; nothing else has to knock.
+  //
+  // Only a hard send error counts as failure. One unreachable candidate among several is the
+  // normal case and says nothing about the others.
+  result:=false;
+  for Index:=0 to length(fPeer.fCandidateAddresses)-1 do begin
+   if fPeer.SendPacketToAddress(fPeer.fCandidateAddresses[Index],fHandshakePacket,PacketSize)<>RNL_NETWORK_SEND_RESULT_ERROR then begin
+    result:=true;
+   end;
+  end;
+ end else begin
+  result:=fPeer.SendPacket(fHandshakePacket,PacketSize)<>RNL_NETWORK_SEND_RESULT_ERROR;
+ end;
 end;
 
 constructor TRNLPeerBlockPacket.Create(const aPeer:TRNLPeer);
@@ -23707,6 +23763,10 @@ begin
 
  fConnectionChallengeResponse:=nil;
 
+ fCandidateAddresses:=nil;
+
+ fCandidatesNominated:=false;
+
  fTranscriptBinding:=false;
 
  fProtocolFallbackPending:=false;
@@ -25582,13 +25642,13 @@ begin
  inc(fSendNewHostBandwidthLimitsSequenceNumber);
 end;
 
-function TRNLPeer.SendPacket(const aData;const aDataLength:TRNLSizeUInt):TRNLNetworkSendResult;
+function TRNLPeer.SendPacketToAddress(const aAddress:TRNLAddress;const aData;const aDataLength:TRNLSizeUInt):TRNLNetworkSendResult;
 var DataLength:TRNLSizeUInt;
 begin
  DataLength:=aDataLength shl 3;
  if (DataLength=0) or
     fOutgoingBandwidthRateLimiter.CanProceed(DataLength,fHost.fTime) then begin
-  result:=fHost.SendPacket(fAddress,aData,aDataLength);
+  result:=fHost.SendPacket(aAddress,aData,aDataLength);
   if result=RNL_NETWORK_SEND_RESULT_OK then begin
    fOutgoingBandwidthRateLimiter.AddAmount(DataLength,fHost.fTime);
    fOutgoingBandwidthRateTracker.AddUnits(DataLength);
@@ -25597,6 +25657,11 @@ begin
   // Drop the whole outgoing UDP packet for to satisfy the outgoing bandwidth limit (=> intended artificial packet loss)
   result:=RNL_NETWORK_SEND_RESULT_BANDWIDTH_RATE_LIMITER_DROP;
  end;
+end;
+
+function TRNLPeer.SendPacket(const aData;const aDataLength:TRNLSizeUInt):TRNLNetworkSendResult;
+begin
+ result:=SendPacketToAddress(fAddress,aData,aDataLength);
 end;
 
 procedure TRNLPeer.Disconnect(const aData:TRNLUInt64=0;const aDelayed:boolean=false);
@@ -26524,6 +26589,108 @@ begin
  end;
 end;
 
+function TRNLHost.ConnectViaCandidates(const aRemoteCandidates:TRNLCandidates;
+                                       const aCountChannels:TRNLUInt32=1;
+                                       const aData:TRNLUInt64=0;
+                                       const aConnectionToken:PRNLConnectionToken=nil;
+                                       const aAuthenticationToken:PRNLAuthenticationToken=nil;
+                                       const aExpectedRemoteLongTermPublicKey:PRNLKey=nil):TRNLPeer;
+var Sorted:TRNLCandidates;
+    Index,Count:TRNLSizeInt;
+begin
+
+ result:=nil;
+
+ if length(aRemoteCandidates)=0 then begin
+  exit;
+ end;
+
+ // Highest priority first, so that the address Connect is handed, and therefore the one which is
+ // used if nothing ever answers, is the most promising one rather than an arbitrary one
+ SetLength(Sorted,length(aRemoteCandidates));
+ for Index:=0 to length(aRemoteCandidates)-1 do begin
+  Sorted[Index]:=aRemoteCandidates[Index];
+ end;
+ TRNLCandidateUtils.SortByPriority(Sorted);
+
+ result:=Connect(Sorted[0].Address,
+                 aCountChannels,
+                 aData,
+                 aConnectionToken,
+                 aAuthenticationToken,
+                 aExpectedRemoteLongTermPublicKey);
+
+ if not assigned(result) then begin
+  exit;
+ end;
+
+ // Only candidates this host can actually reach, so that a v6 only address does not end up being
+ // sent to over a v4 socket and counted as an attempt which simply fails
+ SetLength(result.fCandidateAddresses,length(Sorted));
+ Count:=0;
+ for Index:=0 to length(Sorted)-1 do begin
+  if CanReachAddressFamily(Sorted[Index].Address) then begin
+   result.fCandidateAddresses[Count]:=Sorted[Index].Address;
+   inc(Count);
+  end;
+ end;
+ SetLength(result.fCandidateAddresses,Count);
+ result.fCandidatesNominated:=Count=0;
+
+ // The first request has already gone out of Connect, to the best candidate alone. Sending it once
+ // more, now to all of them, is what starts the punching without waiting out a whole repetition.
+ if (Count>0) and assigned(result.fPendingConnectionHandshakeSendData) then begin
+  result.fPendingConnectionHandshakeSendData.Send;
+ end;
+
+end;
+
+function TRNLHost.CanReachAddressFamily(const aAddress:TRNLAddress):boolean;
+var Index:TRNLSizeInt;
+    Family:TRNLAddressFamily;
+begin
+ result:=false;
+ Family:=aAddress.GetAddressFamily;
+ for Index:=0 to length(fSockets)-1 do begin
+  if (fSockets[Index].Socket<>RNL_SOCKET_NULL) and
+     ((fSockets[Index].Families and Family)<>0) then begin
+   result:=true;
+   exit;
+  end;
+ end;
+end;
+
+function TRNLHost.PunchCandidates(const aRemoteCandidates:TRNLCandidates):TRNLSizeInt;
+var Index:TRNLSizeInt;
+    Packet:TRNLProtocolHandshakePacketHeaderSignature;
+begin
+
+ result:=0;
+
+ // The handshake signature and nothing else, four bytes.
+ //
+ // Deliberately shorter than a handshake header, which is what makes it provably harmless:
+ // DispatchReceivedPacketData routes it to the handshake path because the signature matches, and
+ // DispatchReceivedHandshakePacketData drops it at once because it is shorter than the header. It
+ // never reaches the packet type, and therefore never reaches the size table which that type
+ // indexes. A punch datagram carrying a type of its own would have to invent one, and every value
+ // outside the table is an out of bounds read on the receiving side.
+ //
+ // Recognisable as RNL on the wire all the same, which is worth something when looking at a
+ // capture and wondering where the traffic is from.
+ Packet:=RNLProtocolHandshakePacketHeaderSignature;
+
+ for Index:=0 to length(aRemoteCandidates)-1 do begin
+  if CanReachAddressFamily(aRemoteCandidates[Index].Address) and
+     (SendPacket(aRemoteCandidates[Index].Address,
+                 Packet,
+                 SizeOf(TRNLProtocolHandshakePacketHeaderSignature))=RNL_NETWORK_SEND_RESULT_OK) then begin
+   inc(result);
+  end;
+ end;
+
+end;
+
 function TRNLHost.GetLocalCandidates:TRNLCandidates;
 begin
  result:=fLocalCandidates;
@@ -26906,6 +27073,15 @@ begin
  // REQUIRED the older version never gets this far, because AcceptableProtocolVersion turns it away.
  Peer.fTranscriptBinding:=fReceivedTranscriptBinding;
  Peer.fProtocolFallbackPending:=false;
+
+ // Whichever candidate answered first is the path this connection runs on. The fan out stops
+ // here, which also stops the address from flapping between candidates that all reply.
+ if not Peer.fCandidatesNominated then begin
+  Peer.fCandidatesNominated:=true;
+  Peer.fCandidateAddresses:=nil;
+  Peer.fAddress:=fReceivedAddress;
+  Peer.fPointerToAddress:=@Peer.fAddress;
+ end;
 
  // The responder half of the transcript, taken from the challenge request. Written on every one of
  // them, so that a regenerated challenge is followed rather than ignored.
