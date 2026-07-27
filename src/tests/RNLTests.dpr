@@ -31,6 +31,7 @@ uses {$ifdef unix}
      RNLTestHostPair in 'RNLTestHostPair.pas',
      RNLTestSTUNServer in 'RNLTestSTUNServer.pas',
      RNLTestNATNetwork in 'RNLTestNATNetwork.pas',
+     RNLTestTURNServer in 'RNLTestTURNServer.pas',
      RNLTestRegressions in 'RNLTestRegressions.pas';
 
 begin

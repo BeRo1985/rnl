@@ -750,6 +750,106 @@ const RNL_PROTOCOL_VERSION_MAJOR=1;
 
       RNL_MULTICAST_GROUP_IPV6='FF02:0:0:0:0:0:0:1';
 
+      // RFC 8489 message classes, which are the two bits the method number is interleaved with
+      RNL_STUN_CLASS_REQUEST=TRNLUInt16($0000);
+      RNL_STUN_CLASS_INDICATION=TRNLUInt16($0010);
+      RNL_STUN_CLASS_SUCCESS_RESPONSE=TRNLUInt16($0100);
+      RNL_STUN_CLASS_ERROR_RESPONSE=TRNLUInt16($0110);
+
+      // RFC 8489 and RFC 8656 methods
+      RNL_STUN_METHOD_BINDING=TRNLUInt16($0001);
+      RNL_TURN_METHOD_ALLOCATE=TRNLUInt16($0003);
+      RNL_TURN_METHOD_REFRESH=TRNLUInt16($0004);
+      RNL_TURN_METHOD_SEND=TRNLUInt16($0006);
+      RNL_TURN_METHOD_DATA=TRNLUInt16($0007);
+      RNL_TURN_METHOD_CREATE_PERMISSION=TRNLUInt16($0008);
+      RNL_TURN_METHOD_CHANNEL_BIND=TRNLUInt16($0009);
+
+      // Comprehension required attributes, 0x0000 to 0x7fff
+      RNL_STUN_ATTRIBUTE_MAPPED_ADDRESS=TRNLUInt16($0001);
+      RNL_STUN_ATTRIBUTE_USERNAME=TRNLUInt16($0006);
+      RNL_STUN_ATTRIBUTE_MESSAGE_INTEGRITY=TRNLUInt16($0008);
+      RNL_STUN_ATTRIBUTE_ERROR_CODE=TRNLUInt16($0009);
+      RNL_STUN_ATTRIBUTE_UNKNOWN_ATTRIBUTES=TRNLUInt16($000a);
+      RNL_STUN_ATTRIBUTE_REALM=TRNLUInt16($0014);
+      RNL_STUN_ATTRIBUTE_NONCE=TRNLUInt16($0015);
+      RNL_STUN_ATTRIBUTE_MESSAGE_INTEGRITY_SHA256=TRNLUInt16($001c);
+      RNL_STUN_ATTRIBUTE_PASSWORD_ALGORITHM=TRNLUInt16($001d);
+      RNL_STUN_ATTRIBUTE_XOR_MAPPED_ADDRESS=TRNLUInt16($0020);
+      RNL_TURN_ATTRIBUTE_CHANNEL_NUMBER=TRNLUInt16($000c);
+      RNL_TURN_ATTRIBUTE_LIFETIME=TRNLUInt16($000d);
+      RNL_TURN_ATTRIBUTE_XOR_PEER_ADDRESS=TRNLUInt16($0012);
+      RNL_TURN_ATTRIBUTE_DATA=TRNLUInt16($0013);
+      RNL_TURN_ATTRIBUTE_XOR_RELAYED_ADDRESS=TRNLUInt16($0016);
+      RNL_TURN_ATTRIBUTE_REQUESTED_TRANSPORT=TRNLUInt16($0019);
+      RNL_TURN_ATTRIBUTE_DONT_FRAGMENT=TRNLUInt16($001a);
+      // RFC 8656 section 14.7, originally RFC 6156. Comprehension required, so a server which
+      // does not know the IPv6 extension answers 420 rather than ignoring it - which is why it
+      // is only sent where it is actually needed.
+      RNL_TURN_ATTRIBUTE_REQUESTED_ADDRESS_FAMILY=TRNLUInt16($0017);
+
+      // Comprehension optional attributes, 0x8000 to 0xffff
+      RNL_STUN_ATTRIBUTE_PASSWORD_ALGORITHMS=TRNLUInt16($8002);
+      RNL_STUN_ATTRIBUTE_SOFTWARE=TRNLUInt16($8022);
+      RNL_STUN_ATTRIBUTE_FINGERPRINT=TRNLUInt16($8028);
+      // RFC 5780. CHANGE-REQUEST asks the server to answer from somewhere else, OTHER-ADDRESS is
+      // where that somewhere else is, and RESPONSE-ORIGIN says where an answer actually came
+      // from. All three together are what makes the filtering behaviour determinable.
+      RNL_STUN_ATTRIBUTE_CHANGE_REQUEST=TRNLUInt16($0003);
+      RNL_STUN_ATTRIBUTE_RESPONSE_ORIGIN=TRNLUInt16($802b);
+      RNL_STUN_ATTRIBUTE_OTHER_ADDRESS=TRNLUInt16($802c);
+
+      // The two bits of CHANGE-REQUEST
+      RNL_STUN_CHANGE_REQUEST_PORT=TRNLUInt32($00000002);
+      RNL_STUN_CHANGE_REQUEST_IP=TRNLUInt32($00000004);
+
+      // The one transport TURN defines for UDP allocations, in the top byte
+      RNL_TURN_TRANSPORT_UDP=TRNLUInt32($11000000);
+
+      // RFC 8489 password algorithm numbers
+      RNL_STUN_PASSWORD_ALGORITHM_MD5=TRNLUInt16($0001);
+      RNL_STUN_PASSWORD_ALGORITHM_SHA256=TRNLUInt16($0002);
+
+      // Error codes this client has to act on rather than merely report
+      RNL_STUN_ERROR_UNAUTHORIZED=401;
+      RNL_STUN_ERROR_UNKNOWN_ATTRIBUTE=420;
+      RNL_STUN_ERROR_STALE_NONCE=438;
+      // RFC 8656 section 14.7 and 14.8: the relay cannot serve the address family that was
+      // asked for, and a peer address of a family the allocation does not carry
+      RNL_TURN_ERROR_ADDRESS_FAMILY_NOT_SUPPORTED=440;
+      RNL_TURN_ERROR_PEER_ADDRESS_FAMILY_MISMATCH=443;
+
+      RNL_STUN_ADDRESS_FAMILY_IPV4=TRNLUInt8($01);
+      RNL_STUN_ADDRESS_FAMILY_IPV6=TRNLUInt8($02);
+
+
+      // RFC 8656 section 12: a channel number lives in this range, and the two high bits being set is
+      // exactly what tells a ChannelData frame from a STUN message on the same socket
+      RNL_TURN_CHANNEL_NUMBER_FIRST=TRNLUInt16($4000);
+      RNL_TURN_CHANNEL_NUMBER_LAST=TRNLUInt16($7ffe);
+
+      // What a server hands out if it does not say otherwise, and what this client asks for
+      RNL_TURN_DEFAULT_LIFETIME=600;
+      // A permission lives five minutes and a channel ten, both fixed by the RFC. Renewed at
+      // half of that, so one lost renewal is not the end of the path.
+      RNL_TURN_PERMISSION_LIFETIME=300;
+      RNL_TURN_CHANNEL_LIFETIME=600;
+      // How long a channel may carry nothing before it is let go of, and how long its number
+      // then stays out of circulation. The second one is RFC 8656 section 12: the binding has to
+      // have expired at the server, plus five minutes, before the number may mean a different
+      // peer.
+      RNL_TURN_CHANNEL_IDLE_TIMEOUT=600000;
+      RNL_TURN_CHANNEL_NUMBER_REUSE_DELAY=900000;
+
+      // How long a request waits before it is sent again, and how often
+      RNL_TURN_REQUEST_TIMEOUT=500;
+      RNL_TURN_REQUEST_ATTEMPTS=5;
+
+      // Room for reassembling what arrives over a stream. TCP hands over whatever it happens to have,
+      // so a frame can arrive in pieces and two frames can arrive in one read; this holds the pieces
+      // in between. Two of the largest messages, so a whole one always fits next to a partial one.
+      RNL_TURN_STREAM_BUFFER_SIZE=(RNL_MAXIMUM_MTU+128)*2;
+
 type PRNLVersion=^TRNLVersion;
      TRNLVersion=TRNLUInt32;
 
@@ -1182,6 +1282,34 @@ type PRNLVersion=^TRNLVersion;
        class procedure SelfTest; static;
      end;
 
+     // What HMAC needs of a hash, and nothing else: three operations on an opaque context plus three
+     // sizes. Handed over as plain procedural variables rather than as a generic type parameter,
+     // because Delphi will not let a method be called on an unconstrained one and a record constraint
+     // cannot promise Initialize, Update and Finalize. This form compiles on both and costs one
+     // indirect call per operation, of which there are five per HMAC no matter how long the message.
+     //
+     // Declared ahead of the hashes because every one of them hands one of these out.
+     TRNLHashInitializeProcedure=procedure(var aContext);
+     TRNLHashUpdateProcedure=procedure(var aContext;const aMessage;const aMessageSize:TRNLSizeUInt);
+     TRNLHashFinalizeProcedure=procedure(var aContext;out aHash);
+
+     PRNLHashDescriptor=^TRNLHashDescriptor;
+     TRNLHashDescriptor=record
+      public
+       // Large enough for the largest context and the largest block any descriptor below describes,
+       // both of which belong to SHA-512. Checked before anything is written into them.
+       const MaximumContextSize=512;
+             MaximumBlockSize=128;
+      public
+       Initialize:TRNLHashInitializeProcedure;
+       Update:TRNLHashUpdateProcedure;
+       Finalize:TRNLHashFinalizeProcedure;
+       ContextSize:TRNLSizeInt;
+       BlockSize:TRNLSizeInt;
+       HashSize:TRNLSizeInt;
+       function Valid:boolean;
+     end;
+
      PRNLSHA512State=^TRNLSHA512State;
      TRNLSHA512State=array[0..7] of TRNLUInt64;
 
@@ -1268,6 +1396,9 @@ type PRNLVersion=^TRNLVersion;
      TRNLSHA512=record
       public
        class procedure Process(out aHash;const aMessage;const aMessageSize:TRNLSizeUInt); static;
+       // What TRNLHMAC needs of this hash. Built at run time rather than declared as a typed
+       // constant, because a typed constant would have to sit after the procedures it names.
+       class function Descriptor:TRNLHashDescriptor; static;
        class procedure SelfTest; static;
      end;
 
@@ -1354,6 +1485,9 @@ type PRNLVersion=^TRNLVersion;
      TRNLSHA256=record
       public
        class procedure Process(out aHash;const aMessage;const aMessageSize:TRNLSizeUInt); static;
+       // What TRNLHMAC needs of this hash. Built at run time rather than declared as a typed
+       // constant, because a typed constant would have to sit after the procedures it names.
+       class function Descriptor:TRNLHashDescriptor; static;
        class procedure SelfTest; static;
      end;
 
@@ -1414,6 +1548,9 @@ type PRNLVersion=^TRNLVersion;
      TRNLSHA1=record
       public
        class procedure Process(out aHash;const aMessage;const aMessageSize:TRNLSizeUInt); static;
+       // What TRNLHMAC needs of this hash. Built at run time rather than declared as a typed
+       // constant, because a typed constant would have to sit after the procedures it names.
+       class function Descriptor:TRNLHashDescriptor; static;
        class procedure SelfTest; static;
      end;
 
@@ -1508,29 +1645,35 @@ type PRNLVersion=^TRNLVersion;
      TRNLMD5=record
       public
        class procedure Process(out aHash;const aMessage;const aMessageSize:TRNLSizeUInt); static;
+       // What TRNLHMAC needs of this hash. Built at run time rather than declared as a typed
+       // constant, because a typed constant would have to sit after the procedures it names.
+       class function Descriptor:TRNLHashDescriptor; static;
        class procedure SelfTest; static;
      end;
 {$ifend}
 
-     // Every hash here has the same 64 byte block, so one type covers the padded key of all of them
+     // One padded key block, sized for the largest block any of the hashes has
      PRNLHMACKeyBlock=^TRNLHMACKeyBlock;
-     TRNLHMACKeyBlock=array[0..63] of TRNLUInt8;
+     TRNLHMACKeyBlock=array[0..TRNLHashDescriptor.MaximumBlockSize-1] of TRNLUInt8;
 
-     // RFC 2104. The key handling is the whole of it and is identical for every hash: a key longer
-     // than one block is replaced by its own digest, a shorter one is zero padded, and the block is
-     // then xored with $36 for the inner pass and with $5c for the outer one.
-     //
-     // Deliberately not one generic over the context type. Delphi does not let a method be called on
-     // an unconstrained generic parameter, and a record constraint cannot promise Initialize, Update
-     // and Finalize, so a generic version would compile on FreePascal and not on Delphi. What is
-     // actually shared sits here; what remains per hash is six lines.
-     PRNLHMACUtils=^TRNLHMACUtils;
-     TRNLHMACUtils=record
+     // RFC 2104, once, for every hash there is or ever will be. The key handling is the whole of it:
+     // a key longer than one block is replaced by its own digest, a shorter one is zero padded, and
+     // the block is then xored with $36 for the inner pass and with $5c for the outer one.
+     PRNLHMAC=^TRNLHMAC;
+     TRNLHMAC=record
       public
        const InnerPad=TRNLUInt8($36);
              OuterPad=TRNLUInt8($5c);
       public
-       class procedure XorKeyBlock(var aKeyBlock:TRNLHMACKeyBlock;const aPad:TRNLUInt8); static;
+       class procedure XorKeyBlock(var aKeyBlock:TRNLHMACKeyBlock;
+                                   const aBlockSize:TRNLSizeInt;
+                                   const aPad:TRNLUInt8); static;
+       // False, and aMAC left untouched, if the descriptor does not add up. Everything else about it
+       // cannot fail: there is no allocation and no length that is not bounded by the descriptor.
+       class function Process(const aDescriptor:TRNLHashDescriptor;
+                              out aMAC;
+                              const aKey;const aKeySize:TRNLSizeUInt;
+                              const aMessage;const aMessageSize:TRNLSizeUInt):boolean; static;
      end;
 
      PRNLHMACSHA256=^TRNLHMACSHA256;
@@ -2212,6 +2355,10 @@ type PRNLVersion=^TRNLVersion;
        fLocalSalt:TRNLUInt64;
        fCreateTime:TRNLTime;
        fAddress:TRNLAddress;
+       // Which of the host's sockets the request came in on. A handshake answer has to leave the same
+       // way, or it does not match the mapping the counter side is waiting for it on - and with more
+       // than one socket per address family, "whichever serves the family" is no longer the same one.
+       fSocketIndex:TRNLSizeInt;
        fData:PRNLConnectionCandidateData;
        function GetConnectionToken:TRNLConnectionToken;
        function GetAuthenticationToken:TRNLAuthenticationToken;
@@ -3175,6 +3322,17 @@ type PRNLVersion=^TRNLVersion;
      // answer from an address this host never wrote to, so it is deliberately not guessed at here.
      //
      // The order is the order of decreasing usefulness for punching, so comparisons mean something.
+     // The twelve bytes which identify one STUN transaction, and the mask its obfuscated addresses are
+     // built with. Declared here rather than next to TRNLSTUNMessage because everything from a
+     // pending query on a host to the message itself needs them.
+     PRNLSTUNTransactionID=^TRNLSTUNTransactionID;
+     TRNLSTUNTransactionID=array[0..11] of TRNLUInt8;
+
+     // Magic cookie followed by the transaction id, which is exactly the sixteen bytes an IPv6
+     // address needs; an IPv4 one uses the first four
+     PRNLSTUNXORMask=^TRNLSTUNXORMask;
+     TRNLSTUNXORMask=array[0..15] of TRNLUInt8;
+
      PRNLNATMappingBehaviour=^TRNLNATMappingBehaviour;
      TRNLNATMappingBehaviour=
       (
@@ -3192,6 +3350,25 @@ type PRNLVersion=^TRNLVersion;
        RNL_NAT_MAPPING_BEHAVIOUR_ADDRESS_DEPENDENT,
        // One mapping per destination host and port, which is what is usually called symmetric
        RNL_NAT_MAPPING_BEHAVIOUR_ADDRESS_AND_PORT_DEPENDENT
+      );
+
+     // The other half of RFC 4787: who a NAT lets back in. This decides whether the counter side has
+     // to punch first, where the mapping behaviour decides whether its address is worth anything.
+     //
+     // Determining it takes a server willing to answer from an address this host never wrote to,
+     // which is what RFC 5780 CHANGE-REQUEST asks for. Not every server can do it, so UNKNOWN is a
+     // perfectly ordinary outcome and not a failure.
+     PRNLNATFilteringBehaviour=^TRNLNATFilteringBehaviour;
+     TRNLNATFilteringBehaviour=
+      (
+       RNL_NAT_FILTERING_BEHAVIOUR_UNKNOWN,
+       // Anything gets back in once the inside has written anywhere. The classic full cone.
+       RNL_NAT_FILTERING_BEHAVIOUR_ENDPOINT_INDEPENDENT,
+       // Only an address the inside has written to, but any port of it. Address restricted.
+       RNL_NAT_FILTERING_BEHAVIOUR_ADDRESS_DEPENDENT,
+       // Only the exact address and port the inside has written to. Port restricted, and the case
+       // where the counter side has to punch before anything can arrive.
+       RNL_NAT_FILTERING_BEHAVIOUR_ADDRESS_AND_PORT_DEPENDENT
       );
 
      // What two sides can expect of a direct connection between them. Worth knowing before the
@@ -3216,12 +3393,49 @@ type PRNLVersion=^TRNLVersion;
        RNL_HOLE_PUNCHING_VIABILITY_HOPELESS
       );
 
+     // The answer to a binding request which a running host asked on the application's behalf. Kept
+     // in a queue of its own rather than turned into a host event, because a host event is copied on
+     // every single received message and two addresses on top of it would be paid for by every packet
+     // for the sake of something that happens once in a while.
+     PRNLHostSTUNResult=^TRNLHostSTUNResult;
+     TRNLHostSTUNResult=record
+      // False if the server never answered, in which case only ServerAddress and SocketIndex mean
+      // anything: the application still wants to know which query it was that failed
+      Success:boolean;
+      SocketIndex:TRNLSizeInt;
+      ServerAddress:TRNLAddress;
+      MappedAddress:TRNLAddress;
+      RoundTripTime:TRNLInt64;
+     end;
+
+     TRNLHostSTUNResults=array of TRNLHostSTUNResult;
+
+     // One binding request in flight. The host answers it out of its own receive path, which is what
+     // makes this usable while it is being serviced - unlike TRNLSTUNClient.QueryOnSocket, which
+     // consumes from the socket itself and therefore has to have it to itself.
+     PRNLHostSTUNQuery=^TRNLHostSTUNQuery;
+     TRNLHostSTUNQuery=record
+      Used:boolean;
+      SocketIndex:TRNLSizeInt;
+      ServerAddress:TRNLAddress;
+      TransactionID:TRNLSTUNTransactionID;
+      StartTime:TRNLTime;
+      Deadline:TRNLTime;
+      CountAttempts:TRNLSizeInt;
+     end;
+
+     TRNLHostSTUNQueries=array of TRNLHostSTUNQuery;
+
      PRNLNATDetectionResult=^TRNLNATDetectionResult;
      TRNLNATDetectionResult=record
       // Whether a single server answered at all. The behaviour can still be UNKNOWN with this set,
       // which is the case where the mapping is known but nothing could be concluded about it.
       Success:boolean;
       Behaviour:TRNLNATMappingBehaviour;
+      // Only ever anything but UNKNOWN if the server offered OTHER-ADDRESS, which is what says it can
+      // answer from somewhere else at all
+      FilteringBehaviour:TRNLNATFilteringBehaviour;
+      SupportsRFC5780:boolean;
       // What the socket is bound to and what the first answering server saw it as. The difference
       // between the two is the NAT.
       LocalAddress:TRNLAddress;
@@ -3274,7 +3488,15 @@ type PRNLVersion=^TRNLVersion;
        function SocketWait(const aSockets:array of TRNLSocket;var aConditions:TRNLSocketWaitConditions;const aTimeout:TRNLInt64;const aEvent:TRNLNetworkEvent=nil):boolean; virtual;
        function Send(const aSocket:TRNLSocket;const aAddress:PRNLAddress;const aData;const aDataLength:TRNLSizeInt;const aFamily:TRNLAddressFamily):TRNLSizeInt; virtual;
        function Receive(const aSocket:TRNLSocket;const aAddress:PRNLAddress;out aData;const aDataLength:TRNLSizeInt;const aFamily:TRNLAddressFamily):TRNLSizeInt; virtual;
+       // The address some relay in front of this network forwards to that socket. False here and
+       // for every network which is not a relay, which is what lets GatherCandidates ask without
+       // knowing whether there is one.
+       function GetRelayedAddress(const aSocket:TRNLSocket;out aAddress:TRNLAddress):boolean; virtual;
        function SendStream(const aSocket:TRNLSocket;const aData;const aDataLength:TRNLSizeInt):TRNLSizeInt; virtual;
+       // The same three way answer as Receive: a positive count of bytes, zero for nothing waiting
+       // right now, and negative for a stream which is finished or broken. A stream needs that third
+       // case told apart from the second one, because a relay whose connection dropped would
+       // otherwise be indistinguishable from a relay with nothing to say.
        function ReceiveStream(const aSocket:TRNLSocket;out aData;const aDataLength:TRNLSizeInt):TRNLSizeInt; virtual;
       published
        property Instance:TRNLInstance read fInstance;
@@ -4077,6 +4299,12 @@ type PRNLVersion=^TRNLVersion;
        // address migration rather than of this.
        fCandidatesNominated:boolean;
 
+       // Which of the host's sockets this peer talks over. Minus one means whichever serves the
+       // address family, which is what every peer did before there could be more than one per family.
+       // Set from the socket a request came in on for a peer this host answered, and from the socket
+       // an answer came back on for one it started itself.
+       fSocketIndex:TRNLSizeInt;
+
        // Where the next round of the fan out starts in fCandidateAddresses, so that a list longer
        // than one round still gets every one of its entries served, just spread over several rounds
        fCandidateRoundOffset:TRNLSizeInt;
@@ -4206,6 +4434,12 @@ type PRNLVersion=^TRNLVersion;
        procedure UpdateRoundTripTime(const aRoundTripTime:TRNLInt64);
 
        function SendPacketToAddress(const aAddress:TRNLAddress;const aData;const aDataLength:TRNLSizeUInt):TRNLNetworkSendResult;
+       // Over one named socket rather than over this peer's own. Only the candidate fan out needs
+       // it: that is where the socket is part of what is being tried rather than already decided.
+       function SendPacketToAddressOnSocket(const aSocketIndex:TRNLSizeInt;
+                                            const aAddress:TRNLAddress;
+                                            const aData;
+                                            const aDataLength:TRNLSizeUInt):TRNLNetworkSendResult;
        function SendPacket(const aData;const aDataLength:TRNLSizeUInt):TRNLNetworkSendResult;
 
        procedure UpdatePacketLossStatistics;
@@ -4421,6 +4655,37 @@ type PRNLVersion=^TRNLVersion;
        // one repetition round. Zero means all of them.
        fMaximumCandidatesPerHandshakeRound:TRNLSizeInt;
 
+       // Behind a relay every client arrives under the same host address and would share one
+       // bucket, so a single connection spammer would lock out every other client of that relay
+       // and the flooding defence could no longer tell an attacker from a neighbour. Addresses
+       // named here get a bucket of their own instead, which is honest about not being able to
+       // tell them apart rather than pretending it can.
+       // Binding requests this host has in flight on the application's behalf, and the answers that
+       // have come back for them
+       fSTUNQueries:TRNLHostSTUNQueries;
+
+       fSTUNResults:TRNLHostSTUNResults;
+
+       fSTUNQueryTimeout:TRNLInt64;
+
+       fCountSTUNQueryAttempts:TRNLSizeInt;
+
+       fTotalSTUNQueries:TRNLUInt64;
+
+       fTotalAnsweredSTUNQueries:TRNLUInt64;
+
+       fTotalTimedOutSTUNQueries:TRNLUInt64;
+
+       // The addresses this host binds a socket to, one each. Empty means the single configured
+       // address and the family logic of the work mode, which is what every host did before.
+       fLocalAddresses:array of TRNLAddress;
+
+       fRelayHostAddresses:TRNLHostAddresses;
+
+       fRateLimiterRelayAddressBurst:TRNLInt64;
+
+       fRateLimiterRelayAddressPeriod:TRNLUInt64;
+
        fRateLimiterHostAddressBurst:TRNLInt64;
 
        fRateLimiterHostAddressPeriod:TRNLUInt64;
@@ -4467,6 +4732,10 @@ type PRNLVersion=^TRNLVersion;
        fReceivedAddress:TRNLAddress;
 
        // The protocol version of the handshake packet currently being processed, kept here for the
+       // Which socket the datagram now being dispatched arrived on. Carried the same way and for the
+       // same reason as fReceivedAddress: an answer has to go back out where the question came in.
+       fReceivedSocketIndex:TRNLSizeInt;
+
        // same reason and in the same way as fReceivedAddress: the per packet dispatch functions
        // need it, and threading it through all of their signatures would buy nothing
        fReceivedProtocolVersion:TRNLUInt64;
@@ -4489,6 +4758,8 @@ type PRNLVersion=^TRNLVersion;
        fTotalRejectedRemoteLongTermPublicKeys:TRNLUInt64;
 
        fTotalRateLimitedConnectionRequests:TRNLUInt64;
+
+       fTotalRelayedConnectionRequests:TRNLUInt64;
 
        fTotalSimultaneousConnectsWon:TRNLUInt64;
 
@@ -4561,7 +4832,16 @@ type PRNLVersion=^TRNLVersion;
 
        procedure SetKeepAliveWindowSize(const aKeepAliveWindowSize:TRNLUInt32);
 
+       // Which of this host's sockets serves that address family, or -1 if none does
+       function FindSocketForAddressFamily(const aAddress:TRNLAddress):TRNLSizeInt;
        function SendPacket(const aAddress:TRNLAddress;const aData;const aDataLength:TRNLSizeUInt):TRNLNetworkSendResult;
+       // Out of one named socket rather than out of whichever serves the family. Needed wherever the
+       // socket is part of the answer: a reply has to leave where the question came in, or it does not
+       // match the mapping the counter side is expecting it on.
+       function SendPacketOnSocket(const aSocketIndex:TRNLSizeInt;
+                                   const aAddress:TRNLAddress;
+                                   const aData;
+                                   const aDataLength:TRNLSizeUInt):TRNLNetworkSendResult;
 
        procedure ResetConnectionAttemptHistory;
 
@@ -4575,6 +4855,16 @@ type PRNLVersion=^TRNLVersion;
 
        function AcceptableProtocolVersion(const aProtocolVersion:TRNLUInt64;out aTranscriptBinding:boolean):boolean;
 
+       // Sends anything outstanding again and gives up on what has run out of attempts. Called from
+       // the service loop, so a query makes progress for as long as the host is being serviced and
+       // stops making it the moment it is not.
+       procedure DispatchSTUNQueries;
+       // True if that datagram was the answer to one of our own binding requests, in which case it has
+       // been consumed here and must not travel any further. Matched on the transaction id, so a
+       // normal packet cannot be mistaken for one: without an outstanding query nothing is looked at
+       // at all.
+       function DispatchReceivedSTUNResponse(const aPacketData;const aPacketDataLength:TRNLSizeUInt):boolean;
+       function IsRelayHostAddress(const aHost:TRNLHostAddress):boolean;
        function CanReachAddressFamily(const aAddress:TRNLAddress):boolean;
        function FindOwnPendingAttemptTowards(const aAddress:TRNLAddress):TRNLPeer;
        function GetCountSockets:TRNLSizeInt;
@@ -4661,6 +4951,32 @@ type PRNLVersion=^TRNLVersion;
        function DetectNATMappingBehaviour(const aSTUNServers:array of TRNLAddress;
                                           out aResult:TRNLNATDetectionResult;
                                           const aTimeoutMilliseconds:TRNLInt64=1000):boolean;
+       // Asks a STUN server what it sees one of this host's sockets as, without stopping the host.
+       // GatherCandidates and DetectNATMappingBehaviour both wait for their answers and therefore have
+       // to have the socket to themselves, which makes them startup tools; this one belongs to the
+       // running state, where a reflexive candidate has to be renewed after the path has changed.
+       //
+       // False if the socket does not exist or the request could not be sent at all. Otherwise the
+       // answer, or the fact that none came, turns up at TakeSTUNResult.
+       function BeginSTUNQuery(const aServerAddress:TRNLAddress;const aSocketIndex:TRNLSizeInt=0):boolean;
+       // Takes one answer out of the queue. False when there is none waiting.
+       function TakeSTUNResult(out aResult:TRNLHostSTUNResult):boolean;
+       function CountPendingSTUNQueries:TRNLSizeInt;
+       // Declares an address as a relay, so that connection requests arriving from it are counted
+       // against RateLimiterRelayAddressBurst rather than against the per address one. Nothing else
+       // about them changes; in particular this is not a reason to trust anything they say.
+       // Binds a socket to that address as well, instead of the one wildcard socket per family.
+       // Has to be called before Start; afterwards it does nothing, because the sockets are up.
+       //
+       // This is what makes candidate pairing per local socket mean anything: with one socket per
+       // family there is exactly one way out and nothing to pair, and with one per interface the
+       // handshake fans out over every combination of local socket and remote candidate.
+       //
+       // A port of zero means the port this host is configured with, which is the usual case:
+       // several addresses, same port.
+       procedure AddLocalAddress(const aAddress:TRNLAddress);
+       procedure ClearLocalAddresses;
+       procedure AddRelayHostAddress(const aHost:TRNLHostAddress);
        function ConnectViaCandidates(const aRemoteCandidates:TRNLCandidates;
                                      const aCountChannels:TRNLUInt32=1;
                                      const aData:TRNLUInt64=0;
@@ -4760,6 +5076,16 @@ type PRNLVersion=^TRNLVersion;
        // and, because the rounds rotate through the list, what any single one of those addresses
        // gets to see. Zero switches the bound off and serves the whole list every round.
        property MaximumCandidatesPerHandshakeRound:TRNLSizeInt read fMaximumCandidatesPerHandshakeRound write fMaximumCandidatesPerHandshakeRound;
+       property RateLimiterRelayAddressBurst:TRNLInt64 read fRateLimiterRelayAddressBurst write fRateLimiterRelayAddressBurst;
+       property RateLimiterRelayAddressPeriod:TRNLUInt64 read fRateLimiterRelayAddressPeriod write fRateLimiterRelayAddressPeriod;
+       property TotalRelayedConnectionRequests:TRNLUInt64 read fTotalRelayedConnectionRequests;
+       // How long a binding request asked by BeginSTUNQuery waits before it goes out again, and how
+       // often before it is given up on
+       property STUNQueryTimeout:TRNLInt64 read fSTUNQueryTimeout write fSTUNQueryTimeout;
+       property CountSTUNQueryAttempts:TRNLSizeInt read fCountSTUNQueryAttempts write fCountSTUNQueryAttempts;
+       property TotalSTUNQueries:TRNLUInt64 read fTotalSTUNQueries;
+       property TotalAnsweredSTUNQueries:TRNLUInt64 read fTotalAnsweredSTUNQueries;
+       property TotalTimedOutSTUNQueries:TRNLUInt64 read fTotalTimedOutSTUNQueries;
        property RateLimiterHostAddressBurst:TRNLInt64 read fRateLimiterHostAddressBurst write fRateLimiterHostAddressBurst;
        property RateLimiterHostAddressPeriod:TRNLUInt64 read fRateLimiterHostAddressPeriod write fRateLimiterHostAddressPeriod;
        // Incoming connection attempts per second, averaged over the attempt history, and the
@@ -4849,6 +5175,108 @@ type PRNLVersion=^TRNLVersion;
 
      // What a STUN binding transaction yields: the address a NAT presents this socket to the world
      // under, which is what a server reflexive candidate for NAT traversal is made of.
+     TRNLSTUNAttributeType=TRNLUInt16;
+
+     PRNLSTUNMessage=^TRNLSTUNMessage;
+
+     // One STUN or TURN message, either under construction or under inspection. Sized to hold a Send
+     // indication carrying a full RNL datagram: the largest MTU plus room for header and attributes.
+     //
+     // Nothing here raises. A builder which runs out of room and a reader handed something that does
+     // not add up both go invalid and stay invalid, so one check at the end is enough rather than one
+     // per step. Every length that arrives from outside is measured against what actually arrived
+     // before it is believed.
+     TRNLSTUNMessage=record
+      public
+       const HeaderSize=20;
+             TransactionIDSize=12;
+             AttributeHeaderSize=4;
+             MagicCookie=TRNLUInt32($2112a442);
+             FingerprintXORValue=TRNLUInt32($5354554e);
+             // What a bound channel replaces the whole 36 byte Send indication with
+             ChannelDataHeaderSize=4;
+             MaximumSize=RNL_MAXIMUM_MTU+128;
+      private
+       fData:array[0..MaximumSize-1] of TRNLUInt8;
+       fSize:TRNLSizeInt;
+       fTransactionID:TRNLSTUNTransactionID;
+       fValid:boolean;
+       function GetDataPointer:TRNLPointer;
+       // The length field counts attributes only, and both MESSAGE-INTEGRITY and FINGERPRINT are
+       // computed over a message whose length field already counts the attribute being computed
+       procedure SetLengthField(const aExtra:TRNLSizeInt);
+       function Reserve(const aValueSize:TRNLSizeInt):TRNLSizeInt;
+       function ComputeIntegrity(const aAttributeType:TRNLSTUNAttributeType;
+                                 const aKey;const aKeySize:TRNLSizeInt;
+                                 const aOverSize:TRNLSizeInt;
+                                 out aMAC):boolean;
+      public
+       procedure Initialize(const aMessageType:TRNLUInt16;const aTransactionID:TRNLSTUNTransactionID);
+       procedure InitializeWithFreshTransactionID(const aMessageType:TRNLUInt16;
+                                                  const aRandomGenerator:TRNLRandomGenerator);
+       // Takes a datagram over for reading. False, and the message left invalid, if the header does
+       // not add up or the length field disagrees with what arrived.
+       function Assign(const aData;const aDataSize:TRNLSizeInt):boolean;
+       procedure BuildXORMask(out aMask:TRNLSTUNXORMask);
+       procedure AddAttribute(const aType:TRNLSTUNAttributeType;const aValue;const aValueSize:TRNLSizeInt);
+       procedure AddEmptyAttribute(const aType:TRNLSTUNAttributeType);
+       procedure AddUInt32Attribute(const aType:TRNLSTUNAttributeType;const aValue:TRNLUInt32);
+       procedure AddUInt16Attribute(const aType:TRNLSTUNAttributeType;const aValue:TRNLUInt16);
+       procedure AddStringAttribute(const aType:TRNLSTUNAttributeType;const aValue:TRNLRawByteString);
+       procedure AddXORAddressAttribute(const aType:TRNLSTUNAttributeType;const aAddress:TRNLAddress);
+       // RFC 8489 sections 14.5, 14.6 and 14.7. None of the three may be followed by anything except
+       // FINGERPRINT, which is why they are separate calls and not part of a finish step.
+       procedure AddMessageIntegrity(const aKey;const aKeySize:TRNLSizeInt);
+       procedure AddMessageIntegritySHA256(const aKey;const aKeySize:TRNLSizeInt);
+       procedure AddFingerprint;
+       // A missing attribute is false, not true: a caller asking this wants the answer proved
+       function VerifyMessageIntegrity(const aKey;const aKeySize:TRNLSizeInt):boolean;
+       function VerifyMessageIntegritySHA256(const aKey;const aKeySize:TRNLSizeInt):boolean;
+       function VerifyFingerprint:boolean;
+       // aValuePosition is an offset into the message, so a value can be read without copying it
+       function FindAttribute(const aType:TRNLSTUNAttributeType;
+                              out aValuePosition,aValueSize:TRNLSizeInt):boolean;
+       function HasAttribute(const aType:TRNLSTUNAttributeType):boolean;
+       function ReadUInt32Attribute(const aType:TRNLSTUNAttributeType;out aValue:TRNLUInt32):boolean;
+       function ReadUInt16Attribute(const aType:TRNLSTUNAttributeType;out aValue:TRNLUInt16):boolean;
+       function ReadStringAttribute(const aType:TRNLSTUNAttributeType;out aValue:TRNLRawByteString):boolean;
+       function ReadAddressAttribute(const aType:TRNLSTUNAttributeType;out aAddress:TRNLAddress):boolean;
+       function ReadErrorCode(out aCode:TRNLUInt32;out aReason:TRNLRawByteString):boolean;
+       function MessageType:TRNLUInt16;
+       function MessageMethod:TRNLUInt16;
+       function MessageClass:TRNLUInt16;
+       function HasSameTransactionID(const aTransactionID:TRNLSTUNTransactionID):boolean;
+       property Valid:boolean read fValid;
+       property Size:TRNLSizeInt read fSize;
+       property DataPointer:TRNLPointer read GetDataPointer;
+       property TransactionID:TRNLSTUNTransactionID read fTransactionID;
+     end;
+
+     // The long term credential of RFC 8489 section 9.2 plus the state a server hands out with its
+     // first rejection. The key is derived once and kept, since it is what every request after the
+     // first has to be signed with.
+     PRNLTURNCredentials=^TRNLTURNCredentials;
+     TRNLTURNCredentials=record
+      public
+       type TRNLTURNKey=array[0..31] of TRNLUInt8;
+      public
+       Username:TRNLRawByteString;
+       Password:TRNLRawByteString;
+       Realm:TRNLRawByteString;
+       Nonce:TRNLRawByteString;
+       // MD5 of username:realm:password for the SHA-1 integrity of RFC 5389, SHA-256 of the same
+       // for the SHA-256 one of RFC 8489. Which of the two a server wants it told through
+       // PASSWORD-ALGORITHM, so both are derived and the one in use is picked per message.
+       Key:TRNLTURNKey;
+       KeySize:TRNLSizeInt;
+       UseSHA256:boolean;
+       procedure Clear;
+       // Recomputes Key from Username, Realm and Password. Called whenever any of the three, or the
+       // choice of algorithm, changes.
+       procedure DeriveKey;
+       function HasRealm:boolean;
+     end;
+
      PRNLSTUNResult=^TRNLSTUNResult;
      TRNLSTUNResult=record
       Success:boolean;
@@ -4884,9 +5312,9 @@ type PRNLVersion=^TRNLVersion;
              // optional attribute a server might feel like adding, and is still small enough to sit
              // on the stack.
              MaximumMessageSize=1024;
-       type PRNLSTUNTransactionID=^TRNLSTUNTransactionID;
-            TRNLSTUNTransactionID=array[0..TransactionIDSize-1] of TRNLUInt8;
-            PRNLSTUNRequest=^TRNLSTUNRequest;
+       // The transaction id type is the one of TRNLSTUNMessage rather than one of its own: there is
+       // one wire format here, so there is one type for the twelve bytes that identify a transaction
+       type PRNLSTUNRequest=^TRNLSTUNRequest;
             TRNLSTUNRequest=array[0..RequestSize-1] of TRNLUInt8;
       private
        class procedure BuildBindingRequest(out aRequest:TRNLSTUNRequest;
@@ -4922,6 +5350,305 @@ type PRNLVersion=^TRNLVersion;
                             const aFamily:TRNLAddressFamily;
                             const aTimeoutMilliseconds:TRNLInt64=1000;
                             const aCountRetries:TRNLSizeInt=3):TRNLSTUNResult; static;
+     end;
+
+     // How the client talks to the relay. The relayed side stays UDP either way - what changes is the
+     // path between client and relay.
+     //
+     // TCP exists for the case a relay is actually for: a network which lets no UDP out at all. Over
+     // it a datagram is no longer a datagram but a frame in a byte stream, so it needs a length to be
+     // read back by, and RFC 8656 section 12.5 uses the length fields the messages already carry
+     // rather than adding one of its own.
+     PRNLTURNTransportKind=^TRNLTURNTransportKind;
+     TRNLTURNTransportKind=
+      (
+       RNL_TURN_TRANSPORT_KIND_UDP,
+       RNL_TURN_TRANSPORT_KIND_TCP
+      );
+
+     // Which address family an allocation is asked for. The default derives it from the socket and
+     // stays silent for IPv4, because REQUESTED-ADDRESS-FAMILY is comprehension required: naming the
+     // family where the server's own default already matches would break every relay which does not
+     // know the extension, for no gain. The two explicit values are there for a deployment which
+     // knows its relay and wants to say so.
+     PRNLTURNAddressFamilyPolicy=^TRNLTURNAddressFamilyPolicy;
+     TRNLTURNAddressFamilyPolicy=
+      (
+       RNL_TURN_ADDRESS_FAMILY_POLICY_FROM_SOCKET,
+       RNL_TURN_ADDRESS_FAMILY_POLICY_IPV4,
+       RNL_TURN_ADDRESS_FAMILY_POLICY_IPV6
+      );
+
+     PRNLTURNPermission=^TRNLTURNPermission;
+     // A permission is per peer address and says nothing about the port, which is what RFC 8656
+     // section 9 makes of it: one permission covers every port of that address
+     TRNLTURNPermission=record
+      Used:boolean;
+      PeerHost:TRNLHostAddress;
+      RenewAt:TRNLTime;
+     end;
+
+     TRNLTURNPermissions=array of TRNLTURNPermission;
+
+     PRNLTURNChannel=^TRNLTURNChannel;
+     // A channel, unlike a permission, is per address and port: it stands for exactly one peer and
+     // replaces the 36 byte Send indication around every datagram with a 4 byte header
+     TRNLTURNChannel=record
+      Used:boolean;
+      // Until the server has confirmed the binding, datagrams still have to go as Send indications;
+      // a channel number the server does not know yet would simply be dropped
+      Confirmed:boolean;
+      Number:TRNLUInt16;
+      PeerAddress:TRNLAddress;
+      RenewAt:TRNLTime;
+      // When something last travelled over it. A channel towards a peer nobody talks to any more is
+      // worth letting go of: there are only sixteen thousand numbers, and refreshing a dead binding
+      // costs a request every five minutes for nothing.
+      LastUsedAt:TRNLTime;
+      // Zero while the slot is in use. Once let go of, RFC 8656 section 12 forbids handing the same
+      // number to a different peer until the old binding has expired at the server and another five
+      // minutes have passed on top, so that a datagram still in flight cannot be delivered to the
+      // wrong peer. This is when that has elapsed.
+      ReusableAt:TRNLTime;
+     end;
+
+     TRNLTURNChannels=array of TRNLTURNChannel;
+
+     PRNLTURNPendingRequest=^TRNLTURNPendingRequest;
+     // A request which has gone out and has no answer yet. What it was about is kept rather than the
+     // bytes it consisted of: a retry after STALE_NONCE has to be signed with the new nonce, so it
+     // has to be built again anyway, and keeping the message would mean a four kilobyte buffer per
+     // outstanding request for nothing.
+     TRNLTURNPendingRequest=record
+      Used:boolean;
+      Method:TRNLUInt16;
+      TransactionID:TRNLSTUNTransactionID;
+      Deadline:TRNLTime;
+      CountAttempts:TRNLSizeInt;
+      PeerAddress:TRNLAddress;
+      ChannelNumber:TRNLUInt16;
+     end;
+
+     TRNLTURNPendingRequests=array of TRNLTURNPendingRequest;
+
+     TRNLTURNNetwork=class;
+
+     // One allocation on one server, belonging to one socket. A relayed address to be reached at, a
+     // lifetime to keep alive, a permission per peer address and a channel per peer.
+     TRNLTURNAllocation=class
+      private
+       fTURNNetwork:TRNLTURNNetwork;
+       fSocket:TRNLSocket;
+       // The stream to the relay, when the transport is TCP. Null otherwise, and everything then goes
+       // out over fSocket as datagrams exactly as before.
+       fControlSocket:TRNLSocket;
+       // What has arrived over that stream and does not add up to a whole frame yet
+       fStreamBuffer:array[0..RNL_TURN_STREAM_BUFFER_SIZE-1] of TRNLUInt8;
+       fStreamBufferSize:TRNLSizeInt;
+       fFamily:TRNLAddressFamily;
+       fServerAddress:TRNLAddress;
+       fCredentials:TRNLTURNCredentials;
+       fEstablished:boolean;
+       // The code of the rejection which ended the attempt, so that a failed allocation can say why
+       // rather than only that it failed
+       fLastErrorCode:TRNLUInt32;
+       fRelayedAddress:TRNLAddress;
+       fMappedAddress:TRNLAddress;
+       fLifetime:TRNLUInt32;
+       fRefreshAt:TRNLTime;
+       fPermissions:TRNLTURNPermissions;
+       fChannels:TRNLTURNChannels;
+       fPendingRequests:TRNLTURNPendingRequests;
+       fNextChannelNumber:TRNLUInt16;
+       function Now_:TRNLTime;
+       // Builds the request for one method, signed with whatever credentials are current. The same
+       // routine serves the first attempt, a timeout retry and a STALE_NONCE retry, which is what
+       // keeps those three from drifting apart.
+       procedure BuildRequest(out aMessage:TRNLSTUNMessage;
+                              const aMethod:TRNLUInt16;
+                              const aTransactionID:TRNLSTUNTransactionID;
+                              const aPeerAddress:TRNLAddress;
+                              const aChannelNumber:TRNLUInt16;
+                              const aLifetime:TRNLUInt32);
+       procedure SignRequest(var aMessage:TRNLSTUNMessage);
+       function UsesStream:boolean;
+       // Over UDP one datagram, over TCP one frame in the stream. RFC 8656 section 12.5 wants a
+       // ChannelData frame padded to a multiple of four over a stream, where over a datagram it is not;
+       // a STUN message is a multiple of four either way.
+       function SendFrame(const aData;const aDataSize:TRNLSizeInt):boolean;
+       function SendMessageToServer(var aMessage:TRNLSTUNMessage):boolean;
+       // Reads whatever the stream has to offer into the buffer. False on a stream which has died,
+       // which is what makes a relay whose connection dropped visible rather than silent.
+       function PumpStream:boolean;
+       // Takes the next complete frame out of the buffer, if there is one. The length comes from the
+       // frame itself: a STUN header says how long its attributes are, a ChannelData header how long
+       // its payload is.
+       function TakeFrame(out aFrame;const aMaximumSize:TRNLSizeInt;out aFrameSize:TRNLSizeInt):boolean;
+       function StartRequest(const aMethod:TRNLUInt16;
+                             const aPeerAddress:TRNLAddress;
+                             const aChannelNumber:TRNLUInt16):boolean;
+       function FindPendingRequest(const aTransactionID:TRNLSTUNTransactionID):PRNLTURNPendingRequest;
+       procedure ForgetPendingRequest(const aRequest:PRNLTURNPendingRequest);
+       function FindPermission(const aPeerHost:TRNLHostAddress):PRNLTURNPermission;
+       function FindChannelByPeer(const aPeerAddress:TRNLAddress):PRNLTURNChannel;
+       function FindChannelByNumber(const aNumber:TRNLUInt16):PRNLTURNChannel;
+       // The blocking half, and the only one: there is nothing to send through a relay before it has
+       // handed out an address, so this belongs where a socket is bound and nowhere else.
+       function Transact(var aRequest:TRNLSTUNMessage;out aResponse:TRNLSTUNMessage):boolean;
+       function TakeCredentialsFrom(var aResponse:TRNLSTUNMessage):boolean;
+      public
+       constructor Create(const aTURNNetwork:TRNLTURNNetwork;
+                          const aSocket:TRNLSocket;
+                          const aFamily:TRNLAddressFamily); reintroduce;
+       destructor Destroy; override;
+       // Runs Allocate, including the rejection with realm and nonce which every server with long
+       // term credentials answers the first attempt with
+       function Establish:boolean;
+       // Time driven upkeep: refresh before the allocation lapses, renew permissions and channels
+       // before they do, and resend or give up on anything outstanding
+       procedure Maintain;
+       // Makes sure the peer may be talked to, and asks for a channel the first time it is seen.
+       // Returns the channel to use, or nil while there is none confirmed yet.
+       function PrepareForPeer(const aPeerAddress:TRNLAddress):PRNLTURNChannel;
+       // A message which arrived from the server. Returns true if it was consumed here, which is the
+       // case for every response and every Data indication.
+       function HandleServerMessage(var aMessage:TRNLSTUNMessage;
+                                    out aPeerAddress:TRNLAddress;
+                                    out aPayloadPosition,aPayloadSize:TRNLSizeInt):boolean;
+       // Read only insight into the channel table. Worth having beyond the tests: a deployment which
+       // wonders why its relay path costs more than it should wants to know how many channels are
+       // bound and how many datagrams still go the expensive way.
+       function CountChannels:TRNLSizeInt;
+       function ChannelInUse(const aIndex:TRNLSizeInt):boolean;
+       function ChannelConfirmed(const aIndex:TRNLSizeInt):boolean;
+       function ChannelNumber(const aIndex:TRNLSizeInt):TRNLUInt16;
+       function ChannelPeerAddress(const aIndex:TRNLSizeInt):TRNLAddress;
+       function CountPermissions:TRNLSizeInt;
+       property Socket:TRNLSocket read fSocket;
+       property Established:boolean read fEstablished;
+       property LastErrorCode:TRNLUInt32 read fLastErrorCode;
+       property RelayedAddress:TRNLAddress read fRelayedAddress;
+       property MappedAddress:TRNLAddress read fMappedAddress;
+       property ServerAddress:TRNLAddress read fServerAddress;
+     end;
+
+     TRNLTURNAllocations=array of TRNLTURNAllocation;
+
+     // A relay put in front of another network, so that host and peer never learn about it: Send
+     // wraps a datagram into a channel or an indication, Receive unwraps it again, and what a
+     // TRNLHost sees is an ordinary network.
+     //
+     // Every allocation belongs to one socket, because that is what a relay hands out: an address
+     // which forwards to that socket and no other.
+     TRNLTURNNetwork=class(TRNLNetwork)
+      private
+       fNetwork:TRNLNetwork;
+       // Transaction ids have to be unguessable, so this needs a generator of its own rather than
+       // borrowing one from a host which may not exist yet when a socket is bound
+       fRandomGenerator:TRNLRandomGenerator;
+       fServerAddress:TRNLAddress;
+       fUsername:TRNLRawByteString;
+       fPassword:TRNLRawByteString;
+       fTransport:TRNLTURNTransportKind;
+       fPreferSHA256:boolean;
+       fRequestedAddressFamily:TRNLTURNAddressFamilyPolicy;
+       fUseChannels:boolean;
+       fChannelIdleTimeout:TRNLInt64;
+       fChannelNumberReuseDelay:TRNLInt64;
+       fRequestTimeout:TRNLInt64;
+       fCountRequestAttempts:TRNLSizeInt;
+       fAllocations:TRNLTURNAllocations;
+       fLock:TCriticalSection;
+       fTotalAllocations:TRNLUInt64;
+       fTotalFailedAllocations:TRNLUInt64;
+       fLastFailedAllocationErrorCode:TRNLUInt32;
+       fTotalRefreshes:TRNLUInt64;
+       fTotalCreatedPermissions:TRNLUInt64;
+       fTotalBoundChannels:TRNLUInt64;
+       fTotalReleasedChannels:TRNLUInt64;
+       fTotalReusedChannelNumbers:TRNLUInt64;
+       fTotalChannelNumbersExhausted:TRNLUInt64;
+       fTotalStaleNonces:TRNLUInt64;
+       fTotalSendIndications:TRNLUInt64;
+       fTotalChannelDataSent:TRNLUInt64;
+       fTotalChannelDataReceived:TRNLUInt64;
+       fTotalDataIndications:TRNLUInt64;
+       fTotalPassedThrough:TRNLUInt64;
+       fTotalDroppedFromServer:TRNLUInt64;
+       function FindAllocation(const aSocket:TRNLSocket):TRNLTURNAllocation;
+       procedure ForgetAllocation(const aSocket:TRNLSocket);
+      public
+       constructor Create(const aInstance:TRNLInstance;
+                          const aNetwork:TRNLNetwork;
+                          const aServerAddress:TRNLAddress;
+                          const aUsername:TRNLRawByteString='';
+                          const aPassword:TRNLRawByteString=''); reintroduce;
+       destructor Destroy; override;
+       // The address the relay forwards to that socket, which is what belongs in a relayed candidate
+       function GetRelayedAddress(const aSocket:TRNLSocket;out aAddress:TRNLAddress):boolean; override;
+       // The allocation belonging to that socket, or nil if there is none. Read only: everything on it
+       // that changes state is private.
+       function AllocationOf(const aSocket:TRNLSocket):TRNLTURNAllocation;
+       function AddressSetHost(var aAddress:TRNLAddress;const aName:TRNLRawByteString):boolean; override;
+       function AddressGetHost(const aAddress:TRNLAddress;out aName;const aNameLength:TRNLInt32;const aFlags:TRNLInt32=0):boolean; override;
+       function AddressGetHostIP(const aAddress:TRNLAddress;out aName;const aNameLength:TRNLInt32):boolean; override;
+       function AddressGetPrimaryInterfaceHostIP(var aAddress:TRNLAddress;const aFamily:TRNLAddressFamily;const aInterfaceHostAddressType:TRNLInterfaceHostAddressType=RNL_INTERFACE_HOST_ADDRESS_UNICAST):boolean; override;
+       function AddressGetInterfaceHostIPs(out aAddresses:TRNLHostAddresses;const aFamily:TRNLAddressFamily;const aInterfaceHostAddressType:TRNLInterfaceHostAddressType=RNL_INTERFACE_HOST_ADDRESS_UNICAST):boolean; override;
+       function SocketCreate(const aType:TRNLSocketType;const aFamily:TRNLAddressFamily):TRNLSocket; override;
+       procedure SocketDestroy(const aSocket:TRNLSocket); override;
+       function SocketShutdown(const aSocket:TRNLSocket;const aHow:TRNLSocketShutdown=RNL_SOCKET_SHUTDOWN_READ_WRITE):boolean; override;
+       function SocketGetAddress(const aSocket:TRNLSocket;out aAddress:TRNLAddress;const aFamily:TRNLAddressFamily):boolean; override;
+       function SocketSetOption(const aSocket:TRNLSocket;const aOption:TRNLSocketOption;const aValue:TRNLInt32):boolean; override;
+       function SocketGetOption(const aSocket:TRNLSocket;const aOption:TRNLSocketOption;out aValue:TRNLInt32):boolean; override;
+       // Binds through to the network underneath and then asks the relay for an allocation. Blocking,
+       // for as long as that exchange takes, which is why it belongs to Start and not to servicing.
+       function SocketBind(const aSocket:TRNLSocket;const aAddress:PRNLAddress;const aFamily:TRNLAddressFamily):boolean; override;
+       function SocketListen(const aSocket:TRNLSocket;const aBackLog:TRNLInt32):boolean; override;
+       function SocketConnect(const aSocket:TRNLSocket;const aAddress:TRNLAddress;const aFamily:TRNLAddressFamily):boolean; override;
+       function SocketAccept(const aSocket:TRNLSocket;const aAddress:PRNLAddress;const aFamily:TRNLAddressFamily):TRNLSocket; override;
+       function SocketSelect(const aMaxSocket:TRNLSocket;var aReadSet,aWriteSet:TRNLSocketSet;const aTimeout:TRNLInt64;const aEvent:TRNLNetworkEvent=nil):TRNLInt32; override;
+       function SocketWait(const aSockets:array of TRNLSocket;var aConditions:TRNLSocketWaitConditions;const aTimeout:TRNLInt64;const aEvent:TRNLNetworkEvent=nil):boolean; override;
+       function Send(const aSocket:TRNLSocket;const aAddress:PRNLAddress;const aData;const aDataLength:TRNLSizeInt;const aFamily:TRNLAddressFamily):TRNLSizeInt; override;
+       function Receive(const aSocket:TRNLSocket;const aAddress:PRNLAddress;out aData;const aDataLength:TRNLSizeInt;const aFamily:TRNLAddressFamily):TRNLSizeInt; override;
+      published
+       // Whether to bind channels at all. Off, every datagram carries a 36 byte Send indication;
+       // on, the first few do and everything after them a 4 byte header.
+       property UseChannels:boolean read fUseChannels write fUseChannels;
+       // Ask for MESSAGE-INTEGRITY-SHA256 where the server offers a choice. Off by default, because
+       // the older method is what every deployed relay understands.
+       // How the relay itself is talked to. Has to be set before the host binds, since that is when
+       // the allocation is made. UDP by default, because that is what a relay is normally reached
+       // over; TCP for the network which lets no UDP out at all.
+       property Transport:TRNLTURNTransportKind read fTransport write fTransport;
+       property PreferSHA256:boolean read fPreferSHA256 write fPreferSHA256;
+       // Which family the allocation is asked for. See TRNLTURNAddressFamilyPolicy for why the
+       // default keeps quiet about IPv4.
+       property RequestedAddressFamily:TRNLTURNAddressFamilyPolicy read fRequestedAddressFamily write fRequestedAddressFamily;
+       property RequestTimeout:TRNLInt64 read fRequestTimeout write fRequestTimeout;
+       property CountRequestAttempts:TRNLSizeInt read fCountRequestAttempts write fCountRequestAttempts;
+       property TotalAllocations:TRNLUInt64 read fTotalAllocations;
+       property TotalFailedAllocations:TRNLUInt64 read fTotalFailedAllocations;
+       // Why the last one failed, as the three digit code of the rejection, or zero if it was not
+       // rejected at all but simply never answered
+       property LastFailedAllocationErrorCode:TRNLUInt32 read fLastFailedAllocationErrorCode;
+       property TotalRefreshes:TRNLUInt64 read fTotalRefreshes;
+       property TotalCreatedPermissions:TRNLUInt64 read fTotalCreatedPermissions;
+       // A channel towards a peer nobody talks to any more is let go of after this long, and its
+       // number comes back into circulation after the delay below. Both are settable so that a test
+       // does not have to wait out ten minutes.
+       property ChannelIdleTimeout:TRNLInt64 read fChannelIdleTimeout write fChannelIdleTimeout;
+       property ChannelNumberReuseDelay:TRNLInt64 read fChannelNumberReuseDelay write fChannelNumberReuseDelay;
+       property TotalBoundChannels:TRNLUInt64 read fTotalBoundChannels;
+       property TotalReleasedChannels:TRNLUInt64 read fTotalReleasedChannels;
+       property TotalReusedChannelNumbers:TRNLUInt64 read fTotalReusedChannelNumbers;
+       property TotalChannelNumbersExhausted:TRNLUInt64 read fTotalChannelNumbersExhausted;
+       property TotalStaleNonces:TRNLUInt64 read fTotalStaleNonces;
+       property TotalSendIndications:TRNLUInt64 read fTotalSendIndications;
+       property TotalChannelDataSent:TRNLUInt64 read fTotalChannelDataSent;
+       property TotalChannelDataReceived:TRNLUInt64 read fTotalChannelDataReceived;
+       property TotalDataIndications:TRNLUInt64 read fTotalDataIndications;
+       property TotalPassedThrough:TRNLUInt64 read fTotalPassedThrough;
+       property TotalDroppedFromServer:TRNLUInt64 read fTotalDroppedFromServer;
      end;
 
      TRNLDiscoverySignature=array[0..7] of TRNLChar;
@@ -8754,6 +9481,102 @@ begin
  end;
 end;
 
+function TRNLHashDescriptor.Valid:boolean;
+begin
+ result:=assigned(Initialize) and
+         assigned(Update) and
+         assigned(Finalize) and
+         (ContextSize>0) and (ContextSize<=MaximumContextSize) and
+         (BlockSize>0) and (BlockSize<=MaximumBlockSize) and
+         (HashSize>0) and (HashSize<=BlockSize);
+end;
+
+// Three plain procedures rather than methods, because a procedural variable cannot point at a
+// method of a record. They do nothing but cast the opaque context back to what it is.
+procedure RNLSHA256Initialize(var aContext);
+begin
+ PRNLSHA256Context(TRNLPointer(@aContext))^.Initialize;
+end;
+
+procedure RNLSHA256Update(var aContext;const aMessage;const aMessageSize:TRNLSizeUInt);
+begin
+ PRNLSHA256Context(TRNLPointer(@aContext))^.Update(aMessage,aMessageSize);
+end;
+
+procedure RNLSHA256Finalize(var aContext;out aHash);
+begin
+ PRNLSHA256Context(TRNLPointer(@aContext))^.Finalize(aHash);
+end;
+
+
+{$if defined(RNL_TURN_RFC5389_COMPAT)}
+// Three plain procedures rather than methods, because a procedural variable cannot point at a
+// method of a record. They do nothing but cast the opaque context back to what it is.
+procedure RNLSHA1Initialize(var aContext);
+begin
+ PRNLSHA1Context(TRNLPointer(@aContext))^.Initialize;
+end;
+
+procedure RNLSHA1Update(var aContext;const aMessage;const aMessageSize:TRNLSizeUInt);
+begin
+ PRNLSHA1Context(TRNLPointer(@aContext))^.Update(aMessage,aMessageSize);
+end;
+
+procedure RNLSHA1Finalize(var aContext;out aHash);
+begin
+ PRNLSHA1Context(TRNLPointer(@aContext))^.Finalize(aHash);
+end;
+
+{$ifend}
+
+{$if defined(RNL_TURN_RFC5389_COMPAT)}
+// Three plain procedures rather than methods, because a procedural variable cannot point at a
+// method of a record. They do nothing but cast the opaque context back to what it is.
+procedure RNLMD5Initialize(var aContext);
+begin
+ PRNLMD5Context(TRNLPointer(@aContext))^.Initialize;
+end;
+
+procedure RNLMD5Update(var aContext;const aMessage;const aMessageSize:TRNLSizeUInt);
+begin
+ PRNLMD5Context(TRNLPointer(@aContext))^.Update(aMessage,aMessageSize);
+end;
+
+procedure RNLMD5Finalize(var aContext;out aHash);
+begin
+ PRNLMD5Context(TRNLPointer(@aContext))^.Finalize(aHash);
+end;
+
+{$ifend}
+
+// Three plain procedures rather than methods, because a procedural variable cannot point at a
+// method of a record. They do nothing but cast the opaque context back to what it is.
+procedure RNLSHA512Initialize(var aContext);
+begin
+ PRNLSHA512Context(TRNLPointer(@aContext))^.Initialize;
+end;
+
+procedure RNLSHA512Update(var aContext;const aMessage;const aMessageSize:TRNLSizeUInt);
+begin
+ PRNLSHA512Context(TRNLPointer(@aContext))^.Update(aMessage,aMessageSize);
+end;
+
+procedure RNLSHA512Finalize(var aContext;out aHash);
+begin
+ PRNLSHA512Context(TRNLPointer(@aContext))^.Finalize(aHash);
+end;
+
+
+class function TRNLSHA512.Descriptor:TRNLHashDescriptor;
+begin
+ result.Initialize:=RNLSHA512Initialize;
+ result.Update:=RNLSHA512Update;
+ result.Finalize:=RNLSHA512Finalize;
+ result.ContextSize:=SizeOf(TRNLSHA512Context);
+ result.BlockSize:=TRNLSHA512Context.BLOCK_SIZE;
+ result.HashSize:=SizeOf(TRNLSHA512Hash);
+end;
+
 class procedure TRNLSHA512.Process(out aHash;const aMessage;const aMessageSize:TRNLSizeUInt);
 var Context:TRNLSHA512Context;
 begin
@@ -9006,6 +9829,16 @@ begin
  end;
 end;
 
+class function TRNLSHA256.Descriptor:TRNLHashDescriptor;
+begin
+ result.Initialize:=RNLSHA256Initialize;
+ result.Update:=RNLSHA256Update;
+ result.Finalize:=RNLSHA256Finalize;
+ result.ContextSize:=SizeOf(TRNLSHA256Context);
+ result.BlockSize:=TRNLSHA256Context.BLOCK_SIZE;
+ result.HashSize:=SizeOf(TRNLSHA256Hash);
+end;
+
 class procedure TRNLSHA256.Process(out aHash;const aMessage;const aMessageSize:TRNLSizeUInt);
 var Context:TRNLSHA256Context;
 begin
@@ -9143,6 +9976,16 @@ begin
  end;
 end;
 
+class function TRNLSHA1.Descriptor:TRNLHashDescriptor;
+begin
+ result.Initialize:=RNLSHA1Initialize;
+ result.Update:=RNLSHA1Update;
+ result.Finalize:=RNLSHA1Finalize;
+ result.ContextSize:=SizeOf(TRNLSHA1Context);
+ result.BlockSize:=TRNLSHA1Context.BLOCK_SIZE;
+ result.HashSize:=SizeOf(TRNLSHA1Hash);
+end;
+
 class procedure TRNLSHA1.Process(out aHash;const aMessage;const aMessageSize:TRNLSizeUInt);
 var Context:TRNLSHA1Context;
 begin
@@ -9274,6 +10117,16 @@ begin
  end;
 end;
 
+class function TRNLMD5.Descriptor:TRNLHashDescriptor;
+begin
+ result.Initialize:=RNLMD5Initialize;
+ result.Update:=RNLMD5Update;
+ result.Finalize:=RNLMD5Finalize;
+ result.ContextSize:=SizeOf(TRNLMD5Context);
+ result.BlockSize:=TRNLMD5Context.BLOCK_SIZE;
+ result.HashSize:=SizeOf(TRNLMD5Hash);
+end;
+
 class procedure TRNLMD5.Process(out aHash;const aMessage;const aMessageSize:TRNLSizeUInt);
 var Context:TRNLMD5Context;
 begin
@@ -9283,72 +10136,84 @@ begin
 end;
 {$ifend}
 
-class procedure TRNLHMACUtils.XorKeyBlock(var aKeyBlock:TRNLHMACKeyBlock;const aPad:TRNLUInt8);
+class procedure TRNLHMAC.XorKeyBlock(var aKeyBlock:TRNLHMACKeyBlock;
+                                     const aBlockSize:TRNLSizeInt;
+                                     const aPad:TRNLUInt8);
 var Index:TRNLSizeInt;
 begin
- for Index:=0 to SizeOf(TRNLHMACKeyBlock)-1 do begin
+ for Index:=0 to aBlockSize-1 do begin
   aKeyBlock[Index]:=aKeyBlock[Index] xor aPad;
  end;
+end;
+
+class function TRNLHMAC.Process(const aDescriptor:TRNLHashDescriptor;
+                                out aMAC;
+                                const aKey;const aKeySize:TRNLSizeUInt;
+                                const aMessage;const aMessageSize:TRNLSizeUInt):boolean;
+var KeyBlock:TRNLHMACKeyBlock;
+    Context:array[0..TRNLHashDescriptor.MaximumContextSize-1] of TRNLUInt8;
+    Inner:array[0..TRNLHashDescriptor.MaximumBlockSize-1] of TRNLUInt8;
+begin
+
+ result:=false;
+
+ if not aDescriptor.Valid then begin
+  exit;
+ end;
+
+ FillChar(KeyBlock,SizeOf(TRNLHMACKeyBlock),#0);
+ try
+
+  if aKeySize>TRNLSizeUInt(aDescriptor.BlockSize) then begin
+   // A key longer than one block stands in for its own digest, which is shorter than a block for
+   // every hash and is therefore zero padded like any short key
+   aDescriptor.Initialize(Context);
+   aDescriptor.Update(Context,aKey,aKeySize);
+   aDescriptor.Finalize(Context,KeyBlock[0]);
+  end else if aKeySize>0 then begin
+   Move(aKey,KeyBlock[0],aKeySize);
+  end;
+
+  XorKeyBlock(KeyBlock,aDescriptor.BlockSize,InnerPad);
+  aDescriptor.Initialize(Context);
+  aDescriptor.Update(Context,KeyBlock[0],aDescriptor.BlockSize);
+  aDescriptor.Update(Context,aMessage,aMessageSize);
+  aDescriptor.Finalize(Context,Inner[0]);
+
+  // From the inner pad to the outer one, so that the key block is built only once
+  XorKeyBlock(KeyBlock,aDescriptor.BlockSize,InnerPad xor OuterPad);
+  aDescriptor.Initialize(Context);
+  aDescriptor.Update(Context,KeyBlock[0],aDescriptor.BlockSize);
+  aDescriptor.Update(Context,Inner[0],aDescriptor.HashSize);
+  aDescriptor.Finalize(Context,aMAC);
+
+  result:=true;
+
+ finally
+  FillChar(KeyBlock,SizeOf(TRNLHMACKeyBlock),#0);
+  FillChar(Context,SizeOf(Context),#0);
+  FillChar(Inner,SizeOf(Inner),#0);
+ end;
+
 end;
 
 class procedure TRNLHMACSHA256.Process(out aMAC;
                                        const aKey;const aKeySize:TRNLSizeUInt;
                                        const aMessage;const aMessageSize:TRNLSizeUInt);
-var KeyBlock:TRNLHMACKeyBlock;
-    Inner:TRNLSHA256Hash;
-    Context:TRNLSHA256Context;
 begin
- FillChar(KeyBlock,SizeOf(TRNLHMACKeyBlock),#0);
- if aKeySize>TRNLSizeUInt(SizeOf(TRNLHMACKeyBlock)) then begin
-  // A key longer than one block stands in for its own digest, which is shorter than a block for
-  // every hash here and therefore zero padded like any short key
-  TRNLSHA256.Process(KeyBlock,aKey,aKeySize);
- end else if aKeySize>0 then begin
-  Move(aKey,KeyBlock[0],aKeySize);
- end;
- TRNLHMACUtils.XorKeyBlock(KeyBlock,TRNLHMACUtils.InnerPad);
- Context.Initialize;
- Context.Update(KeyBlock,SizeOf(TRNLHMACKeyBlock));
- Context.Update(aMessage,aMessageSize);
- Context.Finalize(Inner);
- // From the inner pad to the outer one, so that the key block does not have to be built twice
- TRNLHMACUtils.XorKeyBlock(KeyBlock,TRNLHMACUtils.InnerPad xor TRNLHMACUtils.OuterPad);
- Context.Initialize;
- Context.Update(KeyBlock,SizeOf(TRNLHMACKeyBlock));
- Context.Update(Inner,SizeOf(TRNLSHA256Hash));
- Context.Finalize(aMAC);
- FillChar(KeyBlock,SizeOf(TRNLHMACKeyBlock),#0);
- FillChar(Context,SizeOf(TRNLSHA256Context),#0);
+ // The whole of RFC 2104 lives in TRNLHMAC; what is left here is naming the hash
+ TRNLHMAC.Process(TRNLSHA256.Descriptor,aMAC,aKey,aKeySize,aMessage,aMessageSize);
 end;
 
 {$if defined(RNL_TURN_RFC5389_COMPAT)}
 class procedure TRNLHMACSHA1.Process(out aMAC;
                                      const aKey;const aKeySize:TRNLSizeUInt;
                                      const aMessage;const aMessageSize:TRNLSizeUInt);
-var KeyBlock:TRNLHMACKeyBlock;
-    Inner:TRNLSHA1Hash;
-    Context:TRNLSHA1Context;
 begin
- FillChar(KeyBlock,SizeOf(TRNLHMACKeyBlock),#0);
- if aKeySize>TRNLSizeUInt(SizeOf(TRNLHMACKeyBlock)) then begin
-  TRNLSHA1.Process(KeyBlock,aKey,aKeySize);
- end else if aKeySize>0 then begin
-  Move(aKey,KeyBlock[0],aKeySize);
- end;
- TRNLHMACUtils.XorKeyBlock(KeyBlock,TRNLHMACUtils.InnerPad);
- Context.Initialize;
- Context.Update(KeyBlock,SizeOf(TRNLHMACKeyBlock));
- Context.Update(aMessage,aMessageSize);
- Context.Finalize(Inner);
- TRNLHMACUtils.XorKeyBlock(KeyBlock,TRNLHMACUtils.InnerPad xor TRNLHMACUtils.OuterPad);
- Context.Initialize;
- Context.Update(KeyBlock,SizeOf(TRNLHMACKeyBlock));
- Context.Update(Inner,SizeOf(TRNLSHA1Hash));
- Context.Finalize(aMAC);
- FillChar(KeyBlock,SizeOf(TRNLHMACKeyBlock),#0);
- FillChar(Context,SizeOf(TRNLSHA1Context),#0);
+ TRNLHMAC.Process(TRNLSHA1.Descriptor,aMAC,aKey,aKeySize,aMessage,aMessageSize);
 end;
 {$ifend}
+
 class procedure TRNLSHA256.SelfTest;
 const Expected0:TRNLSHA256Hash=
        (
@@ -18561,6 +19426,12 @@ begin
  result:=-1;
 end;
 
+function TRNLNetwork.GetRelayedAddress(const aSocket:TRNLSocket;out aAddress:TRNLAddress):boolean;
+begin
+ FillChar(aAddress,SizeOf(TRNLAddress),#0);
+ result:=false;
+end;
+
 function TRNLNetwork.SendStream(const aSocket:TRNLSocket;const aData;const aDataLength:TRNLSizeInt):TRNLSizeInt;
 begin
  result:=Send(aSocket,nil,aData,aDataLength,RNL_IPV4);
@@ -20528,13 +21399,15 @@ begin
  Flags:=0;
  OK:=WSARecv(aSocket,LPWSABUF(@Buffer),1,RecvLength,Flags,nil,nil)<>SOCKET_ERROR;
  if OK then begin
-  result:=RecvLength;
+  if RecvLength>0 then begin
+   result:=RecvLength;
+  end else begin
+   // Zero bytes on a stream is not "nothing right now", it is the far side having closed it
+   result:=-1;
+  end;
  end else begin
   case WSAGetLastError of
    WSAEWOULDBLOCK:begin
-    result:=-1;
-   end;
-   WSAECONNRESET:begin
     result:=0;
    end;
    else begin
@@ -20548,13 +21421,16 @@ begin
  result:=fpRecv(aSocket,@aData,aDataLength,0);
  if result=SOCKET_ERROR then begin
   case SocketError of
-   EsockEWOULDBLOCK{,EsockECONNRESET}:begin
-    result:=-1;
+   EsockEWOULDBLOCK:begin
+    result:=0;
    end;
    else begin
     result:=-1;
    end;
   end;
+ end else if result=0 then begin
+  // Zero bytes on a stream is the orderly shutdown of the far side, not an empty read
+  result:=-1;
  end;
 end;
 {$else}
@@ -20562,13 +21438,16 @@ begin
  result:=Posix.SysSocket.recv(aSocket,aData,aDataLength,0);
  if result=SOCKET_ERROR then begin
   case GetLastError of
-   EWOULDBLOCK{,ECONNRESET}:begin
-    result:=-1;
+   EWOULDBLOCK:begin
+    result:=0;
    end;
    else begin
     result:=-1;
    end;
   end;
+ end else if result=0 then begin
+  // Zero bytes on a stream is the orderly shutdown of the far side, not an empty read
+  result:=-1;
  end;
 end;
 {$ifend}
@@ -21085,6 +21964,1402 @@ begin
  finally
   fLock.Release;
  end;
+end;
+
+constructor TRNLTURNAllocation.Create(const aTURNNetwork:TRNLTURNNetwork;
+                                      const aSocket:TRNLSocket;
+                                      const aFamily:TRNLAddressFamily);
+begin
+ inherited Create;
+ fTURNNetwork:=aTURNNetwork;
+ fSocket:=aSocket;
+ fControlSocket:=RNL_SOCKET_NULL;
+ fStreamBufferSize:=0;
+ fFamily:=aFamily;
+ fServerAddress:=aTURNNetwork.fServerAddress;
+ fCredentials.Clear;
+ fCredentials.Username:=aTURNNetwork.fUsername;
+ fCredentials.Password:=aTURNNetwork.fPassword;
+ fCredentials.UseSHA256:=aTURNNetwork.fPreferSHA256;
+ fEstablished:=false;
+ fLastErrorCode:=0;
+ FillChar(fRelayedAddress,SizeOf(TRNLAddress),#0);
+ FillChar(fMappedAddress,SizeOf(TRNLAddress),#0);
+ fLifetime:=RNL_TURN_DEFAULT_LIFETIME;
+ fRefreshAt:=0;
+ fPermissions:=nil;
+ fChannels:=nil;
+ fPendingRequests:=nil;
+ fNextChannelNumber:=RNL_TURN_CHANNEL_NUMBER_FIRST;
+end;
+
+destructor TRNLTURNAllocation.Destroy;
+begin
+ if fControlSocket<>RNL_SOCKET_NULL then begin
+  fTURNNetwork.fNetwork.SocketShutdown(fControlSocket,RNL_SOCKET_SHUTDOWN_READ_WRITE);
+  fTURNNetwork.fNetwork.SocketDestroy(fControlSocket);
+  fControlSocket:=RNL_SOCKET_NULL;
+ end;
+ fPermissions:=nil;
+ fChannels:=nil;
+ fPendingRequests:=nil;
+ fCredentials.Clear;
+ inherited Destroy;
+end;
+
+function TRNLTURNAllocation.Now_:TRNLTime;
+begin
+ result:=fTURNNetwork.fInstance.Time;
+end;
+
+function TRNLTURNAllocation.CountChannels:TRNLSizeInt;
+begin
+ result:=length(fChannels);
+end;
+
+function TRNLTURNAllocation.ChannelInUse(const aIndex:TRNLSizeInt):boolean;
+begin
+ result:=(aIndex>=0) and (aIndex<length(fChannels)) and fChannels[aIndex].Used;
+end;
+
+function TRNLTURNAllocation.ChannelConfirmed(const aIndex:TRNLSizeInt):boolean;
+begin
+ result:=(aIndex>=0) and (aIndex<length(fChannels)) and fChannels[aIndex].Confirmed;
+end;
+
+function TRNLTURNAllocation.ChannelNumber(const aIndex:TRNLSizeInt):TRNLUInt16;
+begin
+ if (aIndex>=0) and (aIndex<length(fChannels)) then begin
+  result:=fChannels[aIndex].Number;
+ end else begin
+  result:=0;
+ end;
+end;
+
+function TRNLTURNAllocation.ChannelPeerAddress(const aIndex:TRNLSizeInt):TRNLAddress;
+begin
+ if (aIndex>=0) and (aIndex<length(fChannels)) then begin
+  result:=fChannels[aIndex].PeerAddress;
+ end else begin
+  FillChar(result,SizeOf(TRNLAddress),#0);
+ end;
+end;
+
+function TRNLTURNAllocation.CountPermissions:TRNLSizeInt;
+var Index:TRNLSizeInt;
+begin
+ result:=0;
+ for Index:=0 to length(fPermissions)-1 do begin
+  if fPermissions[Index].Used then begin
+   inc(result);
+  end;
+ end;
+end;
+
+procedure TRNLTURNAllocation.SignRequest(var aMessage:TRNLSTUNMessage);
+begin
+ // Long term credentials: the three fields the server asked for, then the integrity over all of
+ // them. Without a realm there is nothing to sign with and the request goes out bare, which is
+ // exactly what the first Allocate does in order to be told the realm.
+ if not fCredentials.HasRealm then begin
+  aMessage.AddFingerprint;
+  exit;
+ end;
+ aMessage.AddStringAttribute(RNL_STUN_ATTRIBUTE_USERNAME,fCredentials.Username);
+ aMessage.AddStringAttribute(RNL_STUN_ATTRIBUTE_REALM,fCredentials.Realm);
+ aMessage.AddStringAttribute(RNL_STUN_ATTRIBUTE_NONCE,fCredentials.Nonce);
+ if fCredentials.UseSHA256 then begin
+  aMessage.AddMessageIntegritySHA256(fCredentials.Key[0],fCredentials.KeySize);
+ end else begin
+  aMessage.AddMessageIntegrity(fCredentials.Key[0],fCredentials.KeySize);
+ end;
+ // FINGERPRINT is the only thing allowed after an integrity attribute, and it has to be last
+ aMessage.AddFingerprint;
+end;
+
+procedure TRNLTURNAllocation.BuildRequest(out aMessage:TRNLSTUNMessage;
+                                          const aMethod:TRNLUInt16;
+                                          const aTransactionID:TRNLSTUNTransactionID;
+                                          const aPeerAddress:TRNLAddress;
+                                          const aChannelNumber:TRNLUInt16;
+                                          const aLifetime:TRNLUInt32);
+var RequestedFamily:TRNLUInt8;
+begin
+
+ aMessage.Initialize(aMethod or RNL_STUN_CLASS_REQUEST,aTransactionID);
+
+ case aMethod of
+
+  RNL_TURN_METHOD_ALLOCATE:begin
+   // UDP is the only transport an RNL datagram could travel over, and DONT-FRAGMENT asks the relay
+   // to keep it that way rather than letting the network split it behind our back
+   aMessage.AddUInt32Attribute(RNL_TURN_ATTRIBUTE_REQUESTED_TRANSPORT,RNL_TURN_TRANSPORT_UDP);
+   aMessage.AddUInt32Attribute(RNL_TURN_ATTRIBUTE_LIFETIME,aLifetime);
+   // An allocation of a family other than the server's default has to be asked for, and the
+   // attribute is comprehension required, so asking where it is not needed would break every server
+   // which does not know the extension. Hence the default policy: name the family only for an IPv6
+   // socket, where the server would otherwise hand out an IPv4 address that socket cannot use.
+   RequestedFamily:=0;
+   case fTURNNetwork.fRequestedAddressFamily of
+    RNL_TURN_ADDRESS_FAMILY_POLICY_IPV4:begin
+     RequestedFamily:=RNL_STUN_ADDRESS_FAMILY_IPV4;
+    end;
+    RNL_TURN_ADDRESS_FAMILY_POLICY_IPV6:begin
+     RequestedFamily:=RNL_STUN_ADDRESS_FAMILY_IPV6;
+    end;
+    else {RNL_TURN_ADDRESS_FAMILY_POLICY_FROM_SOCKET:}begin
+     if fFamily=RNL_IPV6 then begin
+      RequestedFamily:=RNL_STUN_ADDRESS_FAMILY_IPV6;
+     end;
+    end;
+   end;
+   if RequestedFamily<>0 then begin
+    // One byte of family and three reserved ones, which is how RFC 8656 shapes it
+    aMessage.AddUInt32Attribute(RNL_TURN_ATTRIBUTE_REQUESTED_ADDRESS_FAMILY,
+                                TRNLUInt32(RequestedFamily) shl 24);
+   end;
+  end;
+
+  RNL_TURN_METHOD_REFRESH:begin
+   aMessage.AddUInt32Attribute(RNL_TURN_ATTRIBUTE_LIFETIME,aLifetime);
+  end;
+
+  RNL_TURN_METHOD_CREATE_PERMISSION:begin
+   aMessage.AddXORAddressAttribute(RNL_TURN_ATTRIBUTE_XOR_PEER_ADDRESS,aPeerAddress);
+  end;
+
+  RNL_TURN_METHOD_CHANNEL_BIND:begin
+   aMessage.AddUInt16Attribute(RNL_TURN_ATTRIBUTE_CHANNEL_NUMBER,aChannelNumber);
+   aMessage.AddXORAddressAttribute(RNL_TURN_ATTRIBUTE_XOR_PEER_ADDRESS,aPeerAddress);
+  end;
+
+  else begin
+  end;
+
+ end;
+
+ SignRequest(aMessage);
+
+end;
+
+function TRNLTURNAllocation.UsesStream:boolean;
+begin
+ result:=fControlSocket<>RNL_SOCKET_NULL;
+end;
+
+function TRNLTURNAllocation.SendFrame(const aData;const aDataSize:TRNLSizeInt):boolean;
+var Padded:TRNLSizeInt;
+    Buffer:array[0..3] of TRNLUInt8;
+begin
+ if not UsesStream then begin
+  result:=fTURNNetwork.fNetwork.Send(fSocket,@fServerAddress,aData,aDataSize,fFamily)=aDataSize;
+  exit;
+ end;
+ result:=fTURNNetwork.fNetwork.SendStream(fControlSocket,aData,aDataSize)=aDataSize;
+ if not result then begin
+  exit;
+ end;
+ // Over a stream every frame starts on a four byte boundary, so a ChannelData payload which is not a
+ // multiple of four is followed by padding. Without it the next frame would be read at the wrong
+ // offset and everything after it would be nonsense.
+ Padded:=((aDataSize+3) and not TRNLSizeInt(3))-aDataSize;
+ if Padded>0 then begin
+  FillChar(Buffer,SizeOf(Buffer),#0);
+  result:=fTURNNetwork.fNetwork.SendStream(fControlSocket,Buffer[0],Padded)=Padded;
+ end;
+end;
+
+function TRNLTURNAllocation.PumpStream:boolean;
+var Received:TRNLSizeInt;
+begin
+ result:=true;
+ if not UsesStream then begin
+  exit;
+ end;
+ while fStreamBufferSize<TRNLSizeInt(SizeOf(fStreamBuffer)) do begin
+  Received:=fTURNNetwork.fNetwork.ReceiveStream(fControlSocket,
+                                                fStreamBuffer[fStreamBufferSize],
+                                                TRNLSizeInt(SizeOf(fStreamBuffer))-fStreamBufferSize);
+  if Received>0 then begin
+   inc(fStreamBufferSize,Received);
+  end else if Received=0 then begin
+   // Nothing waiting, which is the ordinary case on a non blocking stream
+   exit;
+  end else begin
+   // The stream is gone. Without saying so, a relay whose connection dropped would look like a relay
+   // with nothing to say.
+   result:=false;
+   exit;
+  end;
+ end;
+end;
+
+function TRNLTURNAllocation.TakeFrame(out aFrame;const aMaximumSize:TRNLSizeInt;out aFrameSize:TRNLSizeInt):boolean;
+var Needed,Payload:TRNLSizeInt;
+begin
+
+ result:=false;
+ aFrameSize:=0;
+
+ if fStreamBufferSize<TRNLSTUNMessage.ChannelDataHeaderSize then begin
+  exit;
+ end;
+
+ // The two high bits tell the two framings apart here exactly as they do on a datagram
+ if (fStreamBuffer[0] and $c0)=0 then begin
+  if fStreamBufferSize<TRNLSTUNMessage.HeaderSize then begin
+   exit;
+  end;
+  Payload:=TRNLMemoryAccess.LoadBigEndianUInt16(fStreamBuffer[2]);
+  Needed:=TRNLSTUNMessage.HeaderSize+Payload;
+ end else begin
+  Payload:=TRNLMemoryAccess.LoadBigEndianUInt16(fStreamBuffer[2]);
+  // Padded up, and the padding belongs to the frame even though it does not belong to the payload
+  Needed:=(TRNLSTUNMessage.ChannelDataHeaderSize+Payload+3) and not TRNLSizeInt(3);
+ end;
+
+ if (Needed<=0) or (Needed>TRNLSizeInt(SizeOf(fStreamBuffer))) then begin
+  // A length which cannot be true means the stream is out of step, and nothing after it can be
+  // trusted either, so the buffer is thrown away rather than resynchronised by guessing
+  fStreamBufferSize:=0;
+  inc(fTURNNetwork.fTotalDroppedFromServer);
+  exit;
+ end;
+
+ if fStreamBufferSize<Needed then begin
+  exit;
+ end;
+
+ if Needed<=aMaximumSize then begin
+  Move(fStreamBuffer[0],aFrame,Needed);
+  aFrameSize:=Needed;
+  result:=true;
+ end else begin
+  inc(fTURNNetwork.fTotalDroppedFromServer);
+ end;
+
+ dec(fStreamBufferSize,Needed);
+ if fStreamBufferSize>0 then begin
+  Move(fStreamBuffer[Needed],fStreamBuffer[0],fStreamBufferSize);
+ end;
+
+end;
+
+function TRNLTURNAllocation.SendMessageToServer(var aMessage:TRNLSTUNMessage):boolean;
+begin
+ result:=aMessage.Valid and
+         SendFrame(PRNLUInt8Array(aMessage.DataPointer)^[0],aMessage.Size);
+end;
+
+function TRNLTURNAllocation.FindPendingRequest(const aTransactionID:TRNLSTUNTransactionID):PRNLTURNPendingRequest;
+var Index:TRNLSizeInt;
+begin
+ result:=nil;
+ for Index:=0 to length(fPendingRequests)-1 do begin
+  if fPendingRequests[Index].Used and
+     TRNLMemory.SecureIsEqual(fPendingRequests[Index].TransactionID[0],
+                              aTransactionID[0],
+                              SizeOf(TRNLSTUNTransactionID)) then begin
+   result:=@fPendingRequests[Index];
+   exit;
+  end;
+ end;
+end;
+
+procedure TRNLTURNAllocation.ForgetPendingRequest(const aRequest:PRNLTURNPendingRequest);
+begin
+ if assigned(aRequest) then begin
+  aRequest^.Used:=false;
+ end;
+end;
+
+function TRNLTURNAllocation.StartRequest(const aMethod:TRNLUInt16;
+                                         const aPeerAddress:TRNLAddress;
+                                         const aChannelNumber:TRNLUInt16):boolean;
+var Index,Free_,Count:TRNLSizeInt;
+    Request:PRNLTURNPendingRequest;
+    Message_:TRNLSTUNMessage;
+    TransactionID:TRNLSTUNTransactionID;
+begin
+
+ result:=false;
+
+ // One outstanding request per method and peer is enough. A second one for the same thing would
+ // only make the server answer twice.
+ for Index:=0 to length(fPendingRequests)-1 do begin
+  if fPendingRequests[Index].Used and
+     (fPendingRequests[Index].Method=aMethod) and
+     fPendingRequests[Index].PeerAddress.Equals(aPeerAddress) then begin
+   exit;
+  end;
+ end;
+
+ Free_:=-1;
+ for Index:=0 to length(fPendingRequests)-1 do begin
+  if not fPendingRequests[Index].Used then begin
+   Free_:=Index;
+   break;
+  end;
+ end;
+ if Free_<0 then begin
+  Count:=length(fPendingRequests);
+  SetLength(fPendingRequests,Count+1);
+  Free_:=Count;
+ end;
+
+ Request:=@fPendingRequests[Free_];
+ for Index:=0 to SizeOf(TRNLSTUNTransactionID)-1 do begin
+  TransactionID[Index]:=TRNLUInt8(fTURNNetwork.fRandomGenerator.GetUInt32 and $ff);
+ end;
+
+ Request^.Used:=true;
+ Request^.Method:=aMethod;
+ Request^.TransactionID:=TransactionID;
+ Request^.Deadline:=Now_+fTURNNetwork.fRequestTimeout;
+ Request^.CountAttempts:=1;
+ Request^.PeerAddress:=aPeerAddress;
+ Request^.ChannelNumber:=aChannelNumber;
+
+ BuildRequest(Message_,aMethod,TransactionID,aPeerAddress,aChannelNumber,fLifetime);
+ result:=SendMessageToServer(Message_);
+ if not result then begin
+  Request^.Used:=false;
+ end;
+
+end;
+
+function TRNLTURNAllocation.FindPermission(const aPeerHost:TRNLHostAddress):PRNLTURNPermission;
+var Index:TRNLSizeInt;
+begin
+ result:=nil;
+ for Index:=0 to length(fPermissions)-1 do begin
+  if fPermissions[Index].Used and fPermissions[Index].PeerHost.Equals(aPeerHost) then begin
+   result:=@fPermissions[Index];
+   exit;
+  end;
+ end;
+end;
+
+function TRNLTURNAllocation.FindChannelByPeer(const aPeerAddress:TRNLAddress):PRNLTURNChannel;
+var Index:TRNLSizeInt;
+begin
+ result:=nil;
+ for Index:=0 to length(fChannels)-1 do begin
+  if fChannels[Index].Used and fChannels[Index].PeerAddress.Equals(aPeerAddress) then begin
+   result:=@fChannels[Index];
+   exit;
+  end;
+ end;
+end;
+
+function TRNLTURNAllocation.FindChannelByNumber(const aNumber:TRNLUInt16):PRNLTURNChannel;
+var Index:TRNLSizeInt;
+begin
+ result:=nil;
+ for Index:=0 to length(fChannels)-1 do begin
+  if fChannels[Index].Used and (fChannels[Index].Number=aNumber) then begin
+   result:=@fChannels[Index];
+   exit;
+  end;
+ end;
+end;
+
+function TRNLTURNAllocation.Transact(var aRequest:TRNLSTUNMessage;out aResponse:TRNLSTUNMessage):boolean;
+var Sockets:array[0..0] of TRNLSocket;
+    WaitConditions:TRNLSocketWaitConditions;
+    Buffer:array[0..TRNLSTUNMessage.MaximumSize-1] of TRNLUInt8;
+    ReceivedAddress:TRNLAddress;
+    Attempt,ReceivedSize:TRNLSizeInt;
+    Deadline:TRNLTime;
+begin
+
+ result:=false;
+ if UsesStream then begin
+  Sockets[0]:=fControlSocket;
+ end else begin
+  Sockets[0]:=fSocket;
+ end;
+
+ for Attempt:=1 to Max(1,fTURNNetwork.fCountRequestAttempts) do begin
+
+  if not SendMessageToServer(aRequest) then begin
+   continue;
+  end;
+
+  Deadline:=Now_+fTURNNetwork.fRequestTimeout;
+
+  repeat
+
+   WaitConditions:=[RNL_SOCKET_WAIT_CONDITION_IO_RECEIVE];
+   if not fTURNNetwork.fNetwork.SocketWait(Sockets,
+                                           WaitConditions,
+                                           Max(0,TRNLTime.RelativeDifference(Deadline,Now_)),
+                                           nil) then begin
+    break;
+   end;
+
+   if RNL_SOCKET_WAIT_CONDITION_IO_RECEIVE in WaitConditions then begin
+    if UsesStream then begin
+     // Over a stream the answer arrives as a frame, possibly in pieces and possibly next to another
+     if not PumpStream then begin
+      exit;
+     end;
+     while TakeFrame(Buffer,SizeOf(Buffer),ReceivedSize) do begin
+      if aResponse.Assign(Buffer,ReceivedSize) and
+         aResponse.HasSameTransactionID(aRequest.TransactionID) then begin
+       result:=true;
+       exit;
+      end;
+     end;
+    end else begin
+     ReceivedSize:=fTURNNetwork.fNetwork.Receive(fSocket,@ReceivedAddress,Buffer,SizeOf(Buffer),fFamily);
+     if (ReceivedSize>0) and
+        ReceivedAddress.Equals(fServerAddress) and
+        aResponse.Assign(Buffer,ReceivedSize) and
+        aResponse.HasSameTransactionID(aRequest.TransactionID) then begin
+      result:=true;
+      exit;
+     end;
+    end;
+    // Anything else arriving on this socket is not the answer. It is dropped rather than kept,
+    // because this runs before the host is servicing and there is nobody to hand it to.
+   end;
+
+  until Now_>=Deadline;
+
+ end;
+
+end;
+
+function TRNLTURNAllocation.TakeCredentialsFrom(var aResponse:TRNLSTUNMessage):boolean;
+var Realm,Nonce:TRNLRawByteString;
+    Algorithm:TRNLUInt16;
+begin
+ result:=false;
+ if not aResponse.ReadStringAttribute(RNL_STUN_ATTRIBUTE_REALM,Realm) then begin
+  exit;
+ end;
+ if not aResponse.ReadStringAttribute(RNL_STUN_ATTRIBUTE_NONCE,Nonce) then begin
+  exit;
+ end;
+ fCredentials.Realm:=Realm;
+ fCredentials.Nonce:=Nonce;
+ // If the server names an algorithm, that is the one to derive with; otherwise the older one, which
+ // is what RFC 8489 keeps as the default for the sake of everything already deployed
+ if aResponse.ReadUInt16Attribute(RNL_STUN_ATTRIBUTE_PASSWORD_ALGORITHM,Algorithm) then begin
+  fCredentials.UseSHA256:=Algorithm=RNL_STUN_PASSWORD_ALGORITHM_SHA256;
+ end;
+ fCredentials.DeriveKey;
+ result:=fCredentials.KeySize>0;
+end;
+
+function TRNLTURNAllocation.Establish:boolean;
+var Request,Response:TRNLSTUNMessage;
+    TransactionID:TRNLSTUNTransactionID;
+    Index,Attempt:TRNLSizeInt;
+    ErrorCode:TRNLUInt32;
+    Reason:TRNLRawByteString;
+    Lifetime:TRNLUInt32;
+begin
+
+ result:=false;
+
+ // The first attempt goes out bare and is expected to come back as 401 with the realm and the
+ // nonce; the second one is signed. That second one can legitimately be rejected once more, with
+ // 438, if the nonce the server handed out has expired in between - so two attempts are not
+ // enough, which is what a relay whose nonce goes stale immediately proves. Beyond that the loop
+ // is only a bound: anything which is not 401 or 438, and any rejection this client cannot take
+ // new credentials from, leaves right away.
+ for Attempt:=1 to 4 do begin
+
+  for Index:=0 to SizeOf(TRNLSTUNTransactionID)-1 do begin
+   TransactionID[Index]:=TRNLUInt8(fTURNNetwork.fRandomGenerator.GetUInt32 and $ff);
+  end;
+
+  BuildRequest(Request,RNL_TURN_METHOD_ALLOCATE,TransactionID,fServerAddress,0,RNL_TURN_DEFAULT_LIFETIME);
+
+  if not Transact(Request,Response) then begin
+   exit;
+  end;
+
+  if Response.MessageClass=RNL_STUN_CLASS_SUCCESS_RESPONSE then begin
+
+   if not Response.ReadAddressAttribute(RNL_TURN_ATTRIBUTE_XOR_RELAYED_ADDRESS,fRelayedAddress) then begin
+    exit;
+   end;
+
+   // Not fatal if absent: the mapped address is what the server saw the socket as, which is worth
+   // having as a candidate but is not what the allocation is for
+   Response.ReadAddressAttribute(RNL_STUN_ATTRIBUTE_XOR_MAPPED_ADDRESS,fMappedAddress);
+
+   if Response.ReadUInt32Attribute(RNL_TURN_ATTRIBUTE_LIFETIME,Lifetime) and (Lifetime>0) then begin
+    fLifetime:=Lifetime;
+   end else begin
+    fLifetime:=RNL_TURN_DEFAULT_LIFETIME;
+   end;
+
+   // Halfway through, so one lost refresh does not cost the allocation
+   fRefreshAt:=Now_+((TRNLInt64(fLifetime)*1000) div 2);
+   fEstablished:=true;
+   result:=true;
+   exit;
+
+  end;
+
+  if Response.MessageClass<>RNL_STUN_CLASS_ERROR_RESPONSE then begin
+   exit;
+  end;
+
+  if not Response.ReadErrorCode(ErrorCode,Reason) then begin
+   exit;
+  end;
+
+  // 420 means the server did not understand a comprehension required attribute, and 440 that it
+  // cannot serve the address family that was asked for. Both are final: asking again unchanged would
+  // get the same answer, and changing what was asked for is the deployment's decision, not this
+  // client's. They are told apart from the retryable ones so that a counter and a log can say which
+  // it was rather than lumping every rejection together.
+  if (ErrorCode=RNL_STUN_ERROR_UNKNOWN_ATTRIBUTE) or
+     (ErrorCode=RNL_TURN_ERROR_ADDRESS_FAMILY_NOT_SUPPORTED) then begin
+   fLastErrorCode:=ErrorCode;
+   exit;
+  end;
+
+  // The one rejection that is part of the protocol rather than a failure: it carries the realm and
+  // the nonce this client had no way of knowing beforehand
+  if (ErrorCode<>RNL_STUN_ERROR_UNAUTHORIZED) and (ErrorCode<>RNL_STUN_ERROR_STALE_NONCE) then begin
+   fLastErrorCode:=ErrorCode;
+   exit;
+  end;
+
+  // Counted here as well as in the asynchronous path, so that the counter means what it says no
+  // matter which of the two dealt with it
+  if ErrorCode=RNL_STUN_ERROR_STALE_NONCE then begin
+   inc(fTURNNetwork.fTotalStaleNonces);
+  end;
+
+  if not TakeCredentialsFrom(Response) then begin
+   exit;
+  end;
+
+ end;
+
+end;
+
+function TRNLTURNAllocation.PrepareForPeer(const aPeerAddress:TRNLAddress):PRNLTURNChannel;
+var Index,Free_,Count:TRNLSizeInt;
+    Number:TRNLUInt16;
+    Permission:PRNLTURNPermission;
+    Channel:PRNLTURNChannel;
+begin
+
+ result:=nil;
+
+ if not fEstablished then begin
+  exit;
+ end;
+
+ // Without a permission the relay drops everything towards that address, so this comes first and
+ // is asked for by address rather than by address and port
+ Permission:=FindPermission(aPeerAddress.Host);
+ if not assigned(Permission) then begin
+  Free_:=-1;
+  for Index:=0 to length(fPermissions)-1 do begin
+   if not fPermissions[Index].Used then begin
+    Free_:=Index;
+    break;
+   end;
+  end;
+  if Free_<0 then begin
+   Count:=length(fPermissions);
+   SetLength(fPermissions,Count+1);
+   Free_:=Count;
+  end;
+  Permission:=@fPermissions[Free_];
+  Permission^.Used:=true;
+  Permission^.PeerHost:=aPeerAddress.Host;
+  Permission^.RenewAt:=Now_+((RNL_TURN_PERMISSION_LIFETIME*1000) div 2);
+  StartRequest(RNL_TURN_METHOD_CREATE_PERMISSION,aPeerAddress,0);
+ end;
+
+ if not fTURNNetwork.fUseChannels then begin
+  exit;
+ end;
+
+ Channel:=FindChannelByPeer(aPeerAddress);
+ if not assigned(Channel) then begin
+
+  // A slot which was let go of long enough ago brings its number back with it, so a long lived
+  // allocation cycling through peers does not run out of the sixteen thousand there are
+  Free_:=-1;
+  Number:=0;
+  for Index:=0 to length(fChannels)-1 do begin
+   if not fChannels[Index].Used then begin
+    if fChannels[Index].ReusableAt.fValue=0 then begin
+     // Never carried a number, so it is simply an empty slot
+     Free_:=Index;
+     break;
+    end else if Now_>=fChannels[Index].ReusableAt then begin
+     Free_:=Index;
+     Number:=fChannels[Index].Number;
+     inc(fTURNNetwork.fTotalReusedChannelNumbers);
+     break;
+    end;
+   end;
+  end;
+
+  if Number=0 then begin
+   if fNextChannelNumber>RNL_TURN_CHANNEL_NUMBER_LAST then begin
+    // Every number handed out and none back yet. The Send indication still works, it is only
+    // bigger, so this costs bandwidth rather than the connection.
+    inc(fTURNNetwork.fTotalChannelNumbersExhausted);
+    exit;
+   end;
+   Number:=fNextChannelNumber;
+   inc(fNextChannelNumber);
+  end;
+
+  if Free_<0 then begin
+   Count:=length(fChannels);
+   SetLength(fChannels,Count+1);
+   Free_:=Count;
+  end;
+
+  Channel:=@fChannels[Free_];
+  Channel^.Used:=true;
+  Channel^.Confirmed:=false;
+  Channel^.Number:=Number;
+  Channel^.PeerAddress:=aPeerAddress;
+  Channel^.RenewAt:=Now_+((RNL_TURN_CHANNEL_LIFETIME*1000) div 2);
+  Channel^.LastUsedAt:=Now_;
+  Channel^.ReusableAt.fValue:=0;
+  StartRequest(RNL_TURN_METHOD_CHANNEL_BIND,aPeerAddress,Channel^.Number);
+
+ end else begin
+
+  Channel^.LastUsedAt:=Now_;
+
+ end;
+
+ if Channel^.Confirmed then begin
+  result:=Channel;
+ end;
+
+end;
+
+procedure TRNLTURNAllocation.Maintain;
+var Index:TRNLSizeInt;
+    Time_:TRNLTime;
+    PermissionAddress:TRNLAddress;
+    Request:PRNLTURNPendingRequest;
+    Message_:TRNLSTUNMessage;
+begin
+
+ if not fEstablished then begin
+  exit;
+ end;
+
+ Time_:=Now_;
+
+ // Anything outstanding: send it again, or give up on it. Giving up is not fatal for a permission
+ // or a channel, since the next datagram towards that peer asks again.
+ for Index:=0 to length(fPendingRequests)-1 do begin
+  Request:=@fPendingRequests[Index];
+  if Request^.Used and (Time_>=Request^.Deadline) then begin
+   if Request^.CountAttempts>=fTURNNetwork.fCountRequestAttempts then begin
+    Request^.Used:=false;
+   end else begin
+    inc(Request^.CountAttempts);
+    Request^.Deadline:=Time_+fTURNNetwork.fRequestTimeout;
+    BuildRequest(Message_,Request^.Method,Request^.TransactionID,
+                 Request^.PeerAddress,Request^.ChannelNumber,fLifetime);
+    SendMessageToServer(Message_);
+   end;
+  end;
+ end;
+
+ if Time_>=fRefreshAt then begin
+  // Set before the answer arrives, so a server which never answers is asked again on the next
+  // period rather than on every single call
+  fRefreshAt:=Time_+((TRNLInt64(fLifetime)*1000) div 2);
+  StartRequest(RNL_TURN_METHOD_REFRESH,fServerAddress,0);
+ end;
+
+ for Index:=0 to length(fPermissions)-1 do begin
+  if fPermissions[Index].Used and (Time_>=fPermissions[Index].RenewAt) then begin
+   fPermissions[Index].RenewAt:=Time_+((RNL_TURN_PERMISSION_LIFETIME*1000) div 2);
+   // A permission is by address, so any port of it will do to renew it
+   FillChar(PermissionAddress,SizeOf(TRNLAddress),#0);
+   PermissionAddress.Host:=fPermissions[Index].PeerHost;
+   StartRequest(RNL_TURN_METHOD_CREATE_PERMISSION,PermissionAddress,0);
+  end;
+ end;
+
+ for Index:=0 to length(fChannels)-1 do begin
+  if fChannels[Index].Used then begin
+   if TRNLTime.RelativeDifference(Time_,fChannels[Index].LastUsedAt)>=fTURNNetwork.fChannelIdleTimeout then begin
+    // Nothing has travelled over it for a while, so it is let go of rather than refreshed for ever.
+    // The number stays out of circulation until the binding has expired at the server and the five
+    // minutes of RFC 8656 section 12 on top of that have passed.
+    fChannels[Index].Used:=false;
+    fChannels[Index].Confirmed:=false;
+    fChannels[Index].ReusableAt:=Time_+fTURNNetwork.fChannelNumberReuseDelay;
+    inc(fTURNNetwork.fTotalReleasedChannels);
+   end else if Time_>=fChannels[Index].RenewAt then begin
+    fChannels[Index].RenewAt:=Time_+((RNL_TURN_CHANNEL_LIFETIME*1000) div 2);
+    StartRequest(RNL_TURN_METHOD_CHANNEL_BIND,
+                 fChannels[Index].PeerAddress,
+                 fChannels[Index].Number);
+   end;
+  end;
+ end;
+
+end;
+
+function TRNLTURNAllocation.HandleServerMessage(var aMessage:TRNLSTUNMessage;
+                                                out aPeerAddress:TRNLAddress;
+                                                out aPayloadPosition,aPayloadSize:TRNLSizeInt):boolean;
+var Request:PRNLTURNPendingRequest;
+    Channel:PRNLTURNChannel;
+    Permission:PRNLTURNPermission;
+    ErrorCode,Lifetime:TRNLUInt32;
+    Reason:TRNLRawByteString;
+    Retry:TRNLSTUNMessage;
+    Method,MessageClass:TRNLUInt16;
+begin
+
+ result:=true;
+ FillChar(aPeerAddress,SizeOf(TRNLAddress),#0);
+ aPayloadPosition:=0;
+ aPayloadSize:=0;
+
+ Method:=aMessage.MessageMethod;
+ MessageClass:=aMessage.MessageClass;
+
+ // A Data indication is the only thing from the server which carries payload for the caller
+ if (Method=RNL_TURN_METHOD_DATA) and (MessageClass=RNL_STUN_CLASS_INDICATION) then begin
+  inc(fTURNNetwork.fTotalDataIndications);
+  if aMessage.ReadAddressAttribute(RNL_TURN_ATTRIBUTE_XOR_PEER_ADDRESS,aPeerAddress) and
+     aMessage.FindAttribute(RNL_TURN_ATTRIBUTE_DATA,aPayloadPosition,aPayloadSize) then begin
+   exit;
+  end;
+  aPayloadSize:=0;
+  exit;
+ end;
+
+ if MessageClass=RNL_STUN_CLASS_INDICATION then begin
+  // Some other indication, which there is nothing useful to do with
+  exit;
+ end;
+
+ Request:=FindPendingRequest(aMessage.TransactionID);
+ if not assigned(Request) then begin
+  // No transaction of ours, so either a duplicate of something already dealt with or something
+  // that was never asked for
+  exit;
+ end;
+
+ if MessageClass=RNL_STUN_CLASS_ERROR_RESPONSE then begin
+
+  if aMessage.ReadErrorCode(ErrorCode,Reason) and (ErrorCode=RNL_STUN_ERROR_STALE_NONCE) then begin
+   // The nonce a server hands out expires on its own schedule, so this is routine rather than a
+   // failure: take the new one and send the very same request again
+   inc(fTURNNetwork.fTotalStaleNonces);
+   if TakeCredentialsFrom(aMessage) then begin
+    Request^.Deadline:=Now_+fTURNNetwork.fRequestTimeout;
+    BuildRequest(Retry,Request^.Method,Request^.TransactionID,
+                 Request^.PeerAddress,Request^.ChannelNumber,fLifetime);
+    SendMessageToServer(Retry);
+    exit;
+   end;
+  end;
+
+  // Anything else: the request is over. A refresh that failed will be asked again on its period,
+  // and a permission or channel on the next datagram towards that peer.
+  if Request^.Method=RNL_TURN_METHOD_CHANNEL_BIND then begin
+   Channel:=FindChannelByNumber(Request^.ChannelNumber);
+   if assigned(Channel) then begin
+    Channel^.Used:=false;
+   end;
+  end;
+  ForgetPendingRequest(Request);
+  exit;
+
+ end;
+
+ if MessageClass<>RNL_STUN_CLASS_SUCCESS_RESPONSE then begin
+  exit;
+ end;
+
+ case Request^.Method of
+
+  RNL_TURN_METHOD_REFRESH:begin
+   inc(fTURNNetwork.fTotalRefreshes);
+   if aMessage.ReadUInt32Attribute(RNL_TURN_ATTRIBUTE_LIFETIME,Lifetime) and (Lifetime>0) then begin
+    fLifetime:=Lifetime;
+    fRefreshAt:=Now_+((TRNLInt64(fLifetime)*1000) div 2);
+   end;
+  end;
+
+  RNL_TURN_METHOD_CREATE_PERMISSION:begin
+   inc(fTURNNetwork.fTotalCreatedPermissions);
+   Permission:=FindPermission(Request^.PeerAddress.Host);
+   if assigned(Permission) then begin
+    Permission^.RenewAt:=Now_+((RNL_TURN_PERMISSION_LIFETIME*1000) div 2);
+   end;
+  end;
+
+  RNL_TURN_METHOD_CHANNEL_BIND:begin
+   Channel:=FindChannelByNumber(Request^.ChannelNumber);
+   if assigned(Channel) then begin
+    if not Channel^.Confirmed then begin
+     inc(fTURNNetwork.fTotalBoundChannels);
+    end;
+    Channel^.Confirmed:=true;
+    Channel^.RenewAt:=Now_+((RNL_TURN_CHANNEL_LIFETIME*1000) div 2);
+   end;
+  end;
+
+  else begin
+  end;
+
+ end;
+
+ ForgetPendingRequest(Request);
+
+end;
+
+constructor TRNLTURNNetwork.Create(const aInstance:TRNLInstance;
+                                   const aNetwork:TRNLNetwork;
+                                   const aServerAddress:TRNLAddress;
+                                   const aUsername:TRNLRawByteString='';
+                                   const aPassword:TRNLRawByteString='');
+begin
+ inherited Create(aInstance);
+ fNetwork:=aNetwork;
+ fRandomGenerator:=TRNLRandomGenerator.Create;
+ fServerAddress:=aServerAddress;
+ fUsername:=aUsername;
+ fPassword:=aPassword;
+ fTransport:=RNL_TURN_TRANSPORT_KIND_UDP;
+ fPreferSHA256:=false;
+ fRequestedAddressFamily:=RNL_TURN_ADDRESS_FAMILY_POLICY_FROM_SOCKET;
+ fUseChannels:=true;
+ fChannelIdleTimeout:=RNL_TURN_CHANNEL_IDLE_TIMEOUT;
+ fChannelNumberReuseDelay:=RNL_TURN_CHANNEL_NUMBER_REUSE_DELAY;
+ fRequestTimeout:=RNL_TURN_REQUEST_TIMEOUT;
+ fCountRequestAttempts:=RNL_TURN_REQUEST_ATTEMPTS;
+ fAllocations:=nil;
+ fLock:=TCriticalSection.Create;
+ fTotalAllocations:=0;
+ fTotalFailedAllocations:=0;
+ fLastFailedAllocationErrorCode:=0;
+ fTotalRefreshes:=0;
+ fTotalCreatedPermissions:=0;
+ fTotalBoundChannels:=0;
+ fTotalReleasedChannels:=0;
+ fTotalReusedChannelNumbers:=0;
+ fTotalChannelNumbersExhausted:=0;
+ fTotalStaleNonces:=0;
+ fTotalSendIndications:=0;
+ fTotalChannelDataSent:=0;
+ fTotalChannelDataReceived:=0;
+ fTotalDataIndications:=0;
+ fTotalPassedThrough:=0;
+ fTotalDroppedFromServer:=0;
+end;
+
+destructor TRNLTURNNetwork.Destroy;
+var Index:TRNLSizeInt;
+begin
+ for Index:=0 to length(fAllocations)-1 do begin
+  FreeAndNil(fAllocations[Index]);
+ end;
+ fAllocations:=nil;
+ FreeAndNil(fRandomGenerator);
+ FreeAndNil(fLock);
+ inherited Destroy;
+end;
+
+function TRNLTURNNetwork.FindAllocation(const aSocket:TRNLSocket):TRNLTURNAllocation;
+var Index:TRNLSizeInt;
+begin
+ result:=nil;
+ for Index:=0 to length(fAllocations)-1 do begin
+  if assigned(fAllocations[Index]) and (fAllocations[Index].Socket=aSocket) then begin
+   result:=fAllocations[Index];
+   exit;
+  end;
+ end;
+end;
+
+procedure TRNLTURNNetwork.ForgetAllocation(const aSocket:TRNLSocket);
+var Index:TRNLSizeInt;
+begin
+ for Index:=0 to length(fAllocations)-1 do begin
+  if assigned(fAllocations[Index]) and (fAllocations[Index].Socket=aSocket) then begin
+   FreeAndNil(fAllocations[Index]);
+  end;
+ end;
+end;
+
+function TRNLTURNNetwork.AllocationOf(const aSocket:TRNLSocket):TRNLTURNAllocation;
+begin
+ fLock.Acquire;
+ try
+  result:=FindAllocation(aSocket);
+ finally
+  fLock.Release;
+ end;
+end;
+
+function TRNLTURNNetwork.GetRelayedAddress(const aSocket:TRNLSocket;out aAddress:TRNLAddress):boolean;
+var Allocation:TRNLTURNAllocation;
+begin
+ FillChar(aAddress,SizeOf(TRNLAddress),#0);
+ result:=false;
+ fLock.Acquire;
+ try
+  Allocation:=FindAllocation(aSocket);
+  if assigned(Allocation) and Allocation.Established then begin
+   aAddress:=Allocation.RelayedAddress;
+   result:=true;
+  end;
+ finally
+  fLock.Release;
+ end;
+end;
+
+function TRNLTURNNetwork.SocketBind(const aSocket:TRNLSocket;const aAddress:PRNLAddress;const aFamily:TRNLAddressFamily):boolean;
+var Allocation:TRNLTURNAllocation;
+    Count:TRNLSizeInt;
+begin
+
+ result:=fNetwork.SocketBind(aSocket,aAddress,aFamily);
+ if not result then begin
+  exit;
+ end;
+
+ // A relay only forwards to a socket it has handed an address out for, so the allocation belongs
+ // here: after the socket exists and has a source address, before anything is serviced through it
+ fLock.Acquire;
+ try
+
+  if assigned(FindAllocation(aSocket)) then begin
+   exit;
+  end;
+
+  Allocation:=TRNLTURNAllocation.Create(self,aSocket,aFamily);
+
+  // With a TCP transport the relay is reached over a stream of its own, next to the datagram socket
+  // the host is bound to. Both stay: the stream carries everything relayed, the datagram socket
+  // whatever finds a direct path to a peer.
+  if fTransport=RNL_TURN_TRANSPORT_KIND_TCP then begin
+   Allocation.fControlSocket:=fNetwork.SocketCreate(RNL_SOCKET_TYPE_STREAM,aFamily);
+   if Allocation.fControlSocket<>RNL_SOCKET_NULL then begin
+    if fNetwork.SocketConnect(Allocation.fControlSocket,fServerAddress,aFamily) then begin
+     fNetwork.SocketSetOption(Allocation.fControlSocket,RNL_SOCKET_OPTION_NONBLOCK,1);
+    end else begin
+     fNetwork.SocketDestroy(Allocation.fControlSocket);
+     Allocation.fControlSocket:=RNL_SOCKET_NULL;
+    end;
+   end;
+   if Allocation.fControlSocket=RNL_SOCKET_NULL then begin
+    // No stream, no relay. The socket the host asked for is bound and usable either way.
+    FreeAndNil(Allocation);
+    inc(fTotalFailedAllocations);
+    exit;
+   end;
+  end;
+
+  if Allocation.Establish then begin
+   Count:=length(fAllocations);
+   SetLength(fAllocations,Count+1);
+   fAllocations[Count]:=Allocation;
+   inc(fTotalAllocations);
+  end else begin
+   // Binding itself worked, so the socket is usable; it simply has no relay in front of it and
+   // everything through it goes out directly
+   fLastFailedAllocationErrorCode:=Allocation.LastErrorCode;
+   FreeAndNil(Allocation);
+   inc(fTotalFailedAllocations);
+  end;
+
+ finally
+  fLock.Release;
+ end;
+
+end;
+
+procedure TRNLTURNNetwork.SocketDestroy(const aSocket:TRNLSocket);
+begin
+ fLock.Acquire;
+ try
+  ForgetAllocation(aSocket);
+ finally
+  fLock.Release;
+ end;
+ fNetwork.SocketDestroy(aSocket);
+end;
+
+function TRNLTURNNetwork.Send(const aSocket:TRNLSocket;const aAddress:PRNLAddress;const aData;const aDataLength:TRNLSizeInt;const aFamily:TRNLAddressFamily):TRNLSizeInt;
+var Allocation:TRNLTURNAllocation;
+    Channel:PRNLTURNChannel;
+    Message_:TRNLSTUNMessage;
+    Frame:array[0..TRNLSTUNMessage.MaximumSize-1] of TRNLUInt8;
+    Sent:TRNLSizeInt;
+begin
+
+ fLock.Acquire;
+ try
+  Allocation:=FindAllocation(aSocket);
+  if assigned(Allocation) then begin
+   Allocation.Maintain;
+  end;
+ finally
+  fLock.Release;
+ end;
+
+ // No allocation, or the datagram is aimed at the relay itself, which is control traffic and has
+ // already been wrapped by whoever built it
+ if (not assigned(aAddress)) or
+    (not assigned(Allocation)) or
+    (not Allocation.Established) or
+    aAddress^.Equals(fServerAddress) then begin
+  inc(fTotalPassedThrough);
+  result:=fNetwork.Send(aSocket,aAddress,aData,aDataLength,aFamily);
+  exit;
+ end;
+
+ fLock.Acquire;
+ try
+  Channel:=Allocation.PrepareForPeer(aAddress^);
+ finally
+  fLock.Release;
+ end;
+
+ if assigned(Channel) then begin
+
+  // Four bytes in front of the payload and nothing else, which is the whole point of a channel
+  if (TRNLSTUNMessage.ChannelDataHeaderSize+aDataLength)>TRNLSizeInt(SizeOf(Frame)) then begin
+   result:=-1;
+   exit;
+  end;
+  TRNLMemoryAccess.StoreBigEndianUInt16(Frame[0],Channel^.Number);
+  TRNLMemoryAccess.StoreBigEndianUInt16(Frame[2],TRNLUInt16(aDataLength));
+  Move(aData,Frame[TRNLSTUNMessage.ChannelDataHeaderSize],aDataLength);
+  // Through the allocation rather than straight to the network: with a TCP transport this has to
+  // become a frame in the stream, and over UDP it is the same datagram it always was
+  if Allocation.SendFrame(Frame[0],TRNLSTUNMessage.ChannelDataHeaderSize+aDataLength) then begin
+   Sent:=TRNLSTUNMessage.ChannelDataHeaderSize+aDataLength;
+  end else begin
+   Sent:=-1;
+  end;
+  if Sent=(TRNLSTUNMessage.ChannelDataHeaderSize+aDataLength) then begin
+   inc(fTotalChannelDataSent);
+   // What the caller asked to send is what it gets told about; the wrapping is not its business
+   result:=aDataLength;
+  end else if Sent>=0 then begin
+   result:=0;
+  end else begin
+   result:=-1;
+  end;
+  exit;
+
+ end;
+
+ // Until a channel is confirmed, and always without channels, every datagram travels inside a Send
+ // indication. Those are not authenticated, by design: RFC 8656 section 10 leaves indications
+ // unsigned because a relay cannot do anything useful with a forged one that it could not do anyway.
+ Message_.InitializeWithFreshTransactionID(RNL_TURN_METHOD_SEND or RNL_STUN_CLASS_INDICATION,
+                                           fRandomGenerator);
+ Message_.AddXORAddressAttribute(RNL_TURN_ATTRIBUTE_XOR_PEER_ADDRESS,aAddress^);
+ Message_.AddAttribute(RNL_TURN_ATTRIBUTE_DATA,aData,aDataLength);
+ if not Message_.Valid then begin
+  result:=-1;
+  exit;
+ end;
+ if Allocation.SendFrame(PRNLUInt8Array(Message_.DataPointer)^[0],Message_.Size) then begin
+  Sent:=Message_.Size;
+ end else begin
+  Sent:=-1;
+ end;
+ if Sent=Message_.Size then begin
+  inc(fTotalSendIndications);
+  result:=aDataLength;
+ end else if Sent>=0 then begin
+  result:=0;
+ end else begin
+  result:=-1;
+ end;
+
+end;
+
+function TRNLTURNNetwork.Receive(const aSocket:TRNLSocket;const aAddress:PRNLAddress;out aData;const aDataLength:TRNLSizeInt;const aFamily:TRNLAddressFamily):TRNLSizeInt;
+var Allocation:TRNLTURNAllocation;
+    Channel:PRNLTURNChannel;
+    Message_:TRNLSTUNMessage;
+    Buffer:array[0..TRNLSTUNMessage.MaximumSize-1] of TRNLUInt8;
+    ReceivedAddress,PeerAddress:TRNLAddress;
+    ReceivedSize,PayloadPosition,PayloadSize,ChannelNumber,FrameSize:TRNLSizeInt;
+    FromServer:boolean;
+begin
+
+ fLock.Acquire;
+ try
+  Allocation:=FindAllocation(aSocket);
+  if assigned(Allocation) then begin
+   Allocation.Maintain;
+  end;
+ finally
+  fLock.Release;
+ end;
+
+ if (not assigned(Allocation)) or not Allocation.Established then begin
+  result:=fNetwork.Receive(aSocket,aAddress,aData,aDataLength,aFamily);
+  exit;
+ end;
+
+ // Loops rather than returning zero for a control message: a Refresh answer arriving between two
+ // datagrams must not look to the caller like an empty socket, or a busy relay path would starve
+ // behind its own upkeep
+ while true do begin
+
+  FromServer:=false;
+
+  // With a TCP transport everything relayed arrives over the stream, so that is looked at first; the
+  // datagram socket then still carries whatever found a direct path to a peer.
+  if Allocation.UsesStream then begin
+   fLock.Acquire;
+   try
+    if not Allocation.PumpStream then begin
+     // The stream to the relay is gone. Reported as an error rather than as silence, because a host
+     // which keeps servicing a dead relay path would wait for datagrams that cannot come.
+     inc(fTotalDroppedFromServer);
+     result:=-1;
+     exit;
+    end;
+    FromServer:=Allocation.TakeFrame(Buffer,SizeOf(Buffer),ReceivedSize);
+   finally
+    fLock.Release;
+   end;
+  end;
+
+  if not FromServer then begin
+   ReceivedSize:=fNetwork.Receive(aSocket,@ReceivedAddress,Buffer,SizeOf(Buffer),aFamily);
+   if ReceivedSize<=0 then begin
+    result:=ReceivedSize;
+    exit;
+   end;
+   FromServer:=ReceivedAddress.Equals(Allocation.ServerAddress);
+  end;
+
+  if not FromServer then begin
+   // Straight from a peer, which happens as soon as a direct path exists alongside the relayed one
+   if ReceivedSize>aDataLength then begin
+    inc(fTotalDroppedFromServer);
+    continue;
+   end;
+   if assigned(aAddress) then begin
+    aAddress^:=ReceivedAddress;
+   end;
+   Move(Buffer[0],aData,ReceivedSize);
+   result:=ReceivedSize;
+   exit;
+  end;
+
+  // The two high bits are what tell the two framings apart: zero for a STUN message, set for a
+  // ChannelData frame
+  if (Buffer[0] and $c0)<>0 then begin
+
+   if ReceivedSize<TRNLSTUNMessage.ChannelDataHeaderSize then begin
+    inc(fTotalDroppedFromServer);
+    continue;
+   end;
+
+   ChannelNumber:=TRNLMemoryAccess.LoadBigEndianUInt16(Buffer[0]);
+   FrameSize:=TRNLMemoryAccess.LoadBigEndianUInt16(Buffer[2]);
+
+   if (FrameSize<0) or
+      ((TRNLSTUNMessage.ChannelDataHeaderSize+FrameSize)>ReceivedSize) or
+      (FrameSize>aDataLength) then begin
+    inc(fTotalDroppedFromServer);
+    continue;
+   end;
+
+   fLock.Acquire;
+   try
+    Channel:=Allocation.FindChannelByNumber(TRNLUInt16(ChannelNumber));
+    if assigned(Channel) then begin
+     PeerAddress:=Channel^.PeerAddress;
+    end;
+   finally
+    fLock.Release;
+   end;
+
+   if not assigned(Channel) then begin
+    // A channel number nobody here bound, so there is no address to say it came from
+    inc(fTotalDroppedFromServer);
+    continue;
+   end;
+
+   if assigned(aAddress) then begin
+    aAddress^:=PeerAddress;
+   end;
+   Move(Buffer[TRNLSTUNMessage.ChannelDataHeaderSize],aData,FrameSize);
+   inc(fTotalChannelDataReceived);
+   result:=FrameSize;
+   exit;
+
+  end;
+
+  if not Message_.Assign(Buffer,ReceivedSize) then begin
+   inc(fTotalDroppedFromServer);
+   continue;
+  end;
+
+  fLock.Acquire;
+  try
+   Allocation.HandleServerMessage(Message_,PeerAddress,PayloadPosition,PayloadSize);
+  finally
+   fLock.Release;
+  end;
+
+  if PayloadSize>0 then begin
+   if PayloadSize>aDataLength then begin
+    inc(fTotalDroppedFromServer);
+    continue;
+   end;
+   if assigned(aAddress) then begin
+    aAddress^:=PeerAddress;
+   end;
+   Move(PRNLUInt8Array(Message_.DataPointer)^[PayloadPosition],aData,PayloadSize);
+   result:=PayloadSize;
+   exit;
+  end;
+
+  // Consumed here, so keep looking for something the caller can use
+
+ end;
+
+end;
+
+function TRNLTURNNetwork.AddressSetHost(var aAddress:TRNLAddress;const aName:TRNLRawByteString):boolean;
+begin
+ result:=fNetwork.AddressSetHost(aAddress,aName);
+end;
+
+function TRNLTURNNetwork.AddressGetHost(const aAddress:TRNLAddress;out aName;const aNameLength:TRNLInt32;const aFlags:TRNLInt32=0):boolean;
+begin
+ result:=fNetwork.AddressGetHost(aAddress,aName,aNameLength,aFlags);
+end;
+
+function TRNLTURNNetwork.AddressGetHostIP(const aAddress:TRNLAddress;out aName;const aNameLength:TRNLInt32):boolean;
+begin
+ result:=fNetwork.AddressGetHostIP(aAddress,aName,aNameLength);
+end;
+
+function TRNLTURNNetwork.AddressGetPrimaryInterfaceHostIP(var aAddress:TRNLAddress;const aFamily:TRNLAddressFamily;const aInterfaceHostAddressType:TRNLInterfaceHostAddressType=RNL_INTERFACE_HOST_ADDRESS_UNICAST):boolean;
+begin
+ result:=fNetwork.AddressGetPrimaryInterfaceHostIP(aAddress,aFamily,aInterfaceHostAddressType);
+end;
+
+function TRNLTURNNetwork.AddressGetInterfaceHostIPs(out aAddresses:TRNLHostAddresses;const aFamily:TRNLAddressFamily;const aInterfaceHostAddressType:TRNLInterfaceHostAddressType=RNL_INTERFACE_HOST_ADDRESS_UNICAST):boolean;
+begin
+ result:=fNetwork.AddressGetInterfaceHostIPs(aAddresses,aFamily,aInterfaceHostAddressType);
+end;
+
+function TRNLTURNNetwork.SocketCreate(const aType:TRNLSocketType;const aFamily:TRNLAddressFamily):TRNLSocket;
+begin
+ result:=fNetwork.SocketCreate(aType,aFamily);
+end;
+
+function TRNLTURNNetwork.SocketShutdown(const aSocket:TRNLSocket;const aHow:TRNLSocketShutdown=RNL_SOCKET_SHUTDOWN_READ_WRITE):boolean;
+begin
+ result:=fNetwork.SocketShutdown(aSocket,aHow);
+end;
+
+function TRNLTURNNetwork.SocketGetAddress(const aSocket:TRNLSocket;out aAddress:TRNLAddress;const aFamily:TRNLAddressFamily):boolean;
+begin
+ result:=fNetwork.SocketGetAddress(aSocket,aAddress,aFamily);
+end;
+
+function TRNLTURNNetwork.SocketSetOption(const aSocket:TRNLSocket;const aOption:TRNLSocketOption;const aValue:TRNLInt32):boolean;
+begin
+ result:=fNetwork.SocketSetOption(aSocket,aOption,aValue);
+end;
+
+function TRNLTURNNetwork.SocketGetOption(const aSocket:TRNLSocket;const aOption:TRNLSocketOption;out aValue:TRNLInt32):boolean;
+begin
+ result:=fNetwork.SocketGetOption(aSocket,aOption,aValue);
+end;
+
+function TRNLTURNNetwork.SocketListen(const aSocket:TRNLSocket;const aBackLog:TRNLInt32):boolean;
+begin
+ result:=fNetwork.SocketListen(aSocket,aBackLog);
+end;
+
+function TRNLTURNNetwork.SocketConnect(const aSocket:TRNLSocket;const aAddress:TRNLAddress;const aFamily:TRNLAddressFamily):boolean;
+begin
+ result:=fNetwork.SocketConnect(aSocket,aAddress,aFamily);
+end;
+
+function TRNLTURNNetwork.SocketAccept(const aSocket:TRNLSocket;const aAddress:PRNLAddress;const aFamily:TRNLAddressFamily):TRNLSocket;
+begin
+ result:=fNetwork.SocketAccept(aSocket,aAddress,aFamily);
+end;
+
+function TRNLTURNNetwork.SocketSelect(const aMaxSocket:TRNLSocket;var aReadSet,aWriteSet:TRNLSocketSet;const aTimeout:TRNLInt64;const aEvent:TRNLNetworkEvent=nil):TRNLInt32;
+begin
+ result:=fNetwork.SocketSelect(aMaxSocket,aReadSet,aWriteSet,aTimeout,aEvent);
+end;
+
+function TRNLTURNNetwork.SocketWait(const aSockets:array of TRNLSocket;var aConditions:TRNLSocketWaitConditions;const aTimeout:TRNLInt64;const aEvent:TRNLNetworkEvent=nil):boolean;
+var Combined:array of TRNLSocket;
+    Index,Count:TRNLSizeInt;
+begin
+
+ Combined:=nil;
+ try
+
+  // Over a stream the relayed traffic no longer arrives on the socket the host knows about, so
+  // waiting on that one alone would sleep through everything the relay sends. The streams are added
+  // to the wait set, which is what makes them wake the host at all.
+  fLock.Acquire;
+  try
+   Count:=0;
+   for Index:=0 to length(fAllocations)-1 do begin
+    if assigned(fAllocations[Index]) and fAllocations[Index].UsesStream then begin
+     inc(Count);
+    end;
+   end;
+   if Count>0 then begin
+    SetLength(Combined,length(aSockets)+Count);
+    for Index:=0 to length(aSockets)-1 do begin
+     Combined[Index]:=aSockets[Index];
+    end;
+    Count:=length(aSockets);
+    for Index:=0 to length(fAllocations)-1 do begin
+     if assigned(fAllocations[Index]) and fAllocations[Index].UsesStream then begin
+      Combined[Count]:=fAllocations[Index].fControlSocket;
+      inc(Count);
+     end;
+    end;
+   end;
+  finally
+   fLock.Release;
+  end;
+
+  if length(Combined)>0 then begin
+   result:=fNetwork.SocketWait(Combined,aConditions,aTimeout,aEvent);
+  end else begin
+   result:=fNetwork.SocketWait(aSockets,aConditions,aTimeout,aEvent);
+  end;
+
+ finally
+  Combined:=nil;
+ end;
+
 end;
 
 constructor TRNLNetworkInterferenceSimulator.TRNLNetworkInterferenceSimulatorPacket.Create(const aNetworkInterferenceSimulator:TRNLNetworkInterferenceSimulator);
@@ -23092,7 +25367,8 @@ end;
 
 function TRNLPeerPendingConnectionHandshakeSendData.Send:boolean;
 var PacketSize:TRNLSizeInt;
-    Index,CountCandidates,CountThisRound:TRNLSizeInt;
+    CountCandidates,CountSockets,CountPairs,CountThisRound:TRNLSizeInt;
+    Sent,Scanned,Position,CandidateIndex,SocketIndex:TRNLSizeInt;
 begin
  fPeer.fHost.AddHandshakePacketChecksum(fHandshakePacket);
  PacketSize:=RNLProtocolHandshakePacketSizes[TRNLProtocolHandshakePacketType(TRNLInt32(fHandshakePacket.Header.PacketType))];
@@ -23114,25 +25390,61 @@ begin
   // Only a hard send error counts as failure. One unreachable candidate among several is the
   // normal case and says nothing about the others.
   result:=false;
+
+  // Every combination of a local socket and a remote candidate is one path worth trying, which is
+  // what ICE calls a candidate pair. With one socket per address family that is one pair per
+  // candidate and this is the same fan out as before; with one socket per interface it is the cross
+  // product, and a path that only exists over the second interface is only found by trying it there.
   CountCandidates:=length(fPeer.fCandidateAddresses);
-  CountThisRound:=fPeer.fHost.fMaximumCandidatesPerHandshakeRound;
-  if (CountThisRound<=0) or (CountThisRound>CountCandidates) then begin
-   CountThisRound:=CountCandidates;
+  CountSockets:=length(fPeer.fHost.fSockets);
+  if (CountCandidates<=0) or (CountSockets<=0) then begin
+   exit;
   end;
-  if fPeer.fCandidateRoundOffset>=CountCandidates then begin
+
+  CountPairs:=CountCandidates*CountSockets;
+
+  // The bound counts pairs, not candidates, which is the same thing whenever there is one socket
+  CountThisRound:=fPeer.fHost.fMaximumCandidatesPerHandshakeRound;
+  if (CountThisRound<=0) or (CountThisRound>CountPairs) then begin
+   CountThisRound:=CountPairs;
+  end;
+
+  if fPeer.fCandidateRoundOffset>=CountPairs then begin
    fPeer.fCandidateRoundOffset:=0;
   end;
-  for Index:=0 to CountThisRound-1 do begin
-   if fPeer.SendPacketToAddress(fPeer.fCandidateAddresses[(fPeer.fCandidateRoundOffset+Index) mod CountCandidates],
-                                fHandshakePacket,
-                                PacketSize)<>RNL_NETWORK_SEND_RESULT_ERROR then begin
-    result:=true;
+
+  Sent:=0;
+  Scanned:=0;
+  Position:=fPeer.fCandidateRoundOffset;
+
+  while (Sent<CountThisRound) and (Scanned<CountPairs) do begin
+
+   if Position>=CountPairs then begin
+    Position:=0;
    end;
+
+   CandidateIndex:=Position div CountSockets;
+   SocketIndex:=Position mod CountSockets;
+   inc(Position);
+   inc(Scanned);
+
+   // A pair whose socket cannot carry that candidate's address family is no path at all, and it must
+   // not consume a slot of the round either
+   if (fPeer.fHost.fSockets[SocketIndex].Socket<>RNL_SOCKET_NULL) and
+      ((fPeer.fHost.fSockets[SocketIndex].Families and
+        fPeer.fCandidateAddresses[CandidateIndex].GetAddressFamily)<>0) then begin
+    if fPeer.SendPacketToAddressOnSocket(SocketIndex,
+                                         fPeer.fCandidateAddresses[CandidateIndex],
+                                         fHandshakePacket,
+                                         PacketSize)<>RNL_NETWORK_SEND_RESULT_ERROR then begin
+     result:=true;
+    end;
+    inc(Sent);
+   end;
+
   end;
-  inc(fPeer.fCandidateRoundOffset,CountThisRound);
-  if fPeer.fCandidateRoundOffset>=CountCandidates then begin
-   dec(fPeer.fCandidateRoundOffset,CountCandidates);
-  end;
+
+  fPeer.fCandidateRoundOffset:=Position;
  end else begin
   result:=fPeer.SendPacket(fHandshakePacket,PacketSize)<>RNL_NETWORK_SEND_RESULT_ERROR;
  end;
@@ -25224,6 +27536,8 @@ begin
 
  fCandidatesNominated:=false;
 
+ fSocketIndex:=-1;
+
  fCandidateRoundOffset:=0;
 
  fTranscriptBinding:=false;
@@ -27102,12 +29416,22 @@ begin
 end;
 
 function TRNLPeer.SendPacketToAddress(const aAddress:TRNLAddress;const aData;const aDataLength:TRNLSizeUInt):TRNLNetworkSendResult;
+begin
+ // Over this peer's own socket, which for a peer that never nominated anything is still "whichever
+ // serves the family"
+ result:=SendPacketToAddressOnSocket(fSocketIndex,aAddress,aData,aDataLength);
+end;
+
+function TRNLPeer.SendPacketToAddressOnSocket(const aSocketIndex:TRNLSizeInt;
+                                              const aAddress:TRNLAddress;
+                                              const aData;
+                                              const aDataLength:TRNLSizeUInt):TRNLNetworkSendResult;
 var DataLength:TRNLSizeUInt;
 begin
  DataLength:=aDataLength shl 3;
  if (DataLength=0) or
     fOutgoingBandwidthRateLimiter.CanProceed(DataLength,fHost.fTime) then begin
-  result:=fHost.SendPacket(aAddress,aData,aDataLength);
+  result:=fHost.SendPacketOnSocket(aSocketIndex,aAddress,aData,aDataLength);
   if result=RNL_NETWORK_SEND_RESULT_OK then begin
    fOutgoingBandwidthRateLimiter.AddAmount(DataLength,fHost.fTime);
    fOutgoingBandwidthRateTracker.AddUnits(DataLength);
@@ -27252,6 +29576,8 @@ begin
  fSockets:=nil;
  fWaitSockets:=nil;
 
+ fReceivedSocketIndex:=-1;
+
  fSalt:=fRandomGenerator.GetUInt64;
 
  TRNLED25519.GeneratePublicPrivateKeyPair(fRandomGenerator,fLongTermPublicKey,fLongTermPrivateKey);
@@ -27304,6 +29630,30 @@ begin
 
  fMaximumCandidatesPerHandshakeRound:=4;
 
+ fSTUNQueries:=nil;
+
+ fSTUNResults:=nil;
+
+ fSTUNQueryTimeout:=500;
+
+ fCountSTUNQueryAttempts:=3;
+
+ fTotalSTUNQueries:=0;
+
+ fTotalAnsweredSTUNQueries:=0;
+
+ fTotalTimedOutSTUNQueries:=0;
+
+ fLocalAddresses:=nil;
+
+ fRelayHostAddresses:=nil;
+
+ // Ten times what a single address gets, which is a guess and no more: how many clients sit
+ // behind one relay is not something this host can know
+ fRateLimiterRelayAddressBurst:=200;
+
+ fRateLimiterRelayAddressPeriod:=1000;
+
  fRateLimiterHostAddressBurst:=20;
 
  fRateLimiterHostAddressPeriod:=1000;
@@ -27347,6 +29697,8 @@ begin
  fTotalRejectedRemoteLongTermPublicKeys:=0;
 
  fTotalRateLimitedConnectionRequests:=0;
+
+ fTotalRelayedConnectionRequests:=0;
 
  fTotalSimultaneousConnectsWon:=0;
 
@@ -27589,21 +29941,52 @@ begin
  fKeepAliveWindowMask:=fKeepAliveWindowSize-1;
 end;
 
-function TRNLHost.SendPacket(const aAddress:TRNLAddress;const aData;const aDataLength:TRNLSizeUInt):TRNLNetworkSendResult;
-var Index:TRNLInt32;
-    Socket:TRNLSocket;
+function TRNLHost.FindSocketForAddressFamily(const aAddress:TRNLAddress):TRNLSizeInt;
+var Index:TRNLSizeInt;
     Family:TRNLInt64;
-    SentLength:TRNLSizeInt;
 begin
- Socket:=RNL_SOCKET_NULL;
+ result:=-1;
  Family:=aAddress.GetAddressFamily;
  for Index:=0 to length(fSockets)-1 do begin
   if (fSockets[Index].Socket<>RNL_SOCKET_NULL) and
      ((fSockets[Index].Families and Family)<>0) then begin
-   Socket:=fSockets[Index].Socket;
-   Family:=fSockets[Index].Family;
-   break;
+   result:=Index;
+   exit;
   end;
+ end;
+end;
+
+function TRNLHost.SendPacket(const aAddress:TRNLAddress;const aData;const aDataLength:TRNLSizeUInt):TRNLNetworkSendResult;
+begin
+ // Whichever socket serves that family. Where the socket matters - because an answer has to leave
+ // where the question came in - the caller says which one through SendPacketOnSocket.
+ result:=SendPacketOnSocket(-1,aAddress,aData,aDataLength);
+end;
+
+function TRNLHost.SendPacketOnSocket(const aSocketIndex:TRNLSizeInt;
+                                     const aAddress:TRNLAddress;
+                                     const aData;
+                                     const aDataLength:TRNLSizeUInt):TRNLNetworkSendResult;
+var Socket:TRNLSocket;
+    Family:TRNLInt64;
+    SentLength:TRNLSizeInt;
+    SocketIndex:TRNLSizeInt;
+begin
+ Socket:=RNL_SOCKET_NULL;
+ Family:=aAddress.GetAddressFamily;
+ SocketIndex:=aSocketIndex;
+ // Minus one, or a socket which cannot carry that family, means falling back to whichever can. That
+ // is what every caller which does not care about the socket passes, and it is also the honest
+ // behaviour for a peer whose socket has gone away since.
+ if (SocketIndex<0) or
+    (SocketIndex>=length(fSockets)) or
+    (fSockets[SocketIndex].Socket=RNL_SOCKET_NULL) or
+    ((fSockets[SocketIndex].Families and Family)=0) then begin
+  SocketIndex:=FindSocketForAddressFamily(aAddress);
+ end;
+ if (SocketIndex>=0) and (SocketIndex<length(fSockets)) then begin
+  Socket:=fSockets[SocketIndex].Socket;
+  Family:=fSockets[SocketIndex].Family;
  end;
  if Socket=RNL_SOCKET_NULL then begin
   result:=RNL_NETWORK_SEND_RESULT_ERROR;
@@ -27708,7 +30091,11 @@ begin
 end;
 
 procedure TRNLHost.Start(const aAddressFamilyWorkMode:TRNLHostAddressFamilyWorkMode=RNL_HOST_ADDRESS_FAMILY_WORK_MODE_IPV4_AND_IPV6);
- function CreateSocket(const aFamily:TRNLInt32;const aIPv4OnIPv6:boolean):TRNLSocket;
+ // aBindAddress is what the socket is bound to. Normally that is fAddress, the one address this host
+ // was configured with; with LocalAddresses filled it is one entry of that list, which is how more
+ // than one socket of the same address family comes about.
+ function CreateSocket(const aFamily:TRNLInt32;const aIPv4OnIPv6:boolean;
+                       const aBindAddress:PRNLAddress):TRNLSocket;
  begin
   result:=fNetwork.SocketCreate(RNL_SOCKET_TYPE_DATAGRAM,aFamily);
   if result<>RNL_SOCKET_NULL then begin
@@ -27724,7 +30111,7 @@ procedure TRNLHost.Start(const aAddressFamilyWorkMode:TRNLHostAddressFamilyWorkM
      end;
     end;
    end;
-   if fNetwork.SocketBind(result,@fAddress,aFamily) then begin
+   if fNetwork.SocketBind(result,aBindAddress,aFamily) then begin
     fNetwork.SocketSetOption(result,RNL_SOCKET_OPTION_NONBLOCK,1);
     fNetwork.SocketSetOption(result,RNL_SOCKET_OPTION_BROADCAST,1);
     fNetwork.SocketSetOption(result,RNL_SOCKET_OPTION_REUSEADDR,1);
@@ -27743,11 +30130,17 @@ procedure TRNLHost.Start(const aAddressFamilyWorkMode:TRNLHostAddressFamilyWorkM
  // Appending rather than writing to a fixed position is the whole point: there is no longer one slot
  // per address family, so more than one socket per family becomes possible, which is what host
  // candidates for NAT traversal need.
- function AddSocket(const aFamily:TRNLInt32;const aDualStack:boolean):boolean;
+ function AddSocket(const aFamily:TRNLInt32;const aDualStack:boolean;
+                    const aBindAddress:PRNLAddress=nil):boolean;
  var Socket:TRNLSocket;
      Count:TRNLSizeInt;
+     BindAddress:PRNLAddress;
  begin
-  Socket:=CreateSocket(aFamily,aDualStack);
+  BindAddress:=aBindAddress;
+  if not assigned(BindAddress) then begin
+   BindAddress:=@fAddress;
+  end;
+  Socket:=CreateSocket(aFamily,aDualStack,BindAddress);
   result:=Socket<>RNL_SOCKET_NULL;
   if result then begin
    Count:=length(fSockets);
@@ -27762,7 +30155,8 @@ procedure TRNLHost.Start(const aAddressFamilyWorkMode:TRNLHostAddressFamilyWorkM
   end;
  end;
 var Index,Families:TRNLInt32;
-    TemporaryAddress:TRNLAddress;
+    AddressIndex:TRNLSizeInt;
+    TemporaryAddress,LocalAddress:TRNLAddress;
     HasIPv4:boolean;
 begin
 
@@ -27786,40 +30180,65 @@ begin
 
  fSockets:=nil;
 
- case aAddressFamilyWorkMode of
-  RNL_HOST_ADDRESS_FAMILY_WORK_MODE_IPV4_ONLY,
-  RNL_HOST_ADDRESS_FAMILY_WORK_MODE_IPV6_ONLY,
-  RNL_HOST_ADDRESS_FAMILY_WORK_MODE_IPV4_AND_IPV6:begin
-   HasIPv4:=false;
-   if (Families and RNL_IPV4)<>0 then begin
-    HasIPv4:=AddSocket(RNL_IPV4,false);
+ // With local addresses named, one socket per named address and nothing else: the whole point of
+ // naming them is to decide which interfaces this host is reachable on, and adding a wildcard socket
+ // next to them would take that decision back. The work mode still filters which families are used,
+ // so an IPv4 only mode simply skips the IPv6 entries.
+ //
+ // Everything after this, from the wait set to the connection tables, is the same either way, which
+ // is why this is a branch here and not a shortcut out of the procedure.
+ if length(fLocalAddresses)>0 then begin
+
+  for AddressIndex:=0 to length(fLocalAddresses)-1 do begin
+   LocalAddress:=fLocalAddresses[AddressIndex];
+   if LocalAddress.Port=0 then begin
+    // Nothing said about the port, so the one this host was configured with. Several sockets on the
+    // same port but different addresses is exactly what per interface binding is.
+    LocalAddress.Port:=fAddress.Port;
    end;
-   if (Families and RNL_IPV6)<>0 then begin
-    // The IPv6 socket only takes IPv4 on as well when there is no IPv4 socket to take it, which is
-    // what the previous version expressed by testing its fixed IPv4 slot for null
-    AddSocket(RNL_IPV6,
-              ((Families and RNL_IPV4)<>0) and
-              (aAddressFamilyWorkMode=RNL_HOST_ADDRESS_FAMILY_WORK_MODE_IPV4_AND_IPV6) and
-              not HasIPv4);
-   end;
-  end;
-  RNL_HOST_ADDRESS_FAMILY_WORK_MODE_IPV4_ON_IPV6:begin
-   if (Families and RNL_IPV6)<>0 then begin
-    AddSocket(RNL_IPV6,(Families and RNL_IPV4)<>0);
+   if (Families and LocalAddress.GetAddressFamily)<>0 then begin
+    AddSocket(LocalAddress.GetAddressFamily,false,@LocalAddress);
    end;
   end;
-  else {RNL_HOST_ADDRESS_FAMILY_WORK_MODE_AUTOMATIC:}begin
-   // One dual stack socket if that can be had, and one socket per family if it cannot
-   if ((Families and RNL_IPV6)=0) or
-      not AddSocket(RNL_IPV6,(Families and RNL_IPV4)<>0) then begin
+
+ end else begin
+
+  case aAddressFamilyWorkMode of
+   RNL_HOST_ADDRESS_FAMILY_WORK_MODE_IPV4_ONLY,
+   RNL_HOST_ADDRESS_FAMILY_WORK_MODE_IPV6_ONLY,
+   RNL_HOST_ADDRESS_FAMILY_WORK_MODE_IPV4_AND_IPV6:begin
+    HasIPv4:=false;
     if (Families and RNL_IPV4)<>0 then begin
-     AddSocket(RNL_IPV4,false);
+     HasIPv4:=AddSocket(RNL_IPV4,false);
     end;
     if (Families and RNL_IPV6)<>0 then begin
-     AddSocket(RNL_IPV6,false);
+     // The IPv6 socket only takes IPv4 on as well when there is no IPv4 socket to take it, which is
+     // what the previous version expressed by testing its fixed IPv4 slot for null
+     AddSocket(RNL_IPV6,
+               ((Families and RNL_IPV4)<>0) and
+               (aAddressFamilyWorkMode=RNL_HOST_ADDRESS_FAMILY_WORK_MODE_IPV4_AND_IPV6) and
+               not HasIPv4);
+    end;
+   end;
+   RNL_HOST_ADDRESS_FAMILY_WORK_MODE_IPV4_ON_IPV6:begin
+    if (Families and RNL_IPV6)<>0 then begin
+     AddSocket(RNL_IPV6,(Families and RNL_IPV4)<>0);
+    end;
+   end;
+   else {RNL_HOST_ADDRESS_FAMILY_WORK_MODE_AUTOMATIC:}begin
+    // One dual stack socket if that can be had, and one socket per family if it cannot
+    if ((Families and RNL_IPV6)=0) or
+       not AddSocket(RNL_IPV6,(Families and RNL_IPV4)<>0) then begin
+     if (Families and RNL_IPV4)<>0 then begin
+      AddSocket(RNL_IPV4,false);
+     end;
+     if (Families and RNL_IPV6)<>0 then begin
+      AddSocket(RNL_IPV6,false);
+     end;
     end;
    end;
   end;
+
  end;
 
  if length(fSockets)=0 then begin
@@ -28060,7 +30479,8 @@ function TRNLHost.DetectNATMappingBehaviour(const aSTUNServers:array of TRNLAddr
                                             out aResult:TRNLNATDetectionResult;
                                             const aTimeoutMilliseconds:TRNLInt64=1000):boolean;
 var SocketIndex,ServerIndex,ChosenSocket,FirstServerIndex:TRNLSizeInt;
-    BoundAddress,OtherMapped:TRNLAddress;
+    BoundAddress,OtherMapped,OtherAddress:TRNLAddress;
+    SawOtherAddress:boolean;
     InterfaceAddresses:TRNLHostAddresses;
     STUNResult:TRNLSTUNResult;
 
@@ -28108,10 +30528,108 @@ var SocketIndex,ServerIndex,ChosenSocket,FirstServerIndex:TRNLSizeInt;
   end;
  end;
 
+ // A binding request which asks the server to answer from somewhere else. RFC 5780 test II and III
+ // are exactly this with different bits set, and the whole information is whether an answer arrives
+ // at all: if it does, the nat let in a sender it had never been written to.
+ //
+ // Written out here rather than routed through TRNLSTUNClient because that one only builds a plain
+ // request, and because what is wanted back is a yes or no rather than an address.
+ function AskWithChangeRequest(const aServerAddress:TRNLAddress;const aChangeFlags:TRNLUInt32;
+                               out aOtherAddress:TRNLAddress;out aSawOtherAddress:boolean):boolean;
+ var Request,Response:TRNLSTUNMessage;
+     Sockets:array[0..0] of TRNLSocket;
+     WaitConditions:TRNLSocketWaitConditions;
+     Buffer:array[0..TRNLSTUNMessage.MaximumSize-1] of TRNLUInt8;
+     ReceivedAddress:TRNLAddress;
+     ReceivedSize:TRNLSizeInt;
+     Deadline:TRNLTime;
+ begin
+
+  result:=false;
+  aSawOtherAddress:=false;
+  FillChar(aOtherAddress,SizeOf(TRNLAddress),#0);
+
+  Sockets[0]:=fSockets[ChosenSocket].Socket;
+
+  Request.InitializeWithFreshTransactionID(RNL_STUN_METHOD_BINDING or RNL_STUN_CLASS_REQUEST,
+                                           fRandomGenerator);
+  if aChangeFlags<>0 then begin
+   Request.AddUInt32Attribute(RNL_STUN_ATTRIBUTE_CHANGE_REQUEST,aChangeFlags);
+  end;
+  Request.AddFingerprint;
+
+  if not Request.Valid then begin
+   exit;
+  end;
+
+  if fNetwork.Send(fSockets[ChosenSocket].Socket,
+                   @aServerAddress,
+                   PRNLUInt8Array(Request.DataPointer)^[0],
+                   Request.Size,
+                   fSockets[ChosenSocket].Family)<>Request.Size then begin
+   exit;
+  end;
+
+  Deadline:=fInstance.Time+aTimeoutMilliseconds;
+
+  repeat
+   WaitConditions:=[RNL_SOCKET_WAIT_CONDITION_IO_RECEIVE];
+   if not fNetwork.SocketWait(Sockets,WaitConditions,
+                              Max(0,TRNLTime.RelativeDifference(Deadline,fInstance.Time)),
+                              nil) then begin
+    break;
+   end;
+   if RNL_SOCKET_WAIT_CONDITION_IO_RECEIVE in WaitConditions then begin
+    ReceivedSize:=fNetwork.Receive(fSockets[ChosenSocket].Socket,@ReceivedAddress,
+                                   Buffer,SizeOf(Buffer),fSockets[ChosenSocket].Family);
+    if (ReceivedSize>0) and
+       Response.Assign(Buffer,ReceivedSize) and
+       Response.HasSameTransactionID(Request.TransactionID) and
+       (Response.MessageClass=RNL_STUN_CLASS_SUCCESS_RESPONSE) then begin
+     // OTHER-ADDRESS is the server saying that it has a second address to answer from, which is what
+     // makes any of this determinable in the first place
+     aSawOtherAddress:=Response.ReadAddressAttribute(RNL_STUN_ATTRIBUTE_OTHER_ADDRESS,aOtherAddress);
+     result:=true;
+     exit;
+    end;
+   end;
+  until fInstance.Time>=Deadline;
+
+ end;
+
+ // RFC 5780 section 4.4 and 4.5. Only ever reached with a server which offered OTHER-ADDRESS.
+ procedure DetermineFilteringBehaviour(const aServerAddress:TRNLAddress);
+ var OtherAddress:TRNLAddress;
+     SawOtherAddress:boolean;
+ begin
+
+  // Test II: answer from another address and another port. Arriving means the nat lets in whoever it
+  // likes once the inside has written anywhere at all.
+  if AskWithChangeRequest(aServerAddress,
+                          RNL_STUN_CHANGE_REQUEST_IP or RNL_STUN_CHANGE_REQUEST_PORT,
+                          OtherAddress,SawOtherAddress) then begin
+   aResult.FilteringBehaviour:=RNL_NAT_FILTERING_BEHAVIOUR_ENDPOINT_INDEPENDENT;
+   exit;
+  end;
+
+  // Test III: same address, another port. Arriving means the address is what the filter goes by and
+  // the port is not; not arriving means both are.
+  if AskWithChangeRequest(aServerAddress,
+                          RNL_STUN_CHANGE_REQUEST_PORT,
+                          OtherAddress,SawOtherAddress) then begin
+   aResult.FilteringBehaviour:=RNL_NAT_FILTERING_BEHAVIOUR_ADDRESS_DEPENDENT;
+  end else begin
+   aResult.FilteringBehaviour:=RNL_NAT_FILTERING_BEHAVIOUR_ADDRESS_AND_PORT_DEPENDENT;
+  end;
+
+ end;
+
 begin
 
  FillChar(aResult,SizeOf(TRNLNATDetectionResult),#0);
  aResult.Behaviour:=RNL_NAT_MAPPING_BEHAVIOUR_UNKNOWN;
+ aResult.FilteringBehaviour:=RNL_NAT_FILTERING_BEHAVIOUR_UNKNOWN;
+ aResult.SupportsRFC5780:=false;
  aResult.SocketIndex:=-1;
  result:=false;
 
@@ -28164,7 +30682,18 @@ begin
 
  if IsOwnAddress(aResult.MappedAddress) then begin
   aResult.Behaviour:=RNL_NAT_MAPPING_BEHAVIOUR_NONE;
+  // No nat in the way, so nothing filters and there is nothing to probe for
+  aResult.FilteringBehaviour:=RNL_NAT_FILTERING_BEHAVIOUR_ENDPOINT_INDEPENDENT;
   exit;
+ end;
+
+ // Whether this server can answer from somewhere else, and if it can, what the nat lets in. Asked
+ // before the mapping questions below, because a plain request is what carries OTHER-ADDRESS and one
+ // has just gone out anyway.
+ if AskWithChangeRequest(aSTUNServers[FirstServerIndex],0,OtherAddress,SawOtherAddress) and
+    SawOtherAddress then begin
+  aResult.SupportsRFC5780:=true;
+  DetermineFilteringBehaviour(aSTUNServers[FirstServerIndex]);
  end;
 
  // A server on another host. Only a different host answers the question; a different port of the
@@ -28290,6 +30819,226 @@ begin
     result:=Peer;
     exit;
    end;
+  end;
+ end;
+end;
+
+function TRNLHost.BeginSTUNQuery(const aServerAddress:TRNLAddress;const aSocketIndex:TRNLSizeInt=0):boolean;
+var Index,Free_,Count:TRNLSizeInt;
+    Query:PRNLHostSTUNQuery;
+    Message_:TRNLSTUNMessage;
+begin
+
+ result:=false;
+
+ if (aSocketIndex<0) or
+    (aSocketIndex>=length(fSockets)) or
+    (fSockets[aSocketIndex].Socket=RNL_SOCKET_NULL) then begin
+  exit;
+ end;
+
+ Free_:=-1;
+ for Index:=0 to length(fSTUNQueries)-1 do begin
+  if not fSTUNQueries[Index].Used then begin
+   Free_:=Index;
+   break;
+  end;
+ end;
+ if Free_<0 then begin
+  Count:=length(fSTUNQueries);
+  SetLength(fSTUNQueries,Count+1);
+  Free_:=Count;
+ end;
+
+ Query:=@fSTUNQueries[Free_];
+ Query^.Used:=true;
+ Query^.SocketIndex:=aSocketIndex;
+ Query^.ServerAddress:=aServerAddress;
+ Query^.StartTime:=fInstance.Time;
+ Query^.Deadline:=Query^.StartTime+fSTUNQueryTimeout;
+ Query^.CountAttempts:=1;
+
+ Message_.InitializeWithFreshTransactionID(RNL_STUN_METHOD_BINDING or RNL_STUN_CLASS_REQUEST,
+                                           fRandomGenerator);
+ Message_.AddFingerprint;
+ Query^.TransactionID:=Message_.TransactionID;
+
+ if SendPacketOnSocket(aSocketIndex,aServerAddress,
+                       PRNLUInt8Array(Message_.DataPointer)^[0],
+                       Message_.Size)=RNL_NETWORK_SEND_RESULT_ERROR then begin
+  Query^.Used:=false;
+  exit;
+ end;
+
+ inc(fTotalSTUNQueries);
+ result:=true;
+
+end;
+
+function TRNLHost.TakeSTUNResult(out aResult:TRNLHostSTUNResult):boolean;
+var Index:TRNLSizeInt;
+begin
+ FillChar(aResult,SizeOf(TRNLHostSTUNResult),#0);
+ result:=length(fSTUNResults)>0;
+ if result then begin
+  aResult:=fSTUNResults[0];
+  for Index:=1 to length(fSTUNResults)-1 do begin
+   fSTUNResults[Index-1]:=fSTUNResults[Index];
+  end;
+  SetLength(fSTUNResults,length(fSTUNResults)-1);
+ end;
+end;
+
+function TRNLHost.CountPendingSTUNQueries:TRNLSizeInt;
+var Index:TRNLSizeInt;
+begin
+ result:=0;
+ for Index:=0 to length(fSTUNQueries)-1 do begin
+  if fSTUNQueries[Index].Used then begin
+   inc(result);
+  end;
+ end;
+end;
+
+procedure TRNLHost.DispatchSTUNQueries;
+var Index,Count:TRNLSizeInt;
+    Query:PRNLHostSTUNQuery;
+    Message_:TRNLSTUNMessage;
+begin
+ for Index:=0 to length(fSTUNQueries)-1 do begin
+  Query:=@fSTUNQueries[Index];
+  if Query^.Used and (fTime>=Query^.Deadline) then begin
+   if Query^.CountAttempts>=fCountSTUNQueryAttempts then begin
+    // Out of attempts. The application is told that this query is over rather than left waiting for
+    // an answer which is not coming.
+    Query^.Used:=false;
+    inc(fTotalTimedOutSTUNQueries);
+    Count:=length(fSTUNResults);
+    SetLength(fSTUNResults,Count+1);
+    FillChar(fSTUNResults[Count],SizeOf(TRNLHostSTUNResult),#0);
+    fSTUNResults[Count].Success:=false;
+    fSTUNResults[Count].SocketIndex:=Query^.SocketIndex;
+    fSTUNResults[Count].ServerAddress:=Query^.ServerAddress;
+   end else begin
+    // The same transaction id again, so a late answer to the earlier attempt still counts as the
+    // answer to this one rather than being thrown away
+    inc(Query^.CountAttempts);
+    Query^.Deadline:=fTime+fSTUNQueryTimeout;
+    Message_.Initialize(RNL_STUN_METHOD_BINDING or RNL_STUN_CLASS_REQUEST,Query^.TransactionID);
+    Message_.AddFingerprint;
+    SendPacketOnSocket(Query^.SocketIndex,Query^.ServerAddress,
+                       PRNLUInt8Array(Message_.DataPointer)^[0],
+                       Message_.Size);
+   end;
+  end;
+ end;
+end;
+
+function TRNLHost.DispatchReceivedSTUNResponse(const aPacketData;const aPacketDataLength:TRNLSizeUInt):boolean;
+var Index,Count:TRNLSizeInt;
+    Query:PRNLHostSTUNQuery;
+    Message_:TRNLSTUNMessage;
+    MappedAddress:TRNLAddress;
+begin
+
+ result:=false;
+
+ // Nothing outstanding means nothing to look at, which is what keeps this from ever touching a
+ // normal packet on a host that does not use it
+ if length(fSTUNQueries)=0 then begin
+  exit;
+ end;
+
+ if (aPacketDataLength<TRNLSizeUInt(TRNLSTUNMessage.HeaderSize)) or
+    ((PRNLUInt8Array(TRNLPointer(@aPacketData))^[0] and $c0)<>0) or
+    (TRNLMemoryAccess.LoadBigEndianUInt32(PRNLUInt8Array(TRNLPointer(@aPacketData))^[4])<>TRNLSTUNMessage.MagicCookie) then begin
+  exit;
+ end;
+
+ if not Message_.Assign(aPacketData,aPacketDataLength) then begin
+  exit;
+ end;
+
+ for Index:=0 to length(fSTUNQueries)-1 do begin
+
+  Query:=@fSTUNQueries[Index];
+
+  if not (Query^.Used and Message_.HasSameTransactionID(Query^.TransactionID)) then begin
+   continue;
+  end;
+
+  // From here on this datagram is ours whatever it says, since only the far side of that transaction
+  // could know the ninety six bits it carries
+  result:=true;
+  Query^.Used:=false;
+
+  if (Message_.MessageClass<>RNL_STUN_CLASS_SUCCESS_RESPONSE) or
+     (Message_.HasAttribute(RNL_STUN_ATTRIBUTE_FINGERPRINT) and not Message_.VerifyFingerprint) then begin
+   MappedAddress:=Query^.ServerAddress;
+   Count:=length(fSTUNResults);
+   SetLength(fSTUNResults,Count+1);
+   FillChar(fSTUNResults[Count],SizeOf(TRNLHostSTUNResult),#0);
+   fSTUNResults[Count].SocketIndex:=Query^.SocketIndex;
+   fSTUNResults[Count].ServerAddress:=Query^.ServerAddress;
+   exit;
+  end;
+
+  Count:=length(fSTUNResults);
+  SetLength(fSTUNResults,Count+1);
+  FillChar(fSTUNResults[Count],SizeOf(TRNLHostSTUNResult),#0);
+  fSTUNResults[Count].SocketIndex:=Query^.SocketIndex;
+  fSTUNResults[Count].ServerAddress:=Query^.ServerAddress;
+  fSTUNResults[Count].RoundTripTime:=TRNLTime.RelativeDifference(fInstance.Time,Query^.StartTime);
+  if Message_.ReadAddressAttribute(RNL_STUN_ATTRIBUTE_XOR_MAPPED_ADDRESS,MappedAddress) or
+     Message_.ReadAddressAttribute(RNL_STUN_ATTRIBUTE_MAPPED_ADDRESS,MappedAddress) then begin
+   fSTUNResults[Count].Success:=true;
+   fSTUNResults[Count].MappedAddress:=MappedAddress;
+   inc(fTotalAnsweredSTUNQueries);
+  end;
+
+  exit;
+
+ end;
+
+end;
+
+procedure TRNLHost.AddLocalAddress(const aAddress:TRNLAddress);
+var Count:TRNLSizeInt;
+begin
+ if length(fSockets)>0 then begin
+  exit;
+ end;
+ Count:=length(fLocalAddresses);
+ SetLength(fLocalAddresses,Count+1);
+ fLocalAddresses[Count]:=aAddress;
+end;
+
+procedure TRNLHost.ClearLocalAddresses;
+begin
+ if length(fSockets)=0 then begin
+  fLocalAddresses:=nil;
+ end;
+end;
+
+procedure TRNLHost.AddRelayHostAddress(const aHost:TRNLHostAddress);
+var Count:TRNLSizeInt;
+begin
+ if IsRelayHostAddress(aHost) then begin
+  exit;
+ end;
+ Count:=length(fRelayHostAddresses);
+ SetLength(fRelayHostAddresses,Count+1);
+ fRelayHostAddresses[Count]:=aHost;
+end;
+
+function TRNLHost.IsRelayHostAddress(const aHost:TRNLHostAddress):boolean;
+var Index:TRNLSizeInt;
+begin
+ result:=false;
+ for Index:=0 to length(fRelayHostAddresses)-1 do begin
+  if fRelayHostAddresses[Index].Equals(aHost) then begin
+   result:=true;
+   exit;
   end;
  end;
 end;
@@ -28428,6 +31177,14 @@ begin
    inc(Ordinal);
   end;
 
+  // A relayed candidate, if there is a relay in front of this network. Always works and always
+  // costs, which is why TRNLCandidateUtils gives it the lowest type preference there is: it is
+  // the one to fall back to, not the one to try first.
+  if fNetwork.GetRelayedAddress(fSockets[SocketIndex].Socket,Candidate) then begin
+   Add(Candidate,RNL_CANDIDATE_KIND_RELAYED,SocketIndex,BoundAddress.Host,EmptyHost,Ordinal);
+   inc(Ordinal);
+  end;
+
   // Server reflexive candidates: what each STUN server sees this socket as. Asked over this very
   // socket, since a mapping belongs to the socket it was created for and one learned over any other
   // would describe a path that does not exist.
@@ -28542,9 +31299,10 @@ begin
 
  AddHandshakePacketChecksum(OutgoingPacket);
 
- SendPacket(fReceivedAddress,
-            OutgoingPacket,
-            SizeOf(TRNLProtocolHandshakePacketConnectionChallengeRequest));
+ SendPacketOnSocket(fReceivedSocketIndex,
+                    fReceivedAddress,
+                    OutgoingPacket,
+                    SizeOf(TRNLProtocolHandshakePacketConnectionChallengeRequest));
 
  aConnectionCandidate^.fState:=RNL_CONNECTION_STATE_CHALLENGING;
 
@@ -28567,6 +31325,8 @@ var ConnectionKnownCandidateHostAddress:PRNLConnectionKnownCandidateHostAddress;
     HostEvent:TRNLHostEvent;
     OwnAttempt:TRNLPeer;
     SimultaneousRemoteSalt:TRNLUInt64;
+    RateLimiterBurst:TRNLInt64;
+    RateLimiterPeriod:TRNLUInt64;
 begin
 
 {$if defined(RNL_DEBUG) and defined(RNL_DEBUG_SECURITY)}
@@ -28640,9 +31400,19 @@ begin
   ConnectionKnownCandidateHostAddress:=fConnectionKnownCandidateHostAddressHashTable^.Find(fReceivedAddress.Host,
                                                                                            true);
   if assigned(ConnectionKnownCandidateHostAddress) then begin
+   // A relay is one address for many clients, so it gets the larger bucket. Everything else keeps
+   // the per address one it has always had.
+   if IsRelayHostAddress(fReceivedAddress.Host) then begin
+    inc(fTotalRelayedConnectionRequests);
+    RateLimiterBurst:=fRateLimiterRelayAddressBurst;
+    RateLimiterPeriod:=fRateLimiterRelayAddressPeriod;
+   end else begin
+    RateLimiterBurst:=fRateLimiterHostAddressBurst;
+    RateLimiterPeriod:=fRateLimiterHostAddressPeriod;
+   end;
    if ConnectionKnownCandidateHostAddress^.RateLimiter.RateLimit(fInstance.Time,
-                                                                 fRateLimiterHostAddressBurst,
-                                                                 fRateLimiterHostAddressPeriod) then begin
+                                                                 RateLimiterBurst,
+                                                                 RateLimiterPeriod) then begin
     inc(fTotalRateLimitedConnectionRequests);
     exit;
    end;
@@ -28674,6 +31444,10 @@ begin
                                           RNL_CONNECTION_STATE_CHALLENGING]) then begin
    exit;
   end;
+
+  // Remembered on the candidate rather than only used from fReceivedSocketIndex, so that the peer
+  // which eventually comes out of this handshake inherits the socket the handshake ran over
+  ConnectionCandidate^.fSocketIndex:=fReceivedSocketIndex;
 
   if assigned(ConnectionCandidate^.fData) then begin
    if TRNLMemory.SecureIsNotEqual(ConnectionCandidate^.fAddress,fReceivedAddress,SizeOf(TRNLAddress)) or
@@ -28784,6 +31558,11 @@ begin
   Peer.fCandidatesNominated:=true;
   Peer.fCandidateAddresses:=nil;
   Peer.fAddress:=fReceivedAddress;
+
+  // Nominating a candidate is nominating a path, and a path is an address together with the socket it
+  // is reached over. The answer arrived on this one, so this is the one the rest of the connection
+  // uses - with several sockets per address family, picking by family again could pick another.
+  Peer.fSocketIndex:=fReceivedSocketIndex;
   Peer.fPointerToAddress:=@Peer.fAddress;
  end;
 
@@ -29020,9 +31799,10 @@ begin
 
   AddHandshakePacketChecksum(OutgoingPacket);
 
-  SendPacket(fReceivedAddress,
-             OutgoingPacket,
-             SizeOf(TRNLProtocolHandshakePacketConnectionAuthenticationRequest));
+  SendPacketOnSocket(fReceivedSocketIndex,
+                     fReceivedAddress,
+                     OutgoingPacket,
+                     SizeOf(TRNLProtocolHandshakePacketConnectionAuthenticationRequest));
 
   ConnectionCandidate^.fState:=RNL_CONNECTION_STATE_AUTHENTICATING;
 
@@ -29233,6 +32013,10 @@ begin
 
   Peer.fAddress:=fReceivedAddress;
 
+  // The socket the request came in on stays this peer's socket. With one socket per family
+  // that is the same one it would have picked anyway; with several it is the only right one.
+  Peer.fSocketIndex:=fReceivedSocketIndex;
+
   Peer.fRemoteMTU:=aConnectionCandidate^.fData^.fMTU;
 
   Peer.fMTU:=Min(Max(Min(fMTU,Peer.fRemoteMTU),RNL_MINIMUM_MTU),RNL_MAXIMUM_MTU);
@@ -29350,9 +32134,10 @@ begin
 
   AddHandshakePacketChecksum(OutgoingPacket);
 
-  SendPacket(fReceivedAddress,
-             OutgoingPacket,
-             SizeOf(TRNLProtocolHandshakePacketConnectionDenialResponse));
+  SendPacketOnSocket(fReceivedSocketIndex,
+                     fReceivedAddress,
+                     OutgoingPacket,
+                     SizeOf(TRNLProtocolHandshakePacketConnectionDenialResponse));
 
   Finalize(aConnectionCandidate^.fData^);
   FillChar(aConnectionCandidate^.fData^,SizeOf(TRNLConnectionCandidateData),#0);
@@ -29896,6 +32681,13 @@ begin
 
   DispatchReceivedHandshakePacketData(aPacketData,aPacketDataLength);
 
+ end else if DispatchReceivedSTUNResponse(aPacketData,aPacketDataLength) then begin
+
+  // The answer to a binding request this host asked itself. Ahead of the normal packet branch,
+  // because a STUN response carries no RNL header and would otherwise be handed to a peer lookup
+  // that cannot make sense of it - and behind the handshake branch, because a handshake packet is
+  // recognised by four bytes that a STUN message cannot have.
+
  end else if aPacketDataLength>=SizeOf(TRNLProtocolNormalPacketHeader) then begin
 
   DispatchReceivedNormalPacketData(aPacketData,aPacketDataLength);
@@ -29974,6 +32766,10 @@ begin
     end else if fReceivedBufferLength>0 then begin
 
      HadReceived:=true;
+
+     // Remembered before the dispatch, not after: everything downstream that answers has to know
+     // which socket to answer on
+     fReceivedSocketIndex:=Index;
 
      DispatchReceivedPacketData(fReceiveBuffer,fReceivedBufferLength);
 
@@ -30144,6 +32940,10 @@ begin
 
    fPeerLock.Acquire;
    try
+
+    // Before the peers, so that a binding request which has run out of patience gives up in the same
+    // iteration in which its deadline passed rather than one later
+    DispatchSTUNQueries;
 
     NextTimeout:=Timeout;
 
@@ -30447,197 +33247,625 @@ begin
 
 end;
 
-class procedure TRNLSTUNClient.BuildBindingRequest(out aRequest:TRNLSTUNRequest;
-                                                   const aTransactionID:TRNLSTUNTransactionID);
-var Fingerprint:TRNLUInt32;
+function TRNLSTUNMessage.GetDataPointer:TRNLPointer;
 begin
-
- TRNLMemoryAccess.StoreBigEndianUInt16(aRequest[0],MessageTypeBindingRequest);
-
- // The length counts the attributes only, and RFC 5389 wants it to already include the FINGERPRINT
- // attribute at the point where the fingerprint itself is computed
- TRNLMemoryAccess.StoreBigEndianUInt16(aRequest[2],FingerprintAttributeSize);
-
- TRNLMemoryAccess.StoreBigEndianUInt32(aRequest[4],MagicCookie);
-
- Move(aTransactionID[0],aRequest[8],TransactionIDSize);
-
- TRNLMemoryAccess.StoreBigEndianUInt16(aRequest[HeaderSize+0],AttributeFingerprint);
- TRNLMemoryAccess.StoreBigEndianUInt16(aRequest[HeaderSize+2],4);
-
- // Over everything up to but excluding the attribute itself, which here is exactly the header
- Fingerprint:=ChecksumCRC32(aRequest[0],HeaderSize) xor FingerprintXORValue;
- TRNLMemoryAccess.StoreBigEndianUInt32(aRequest[HeaderSize+4],Fingerprint);
-
+ result:=@fData[0];
 end;
 
-class function TRNLSTUNClient.ParseBindingResponse(const aMessage;
-                                                   const aMessageSize:TRNLSizeInt;
-                                                   const aTransactionID:TRNLSTUNTransactionID;
-                                                   out aMappedAddress:TRNLAddress):boolean;
-var Data:PRNLUInt8Array;
-    Position,ValuePosition,AttributeSize,PaddedAttributeSize:TRNLSizeInt;
-    AttributeType:TRNLUInt16;
-    MessageLength:TRNLUInt16;
-    Fingerprint:TRNLUInt32;
+procedure TRNLSTUNMessage.SetLengthField(const aExtra:TRNLSizeInt);
+begin
+ TRNLMemoryAccess.StoreBigEndianUInt16(fData[2],TRNLUInt16((fSize-HeaderSize)+aExtra));
+end;
+
+function TRNLSTUNMessage.Reserve(const aValueSize:TRNLSizeInt):TRNLSizeInt;
+var PaddedSize:TRNLSizeInt;
+begin
+ result:=-1;
+ if not fValid then begin
+  exit;
+ end;
+ // Every attribute value is padded to four bytes, and the padding is not counted in its length
+ PaddedSize:=(aValueSize+3) and not TRNLSizeInt(3);
+ if (aValueSize<0) or
+    (aValueSize>$ffff) or
+    ((fSize+AttributeHeaderSize+PaddedSize)>MaximumSize) then begin
+  fValid:=false;
+  exit;
+ end;
+ result:=fSize+AttributeHeaderSize;
+ FillChar(fData[fSize],AttributeHeaderSize+PaddedSize,#0);
+ inc(fSize,AttributeHeaderSize+PaddedSize);
+end;
+
+procedure TRNLSTUNMessage.Initialize(const aMessageType:TRNLUInt16;const aTransactionID:TRNLSTUNTransactionID);
+begin
+ fTransactionID:=aTransactionID;
+ fSize:=HeaderSize;
+ fValid:=true;
+ FillChar(fData[0],HeaderSize,#0);
+ TRNLMemoryAccess.StoreBigEndianUInt16(fData[0],aMessageType);
+ TRNLMemoryAccess.StoreBigEndianUInt32(fData[4],MagicCookie);
+ Move(fTransactionID[0],fData[8],TransactionIDSize);
+ SetLengthField(0);
+end;
+
+procedure TRNLSTUNMessage.InitializeWithFreshTransactionID(const aMessageType:TRNLUInt16;
+                                                           const aRandomGenerator:TRNLRandomGenerator);
+var TransactionID:TRNLSTUNTransactionID;
     Index:TRNLSizeInt;
-    XORMask:array[0..15] of TRNLUInt8;
-    Family:TRNLUInt8;
-    Port:TRNLUInt16;
-    HasAddress,HasXORAddress:boolean;
-    Address,XORAddress:TRNLAddress;
+begin
+ // 96 bits the far side cannot guess, which is what keeps an off path injection from being taken
+ // for the answer
+ for Index:=0 to TransactionIDSize-1 do begin
+  TransactionID[Index]:=TRNLUInt8(aRandomGenerator.GetUInt32 and $ff);
+ end;
+ Initialize(aMessageType,TransactionID);
+end;
+
+function TRNLSTUNMessage.Assign(const aData;const aDataSize:TRNLSizeInt):boolean;
+var MessageLength:TRNLSizeInt;
 begin
 
  result:=false;
- FillChar(aMappedAddress,SizeOf(TRNLAddress),#0);
+ fValid:=false;
+ fSize:=0;
+ FillChar(fTransactionID,SizeOf(TRNLSTUNTransactionID),#0);
 
- if aMessageSize<HeaderSize then begin
+ if (aDataSize<HeaderSize) or (aDataSize>MaximumSize) then begin
   exit;
  end;
 
- Data:=@aMessage;
-
- if TRNLMemoryAccess.LoadBigEndianUInt16(Data^[0])<>MessageTypeBindingSuccessResponse then begin
+ // The two most significant bits of a STUN message are zero, which is what separates it from a
+ // ChannelData frame on the same socket
+ if (PRNLUInt8Array(TRNLPointer(@aData))^[0] and $c0)<>0 then begin
   exit;
  end;
 
- if TRNLMemoryAccess.LoadBigEndianUInt32(Data^[4])<>MagicCookie then begin
+ if TRNLMemoryAccess.LoadBigEndianUInt32(PRNLUInt8Array(TRNLPointer(@aData))^[4])<>MagicCookie then begin
   exit;
  end;
 
- // 96 bits which the far side cannot guess, so this is what keeps an off path injection from being
- // taken for the answer
- if not TRNLMemory.SecureIsEqual(Data^[8],aTransactionID[0],TransactionIDSize) then begin
+ MessageLength:=TRNLMemoryAccess.LoadBigEndianUInt16(PRNLUInt8Array(TRNLPointer(@aData))^[2]);
+
+ // Attributes are always padded to four, so a length which is not a multiple of four, or one which
+ // disagrees with what actually arrived, means this is not a message worth reading
+ if ((MessageLength and 3)<>0) or (MessageLength<>(aDataSize-HeaderSize)) then begin
   exit;
  end;
 
- MessageLength:=TRNLMemoryAccess.LoadBigEndianUInt16(Data^[2]);
+ Move(aData,fData[0],aDataSize);
+ fSize:=aDataSize;
+ Move(fData[8],fTransactionID[0],TransactionIDSize);
+ fValid:=true;
+ result:=true;
 
- // Attributes are always padded to four bytes, so a length which is not a multiple of four, or one
- // which disagrees with what actually arrived, means this is not a message worth reading
- if ((MessageLength and 3)<>0) or
-    (TRNLSizeInt(MessageLength)<>(aMessageSize-HeaderSize)) then begin
+end;
+
+procedure TRNLSTUNMessage.BuildXORMask(out aMask:TRNLSTUNXORMask);
+begin
+ TRNLMemoryAccess.StoreBigEndianUInt32(aMask[0],MagicCookie);
+ Move(fTransactionID[0],aMask[4],TransactionIDSize);
+end;
+
+procedure TRNLSTUNMessage.AddAttribute(const aType:TRNLSTUNAttributeType;const aValue;const aValueSize:TRNLSizeInt);
+var ValuePosition:TRNLSizeInt;
+begin
+ ValuePosition:=Reserve(aValueSize);
+ if ValuePosition<0 then begin
+  exit;
+ end;
+ TRNLMemoryAccess.StoreBigEndianUInt16(fData[ValuePosition-AttributeHeaderSize],aType);
+ TRNLMemoryAccess.StoreBigEndianUInt16(fData[(ValuePosition-AttributeHeaderSize)+2],TRNLUInt16(aValueSize));
+ if aValueSize>0 then begin
+  Move(aValue,fData[ValuePosition],aValueSize);
+ end;
+ SetLengthField(0);
+end;
+
+procedure TRNLSTUNMessage.AddEmptyAttribute(const aType:TRNLSTUNAttributeType);
+begin
+ AddAttribute(aType,TRNLPointer(nil)^,0);
+end;
+
+procedure TRNLSTUNMessage.AddUInt32Attribute(const aType:TRNLSTUNAttributeType;const aValue:TRNLUInt32);
+var Value:array[0..3] of TRNLUInt8;
+begin
+ TRNLMemoryAccess.StoreBigEndianUInt32(Value[0],aValue);
+ AddAttribute(aType,Value,SizeOf(Value));
+end;
+
+procedure TRNLSTUNMessage.AddUInt16Attribute(const aType:TRNLSTUNAttributeType;const aValue:TRNLUInt16);
+var Value:array[0..3] of TRNLUInt8;
+begin
+ // Two bytes of value and two of padding, which is how CHANNEL-NUMBER is defined
+ FillChar(Value,SizeOf(Value),#0);
+ TRNLMemoryAccess.StoreBigEndianUInt16(Value[0],aValue);
+ AddAttribute(aType,Value,SizeOf(Value));
+end;
+
+procedure TRNLSTUNMessage.AddStringAttribute(const aType:TRNLSTUNAttributeType;const aValue:TRNLRawByteString);
+begin
+ if length(aValue)>0 then begin
+  AddAttribute(aType,aValue[1],length(aValue));
+ end else begin
+  AddEmptyAttribute(aType);
+ end;
+end;
+
+procedure TRNLSTUNMessage.AddXORAddressAttribute(const aType:TRNLSTUNAttributeType;const aAddress:TRNLAddress);
+var Value:array[0..19] of TRNLUInt8;
+    Mask:TRNLSTUNXORMask;
+    Index,ValueSize:TRNLSizeInt;
+begin
+ BuildXORMask(Mask);
+ FillChar(Value,SizeOf(Value),#0);
+ TRNLMemoryAccess.StoreBigEndianUInt16(Value[2],aAddress.Port xor TRNLUInt16(MagicCookie shr 16));
+ if (aAddress.GetAddressFamily and RNL_IPV4)<>0 then begin
+  Value[1]:=RNL_STUN_ADDRESS_FAMILY_IPV4;
+  // RNL keeps every address as an IPv4 mapped IPv6 one, so the four bytes sit at the end
+  for Index:=0 to 3 do begin
+   Value[4+Index]:=aAddress.Host.Addr[12+Index] xor Mask[Index];
+  end;
+  ValueSize:=8;
+ end else begin
+  Value[1]:=RNL_STUN_ADDRESS_FAMILY_IPV6;
+  for Index:=0 to 15 do begin
+   Value[4+Index]:=aAddress.Host.Addr[Index] xor Mask[Index];
+  end;
+  ValueSize:=20;
+ end;
+ AddAttribute(aType,Value,ValueSize);
+end;
+
+function TRNLSTUNMessage.ComputeIntegrity(const aAttributeType:TRNLSTUNAttributeType;
+                                          const aKey;const aKeySize:TRNLSizeInt;
+                                          const aOverSize:TRNLSizeInt;
+                                          out aMAC):boolean;
+var Saved:array[0..1] of TRNLUInt8;
+    MACSize:TRNLSizeInt;
+begin
+
+ result:=false;
+
+ if aAttributeType=RNL_STUN_ATTRIBUTE_MESSAGE_INTEGRITY then begin
+{$if defined(RNL_TURN_RFC5389_COMPAT)}
+  MACSize:=SizeOf(TRNLSHA1Hash);
+{$else}
+  exit;
+{$ifend}
+ end else begin
+  MACSize:=SizeOf(TRNLSHA256Hash);
+ end;
+
+ if (aOverSize<HeaderSize) or (aOverSize>fSize) then begin
   exit;
  end;
 
- // The mask for XOR-MAPPED-ADDRESS is the magic cookie followed by the transaction ID, which covers
- // the 16 bytes an IPv6 address needs; an IPv4 address uses the first four
- TRNLMemoryAccess.StoreBigEndianUInt32(XORMask[0],MagicCookie);
- Move(aTransactionID[0],XORMask[4],TransactionIDSize);
+ // The length field has to count the attribute being computed, which is why it is written, used and
+ // then put back rather than left alone
+ Saved[0]:=fData[2];
+ Saved[1]:=fData[3];
+ try
+  TRNLMemoryAccess.StoreBigEndianUInt16(fData[2],
+                                        TRNLUInt16(((aOverSize-HeaderSize)+AttributeHeaderSize)+MACSize));
+{$if defined(RNL_TURN_RFC5389_COMPAT)}
+  if aAttributeType=RNL_STUN_ATTRIBUTE_MESSAGE_INTEGRITY then begin
+   TRNLHMACSHA1.Process(aMAC,aKey,aKeySize,fData[0],aOverSize);
+  end else begin
+   TRNLHMACSHA256.Process(aMAC,aKey,aKeySize,fData[0],aOverSize);
+  end;
+{$else}
+  TRNLHMACSHA256.Process(aMAC,aKey,aKeySize,fData[0],aOverSize);
+{$ifend}
+  result:=true;
+ finally
+  fData[2]:=Saved[0];
+  fData[3]:=Saved[1];
+ end;
 
- HasAddress:=false;
- HasXORAddress:=false;
- FillChar(Address,SizeOf(TRNLAddress),#0);
- FillChar(XORAddress,SizeOf(TRNLAddress),#0);
+end;
+
+{$if defined(RNL_TURN_RFC5389_COMPAT)}
+procedure TRNLSTUNMessage.AddMessageIntegrity(const aKey;const aKeySize:TRNLSizeInt);
+var MAC:TRNLSHA1Hash;
+begin
+ if not (fValid and ComputeIntegrity(RNL_STUN_ATTRIBUTE_MESSAGE_INTEGRITY,aKey,aKeySize,fSize,MAC)) then begin
+  fValid:=false;
+  exit;
+ end;
+ AddAttribute(RNL_STUN_ATTRIBUTE_MESSAGE_INTEGRITY,MAC,SizeOf(TRNLSHA1Hash));
+end;
+{$else}
+procedure TRNLSTUNMessage.AddMessageIntegrity(const aKey;const aKeySize:TRNLSizeInt);
+begin
+ // Without the RFC 5389 compatibility there is no SHA-1 to compute it with
+ fValid:=false;
+end;
+{$ifend}
+
+procedure TRNLSTUNMessage.AddMessageIntegritySHA256(const aKey;const aKeySize:TRNLSizeInt);
+var MAC:TRNLSHA256Hash;
+begin
+ if not (fValid and ComputeIntegrity(RNL_STUN_ATTRIBUTE_MESSAGE_INTEGRITY_SHA256,aKey,aKeySize,fSize,MAC)) then begin
+  fValid:=false;
+  exit;
+ end;
+ AddAttribute(RNL_STUN_ATTRIBUTE_MESSAGE_INTEGRITY_SHA256,MAC,SizeOf(TRNLSHA256Hash));
+end;
+
+procedure TRNLSTUNMessage.AddFingerprint;
+var Saved:array[0..1] of TRNLUInt8;
+    Fingerprint:TRNLUInt32;
+    ValuePosition:TRNLSizeInt;
+begin
+ if not fValid then begin
+  exit;
+ end;
+ Saved[0]:=fData[2];
+ Saved[1]:=fData[3];
+ SetLengthField(AttributeHeaderSize+4);
+ Fingerprint:=ChecksumCRC32(fData[0],fSize) xor FingerprintXORValue;
+ fData[2]:=Saved[0];
+ fData[3]:=Saved[1];
+ ValuePosition:=Reserve(4);
+ if ValuePosition<0 then begin
+  exit;
+ end;
+ TRNLMemoryAccess.StoreBigEndianUInt16(fData[ValuePosition-AttributeHeaderSize],RNL_STUN_ATTRIBUTE_FINGERPRINT);
+ TRNLMemoryAccess.StoreBigEndianUInt16(fData[(ValuePosition-AttributeHeaderSize)+2],4);
+ TRNLMemoryAccess.StoreBigEndianUInt32(fData[ValuePosition],Fingerprint);
+ SetLengthField(0);
+end;
+
+function TRNLSTUNMessage.FindAttribute(const aType:TRNLSTUNAttributeType;
+                                       out aValuePosition,aValueSize:TRNLSizeInt):boolean;
+var Position,ValuePosition,AttributeSize,PaddedAttributeSize:TRNLSizeInt;
+    AttributeType:TRNLUInt16;
+begin
+
+ result:=false;
+ aValuePosition:=0;
+ aValueSize:=0;
+
+ if not fValid then begin
+  exit;
+ end;
 
  Position:=HeaderSize;
- while (Position+AttributeHeaderSize)<=aMessageSize do begin
+ while (Position+AttributeHeaderSize)<=fSize do begin
 
-  AttributeType:=TRNLMemoryAccess.LoadBigEndianUInt16(Data^[Position+0]);
-  AttributeSize:=TRNLMemoryAccess.LoadBigEndianUInt16(Data^[Position+2]);
+  AttributeType:=TRNLMemoryAccess.LoadBigEndianUInt16(fData[Position+0]);
+  AttributeSize:=TRNLMemoryAccess.LoadBigEndianUInt16(fData[Position+2]);
   ValuePosition:=Position+AttributeHeaderSize;
   PaddedAttributeSize:=(AttributeSize+3) and not TRNLSizeInt(3);
 
   // The one check that matters: a length out of a stranger's message must never be believed far
   // enough to read past the end of what arrived
-  if (ValuePosition+PaddedAttributeSize)>aMessageSize then begin
+  if (ValuePosition+PaddedAttributeSize)>fSize then begin
    exit;
   end;
 
-  case AttributeType of
-
-   AttributeFingerprint:begin
-    if AttributeSize<>4 then begin
-     exit;
-    end;
-    // Over everything before the attribute, which is why it has to be the last one
-    Fingerprint:=ChecksumCRC32(Data^[0],Position) xor FingerprintXORValue;
-    if TRNLMemoryAccess.LoadBigEndianUInt32(Data^[ValuePosition])<>Fingerprint then begin
-     exit;
-    end;
-   end;
-
-   AttributeMappedAddress,
-   AttributeXORMappedAddress:begin
-
-    if AttributeSize<4 then begin
-     exit;
-    end;
-
-    Family:=Data^[ValuePosition+1];
-    Port:=TRNLMemoryAccess.LoadBigEndianUInt16(Data^[ValuePosition+2]);
-
-    if AttributeType=AttributeXORMappedAddress then begin
-     Port:=Port xor TRNLUInt16(MagicCookie shr 16);
-    end;
-
-    case Family of
-     AddressFamilyIPV4:begin
-      if AttributeSize<>8 then begin
-       exit;
-      end;
-      // Held as an IPv4 mapped IPv6 address, like every address in RNL, with the four bytes going
-      // where GetAddressFamily expects to find them
-      if AttributeType=AttributeXORMappedAddress then begin
-       XORAddress.Host:=RNL_IPV4MAPPED_PREFIX_INIT;
-       for Index:=0 to 3 do begin
-        XORAddress.Host.Addr[12+Index]:=Data^[ValuePosition+4+Index] xor XORMask[Index];
-       end;
-       XORAddress.Port:=Port;
-       HasXORAddress:=true;
-      end else begin
-       Address.Host:=RNL_IPV4MAPPED_PREFIX_INIT;
-       for Index:=0 to 3 do begin
-        Address.Host.Addr[12+Index]:=Data^[ValuePosition+4+Index];
-       end;
-       Address.Port:=Port;
-       HasAddress:=true;
-      end;
-     end;
-     AddressFamilyIPV6:begin
-      if AttributeSize<>20 then begin
-       exit;
-      end;
-      if AttributeType=AttributeXORMappedAddress then begin
-       for Index:=0 to 15 do begin
-        XORAddress.Host.Addr[Index]:=Data^[ValuePosition+4+Index] xor XORMask[Index];
-       end;
-       XORAddress.Port:=Port;
-       HasXORAddress:=true;
-      end else begin
-       for Index:=0 to 15 do begin
-        Address.Host.Addr[Index]:=Data^[ValuePosition+4+Index];
-       end;
-       Address.Port:=Port;
-       HasAddress:=true;
-      end;
-     end;
-     else begin
-      // An address family nobody has heard of, which is not a reason to throw the message away
-     end;
-    end;
-
-   end;
-
-   else begin
-    // Unknown attributes are skipped, comprehension required ones included. A binding response
-    // carries nothing this client needs beyond the mapped address, so there is nothing it could
-    // fail to comprehend that would matter.
-   end;
-
+  if AttributeType=aType then begin
+   aValuePosition:=ValuePosition;
+   aValueSize:=AttributeSize;
+   result:=true;
+   exit;
   end;
 
   inc(Position,AttributeHeaderSize+PaddedAttributeSize);
 
  end;
 
- // The obfuscated form is the one to trust: it exists because middleboxes used to rewrite anything
- // that looked like an address, and the plain one is only there for servers older than that
- if HasXORAddress then begin
-  aMappedAddress:=XORAddress;
-  result:=true;
- end else if HasAddress then begin
-  aMappedAddress:=Address;
+end;
+
+function TRNLSTUNMessage.HasAttribute(const aType:TRNLSTUNAttributeType):boolean;
+var ValuePosition,ValueSize:TRNLSizeInt;
+begin
+ result:=FindAttribute(aType,ValuePosition,ValueSize);
+end;
+
+function TRNLSTUNMessage.VerifyMessageIntegrity(const aKey;const aKeySize:TRNLSizeInt):boolean;
+{$if defined(RNL_TURN_RFC5389_COMPAT)}
+var ValuePosition,ValueSize:TRNLSizeInt;
+    Expected:TRNLSHA1Hash;
+begin
+ result:=false;
+ if not FindAttribute(RNL_STUN_ATTRIBUTE_MESSAGE_INTEGRITY,ValuePosition,ValueSize) then begin
+  exit;
+ end;
+ if ValueSize<>SizeOf(TRNLSHA1Hash) then begin
+  exit;
+ end;
+ // Over everything before the attribute, which is what the sender computed it over as well
+ if not ComputeIntegrity(RNL_STUN_ATTRIBUTE_MESSAGE_INTEGRITY,aKey,aKeySize,
+                         ValuePosition-AttributeHeaderSize,Expected) then begin
+  exit;
+ end;
+ result:=TRNLMemory.SecureIsEqual(fData[ValuePosition],Expected[0],SizeOf(TRNLSHA1Hash));
+end;
+{$else}
+begin
+ result:=false;
+end;
+{$ifend}
+
+function TRNLSTUNMessage.VerifyMessageIntegritySHA256(const aKey;const aKeySize:TRNLSizeInt):boolean;
+var ValuePosition,ValueSize:TRNLSizeInt;
+    Expected:TRNLSHA256Hash;
+begin
+ result:=false;
+ if not FindAttribute(RNL_STUN_ATTRIBUTE_MESSAGE_INTEGRITY_SHA256,ValuePosition,ValueSize) then begin
+  exit;
+ end;
+ // RFC 8489 allows a truncated one, this does not: nothing RNL talks to has a reason to truncate,
+ // and accepting a short MAC is accepting a weaker one
+ if ValueSize<>SizeOf(TRNLSHA256Hash) then begin
+  exit;
+ end;
+ if not ComputeIntegrity(RNL_STUN_ATTRIBUTE_MESSAGE_INTEGRITY_SHA256,aKey,aKeySize,
+                         ValuePosition-AttributeHeaderSize,Expected) then begin
+  exit;
+ end;
+ result:=TRNLMemory.SecureIsEqual(fData[ValuePosition],Expected[0],SizeOf(TRNLSHA256Hash));
+end;
+
+function TRNLSTUNMessage.VerifyFingerprint:boolean;
+var ValuePosition,ValueSize:TRNLSizeInt;
+    Fingerprint:TRNLUInt32;
+begin
+ result:=false;
+ if not FindAttribute(RNL_STUN_ATTRIBUTE_FINGERPRINT,ValuePosition,ValueSize) then begin
+  exit;
+ end;
+ if ValueSize<>4 then begin
+  exit;
+ end;
+ // Over everything before the attribute, which is why FINGERPRINT has to be the last one
+ Fingerprint:=ChecksumCRC32(fData[0],ValuePosition-AttributeHeaderSize) xor FingerprintXORValue;
+ result:=TRNLMemoryAccess.LoadBigEndianUInt32(fData[ValuePosition])=Fingerprint;
+end;
+
+function TRNLSTUNMessage.ReadUInt32Attribute(const aType:TRNLSTUNAttributeType;out aValue:TRNLUInt32):boolean;
+var ValuePosition,ValueSize:TRNLSizeInt;
+begin
+ aValue:=0;
+ result:=FindAttribute(aType,ValuePosition,ValueSize) and (ValueSize=4);
+ if result then begin
+  aValue:=TRNLMemoryAccess.LoadBigEndianUInt32(fData[ValuePosition]);
+ end;
+end;
+
+function TRNLSTUNMessage.ReadUInt16Attribute(const aType:TRNLSTUNAttributeType;out aValue:TRNLUInt16):boolean;
+var ValuePosition,ValueSize:TRNLSizeInt;
+begin
+ aValue:=0;
+ result:=FindAttribute(aType,ValuePosition,ValueSize) and (ValueSize>=2);
+ if result then begin
+  aValue:=TRNLMemoryAccess.LoadBigEndianUInt16(fData[ValuePosition]);
+ end;
+end;
+
+function TRNLSTUNMessage.ReadStringAttribute(const aType:TRNLSTUNAttributeType;out aValue:TRNLRawByteString):boolean;
+var ValuePosition,ValueSize:TRNLSizeInt;
+begin
+ aValue:='';
+ result:=FindAttribute(aType,ValuePosition,ValueSize);
+ if result and (ValueSize>0) then begin
+  SetLength(aValue,ValueSize);
+  Move(fData[ValuePosition],aValue[1],ValueSize);
+ end;
+end;
+
+function TRNLSTUNMessage.ReadAddressAttribute(const aType:TRNLSTUNAttributeType;out aAddress:TRNLAddress):boolean;
+var ValuePosition,ValueSize,Index:TRNLSizeInt;
+    Mask:TRNLSTUNXORMask;
+    Family:TRNLUInt8;
+    Obfuscated:boolean;
+    Port:TRNLUInt16;
+begin
+
+ result:=false;
+ FillChar(aAddress,SizeOf(TRNLAddress),#0);
+
+ if not FindAttribute(aType,ValuePosition,ValueSize) then begin
+  exit;
+ end;
+
+ if ValueSize<4 then begin
+  exit;
+ end;
+
+ // Only the plain MAPPED-ADDRESS is in the clear; everything with XOR in its name is obfuscated,
+ // which exists because middleboxes used to rewrite anything that looked like an address
+ Obfuscated:=aType<>RNL_STUN_ATTRIBUTE_MAPPED_ADDRESS;
+
+ BuildXORMask(Mask);
+
+ Family:=fData[ValuePosition+1];
+ Port:=TRNLMemoryAccess.LoadBigEndianUInt16(fData[ValuePosition+2]);
+ if Obfuscated then begin
+  Port:=Port xor TRNLUInt16(MagicCookie shr 16);
+ end;
+
+ case Family of
+  RNL_STUN_ADDRESS_FAMILY_IPV4:begin
+   if ValueSize<>8 then begin
+    exit;
+   end;
+   aAddress.Host:=RNL_IPV4MAPPED_PREFIX_INIT;
+   for Index:=0 to 3 do begin
+    if Obfuscated then begin
+     aAddress.Host.Addr[12+Index]:=fData[ValuePosition+4+Index] xor Mask[Index];
+    end else begin
+     aAddress.Host.Addr[12+Index]:=fData[ValuePosition+4+Index];
+    end;
+   end;
+  end;
+  RNL_STUN_ADDRESS_FAMILY_IPV6:begin
+   if ValueSize<>20 then begin
+    exit;
+   end;
+   for Index:=0 to 15 do begin
+    if Obfuscated then begin
+     aAddress.Host.Addr[Index]:=fData[ValuePosition+4+Index] xor Mask[Index];
+    end else begin
+     aAddress.Host.Addr[Index]:=fData[ValuePosition+4+Index];
+    end;
+   end;
+  end;
+  else begin
+   exit;
+  end;
+ end;
+
+ aAddress.Port:=Port;
+ result:=true;
+
+end;
+
+function TRNLSTUNMessage.ReadErrorCode(out aCode:TRNLUInt32;out aReason:TRNLRawByteString):boolean;
+var ValuePosition,ValueSize:TRNLSizeInt;
+begin
+ aCode:=0;
+ aReason:='';
+ result:=FindAttribute(RNL_STUN_ATTRIBUTE_ERROR_CODE,ValuePosition,ValueSize) and (ValueSize>=4);
+ if not result then begin
+  exit;
+ end;
+ // Two reserved bytes, then a class of one digit and a number of two, which together make the
+ // three digit code everybody actually talks about
+ aCode:=(TRNLUInt32(fData[ValuePosition+2] and $07)*100)+TRNLUInt32(fData[ValuePosition+3]);
+ if ValueSize>4 then begin
+  SetLength(aReason,ValueSize-4);
+  Move(fData[ValuePosition+4],aReason[1],ValueSize-4);
+ end;
+end;
+
+function TRNLSTUNMessage.MessageType:TRNLUInt16;
+begin
+ if fSize>=HeaderSize then begin
+  result:=TRNLMemoryAccess.LoadBigEndianUInt16(fData[0]);
+ end else begin
+  result:=0;
+ end;
+end;
+
+function TRNLSTUNMessage.MessageMethod:TRNLUInt16;
+var Value:TRNLUInt16;
+begin
+ // The method is interleaved with the class: bits 0 to 3, 5 to 7 and 9 to 13 of the type field
+ Value:=MessageType;
+ result:=(Value and $000f) or ((Value and $00e0) shr 1) or ((Value and $3e00) shr 2);
+end;
+
+function TRNLSTUNMessage.MessageClass:TRNLUInt16;
+begin
+ result:=MessageType and $0110;
+end;
+
+function TRNLSTUNMessage.HasSameTransactionID(const aTransactionID:TRNLSTUNTransactionID):boolean;
+begin
+ result:=TRNLMemory.SecureIsEqual(fTransactionID[0],aTransactionID[0],TransactionIDSize);
+end;
+
+procedure TRNLTURNCredentials.Clear;
+begin
+ Username:='';
+ Password:='';
+ Realm:='';
+ Nonce:='';
+ FillChar(Key,SizeOf(TRNLTURNKey),#0);
+ KeySize:=0;
+ UseSHA256:=false;
+end;
+
+procedure TRNLTURNCredentials.DeriveKey;
+var Material:TRNLRawByteString;
+begin
+ FillChar(Key,SizeOf(TRNLTURNKey),#0);
+ KeySize:=0;
+ if length(Realm)=0 then begin
+  // Short term credentials, where the password is the key as it stands. RFC 8489 section 9.1.
+  if length(Password)>0 then begin
+   KeySize:=length(Password);
+   if KeySize>SizeOf(TRNLTURNKey) then begin
+    KeySize:=SizeOf(TRNLTURNKey);
+   end;
+   Move(Password[1],Key[0],KeySize);
+  end;
+  exit;
+ end;
+ // Long term credentials. RFC 8489 section 18.5.1: the key is a digest over the three fields with
+ // colons between them, and which digest depends on what the server said it wants.
+ Material:=Username+':'+Realm+':'+Password;
+ if UseSHA256 then begin
+  TRNLSHA256.Process(Key,Material[1],length(Material));
+  KeySize:=SizeOf(TRNLSHA256Hash);
+ end else begin
+{$if defined(RNL_TURN_RFC5389_COMPAT)}
+  TRNLMD5.Process(Key,Material[1],length(Material));
+  KeySize:=SizeOf(TRNLMD5Hash);
+{$else}
+  // No MD5 to derive it with, so there is no long term key of the older shape either
+  KeySize:=0;
+{$ifend}
+ end;
+end;
+
+function TRNLTURNCredentials.HasRealm:boolean;
+begin
+ result:=length(Realm)>0;
+end;
+
+class procedure TRNLSTUNClient.BuildBindingRequest(out aRequest:TRNLSTUNRequest;
+                                                   const aTransactionID:TRNLSTUNTransactionID);
+var Message_:TRNLSTUNMessage;
+begin
+ // Built through the general message layer rather than by hand, so that there is one implementation
+ // of the wire format and not one per request kind
+ Message_.Initialize(MessageTypeBindingRequest,aTransactionID);
+ Message_.AddFingerprint;
+ // A binding request is header plus fingerprint and nothing else, so it cannot fail to fit
+ Move(PRNLUInt8Array(Message_.DataPointer)^[0],aRequest[0],RequestSize);
+end;
+
+class function TRNLSTUNClient.ParseBindingResponse(const aMessage;
+                                                   const aMessageSize:TRNLSizeInt;
+                                                   const aTransactionID:TRNLSTUNTransactionID;
+                                                   out aMappedAddress:TRNLAddress):boolean;
+var Message_:TRNLSTUNMessage;
+begin
+
+ result:=false;
+ FillChar(aMappedAddress,SizeOf(TRNLAddress),#0);
+
+ // Assign is where a stranger's message is measured against what actually arrived: header too
+ // short, wrong magic cookie, a length field which is not a multiple of four or which disagrees
+ // with the datagram all end here
+ if not Message_.Assign(aMessage,aMessageSize) then begin
+  exit;
+ end;
+
+ if Message_.MessageType<>MessageTypeBindingSuccessResponse then begin
+  exit;
+ end;
+
+ // 96 bits the far side cannot guess, so this is what keeps an off path injection from being taken
+ // for the answer
+ if not Message_.HasSameTransactionID(aTransactionID) then begin
+  exit;
+ end;
+
+ // Present and wrong is a reason to throw the message away; absent is not, since a server older
+ // than RFC 5389 does not send one
+ if Message_.HasAttribute(RNL_STUN_ATTRIBUTE_FINGERPRINT) and not Message_.VerifyFingerprint then begin
+  exit;
+ end;
+
+ // The obfuscated form first: it exists because middleboxes used to rewrite anything that looked
+ // like an address, and the plain one is only there for servers older than that
+ if Message_.ReadAddressAttribute(RNL_STUN_ATTRIBUTE_XOR_MAPPED_ADDRESS,aMappedAddress) or
+    Message_.ReadAddressAttribute(RNL_STUN_ATTRIBUTE_MAPPED_ADDRESS,aMappedAddress) then begin
   result:=true;
  end;
 
@@ -31521,13 +34749,15 @@ begin
  Flags:=0;
  OK:=WSARecv(aSocket,LPWSABUF(@Buffer),1,RecvLength,Flags,nil,nil)<>SOCKET_ERROR;
  if OK then begin
-  result:=RecvLength;
+  if RecvLength>0 then begin
+   result:=RecvLength;
+  end else begin
+   // Zero bytes on a stream is not "nothing right now", it is the far side having closed it
+   result:=-1;
+  end;
  end else begin
   case WSAGetLastError of
    WSAEWOULDBLOCK:begin
-    result:=-1;
-   end;
-   WSAECONNRESET:begin
     result:=0;
    end;
    else begin
@@ -31542,12 +34772,15 @@ begin
  if result=SOCKET_ERROR then begin
   case SocketError of
    EsockEWOULDBLOCK:begin
-    result:=-1;
+    result:=0;
    end;
    else begin
     result:=-1;
    end;
   end;
+ end else if result=0 then begin
+  // Zero bytes on a stream is the orderly shutdown of the far side, not an empty read
+  result:=-1;
  end;
 end;
 {$else}
@@ -31556,12 +34789,15 @@ begin
  if result=SOCKET_ERROR then begin
   case GetLastError of
    EWOULDBLOCK:begin
-    result:=-1;
+    result:=0;
    end;
    else begin
     result:=-1;
    end;
   end;
+ end else if result=0 then begin
+  // Zero bytes on a stream is the orderly shutdown of the far side, not an empty read
+  result:=-1;
  end;
 end;
 {$ifend}

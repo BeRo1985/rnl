@@ -29,7 +29,8 @@ uses SysUtils,
      RNLTestNetworkFaultInjector,
      RNLTestHostPair,
      RNLTestSTUNServer,
-     RNLTestNATNetwork;
+     RNLTestNATNetwork,
+     RNLTestTURNServer;
 
 procedure RunRegressionTests;
 
@@ -2995,9 +2996,9 @@ var Watchdog:TRNLTestWatchdog;
      VirtualNetwork:TRNLVirtualNetwork;
      NAT:TRNLTestNATNetwork;
      Network:TRNLNetwork;
-     ServerA,ServerB,ServerC:TRNLTestSTUNServer;
+     BehaviourServer:TRNLTestSTUNBehaviourServer;
      Host:TRNLHost;
-     Inside,Unused:TRNLAddress;
+     Inside:TRNLAddress;
      Servers:array[0..2] of TRNLAddress;
      ExternalHost:TRNLHostAddress;
 
@@ -3035,42 +3036,29 @@ var Watchdog:TRNLTestWatchdog;
       Network:=VirtualNetwork;
      end;
 
-     // The servers report what they actually see, which behind a NAT is the translated address and
-     // in front of one is the sender itself. Nothing else about them differs.
-     FillChar(Unused,SizeOf(TRNLAddress),#0);
-     ServerA:=TRNLTestSTUNServer.Create(Instance,Network,STUN_PORT_A,
-                                        RNL_TEST_STUN_SERVER_REPORTING_SENDER,Unused,
-                                        Servers[0].Host);
+     // One server on two addresses and two ports, which is what RFC 5780 asks of a server that is to
+     // be usable for behaviour discovery - and at the same time exactly the three combinations the
+     // mapping detection needs. It reports what it actually sees, so the translation is visible.
+     BehaviourServer:=TRNLTestSTUNBehaviourServer.Create(Instance,Network,
+                                                         Servers[0].Host,Servers[1].Host,
+                                                         STUN_PORT_A,STUN_PORT_B,
+                                                         true);
      try
-      ServerB:=TRNLTestSTUNServer.Create(Instance,Network,STUN_PORT_A,
-                                         RNL_TEST_STUN_SERVER_REPORTING_SENDER,Unused,
-                                         Servers[1].Host);
+
+      Host:=TRNLHost.Create(Instance,Network);
       try
-       ServerC:=TRNLTestSTUNServer.Create(Instance,Network,STUN_PORT_B,
-                                          RNL_TEST_STUN_SERVER_REPORTING_SENDER,Unused,
-                                          Servers[2].Host);
-       try
+       Host.Address.Host:=Inside.Host;
+       Host.Address.Port:=Inside.Port;
+       Host.Start(RNL_HOST_ADDRESS_FAMILY_WORK_MODE_IPV4_ONLY);
 
-        Host:=TRNLHost.Create(Instance,Network);
-        try
-         Host.Address.Host:=Inside.Host;
-         Host.Address.Port:=Inside.Port;
-         Host.Start(RNL_HOST_ADDRESS_FAMILY_WORK_MODE_IPV4_ONLY);
+       result:=Host.DetectNATMappingBehaviour(Servers,aResult,1000);
 
-         result:=Host.DetectNATMappingBehaviour(Servers,aResult,1000);
-
-        finally
-         FreeAndNil(Host);
-        end;
-
-       finally
-        FreeAndNil(ServerC);
-       end;
       finally
-       FreeAndNil(ServerB);
+       FreeAndNil(Host);
       end;
+
      finally
-      FreeAndNil(ServerA);
+      FreeAndNil(BehaviourServer);
      end;
 
     finally
@@ -3086,10 +3074,30 @@ var Watchdog:TRNLTestWatchdog;
 
  end;
 
+ function FilteringNameOf(const aBehaviour:TRNLNATFilteringBehaviour):TRNLRawByteString;
+ begin
+  case aBehaviour of
+   RNL_NAT_FILTERING_BEHAVIOUR_ENDPOINT_INDEPENDENT:begin
+    result:='endpoint independent';
+   end;
+   RNL_NAT_FILTERING_BEHAVIOUR_ADDRESS_DEPENDENT:begin
+    result:='address dependent';
+   end;
+   RNL_NAT_FILTERING_BEHAVIOUR_ADDRESS_AND_PORT_DEPENDENT:begin
+    result:='address and port dependent';
+   end;
+   else begin
+    result:='unknown';
+   end;
+  end;
+ end;
+
  procedure CheckKind(const aBehindNAT:boolean;
                      const aKind:TRNLTestNATKind;
                      const aExpected:TRNLNATMappingBehaviour;
-                     const aWhat:TRNLRawByteString);
+                     const aExpectedFiltering:TRNLNATFilteringBehaviour;
+                     const aWhat:TRNLRawByteString;
+                     const aExpectRFC5780:boolean=true);
  var DetectionResult:TRNLNATDetectionResult;
  begin
   if not Check(Detect(aBehindNAT,aKind,DetectionResult),aWhat+': a server answers at all') then begin
@@ -3098,10 +3106,19 @@ var Watchdog:TRNLTestWatchdog;
   Info(aWhat+': seen as '+TRNLRawByteString(DetectionResult.MappedAddress.ToString)+
        ' while bound to '+TRNLRawByteString(DetectionResult.LocalAddress.ToString)+
        ', '+TRNLRawByteString(IntToStr(DetectionResult.CountAnsweringServers))+
-       ' server(s) answered, mapping is '+NameOf(DetectionResult.Behaviour));
+       ' server(s) answered, mapping is '+NameOf(DetectionResult.Behaviour)+
+       ', filtering is '+FilteringNameOf(DetectionResult.FilteringBehaviour));
   Check(DetectionResult.Behaviour=aExpected,
         aWhat+': mapping has to come out as '+NameOf(aExpected)+
         ', not as '+NameOf(DetectionResult.Behaviour));
+  // The filtering half needs a server which can answer from somewhere else, so this also asserts that
+  // the client noticed it could. Not asked at all where there is no nat: with the socket seen under
+  // its own address there is nothing filtering, and two probes to establish that would be wasted.
+  Check(DetectionResult.SupportsRFC5780=aExpectRFC5780,
+        aWhat+': whether the other address was probed for has to match what the case calls for');
+  Check(DetectionResult.FilteringBehaviour=aExpectedFiltering,
+        aWhat+': filtering has to come out as '+FilteringNameOf(aExpectedFiltering)+
+        ', not as '+FilteringNameOf(DetectionResult.FilteringBehaviour));
  end;
 
 begin
@@ -3112,21 +3129,27 @@ begin
 
   // No NAT at all: the socket is seen under the address it is bound to, and nothing else in the
   // detection may claim otherwise
-  CheckKind(false,RNL_TEST_NAT_FULL_CONE,RNL_NAT_MAPPING_BEHAVIOUR_NONE,'without a nat');
+  CheckKind(false,RNL_TEST_NAT_FULL_CONE,RNL_NAT_MAPPING_BEHAVIOUR_NONE,
+            RNL_NAT_FILTERING_BEHAVIOUR_ENDPOINT_INDEPENDENT,'without a nat',false);
 
-  // The three restricting kinds differ in what they let back in, not in how they map, so all three
-  // have to come out the same here. That is the point of running all of them.
+  // The three restricting kinds differ in what they let back in, not in how they map, so the mapping
+  // has to come out the same for all three and the filtering has to come out different for each. That
+  // is the whole point of running all of them, and it is what tells the two halves apart.
   CheckKind(true,RNL_TEST_NAT_FULL_CONE,
-            RNL_NAT_MAPPING_BEHAVIOUR_ENDPOINT_INDEPENDENT,'full cone');
+            RNL_NAT_MAPPING_BEHAVIOUR_ENDPOINT_INDEPENDENT,
+            RNL_NAT_FILTERING_BEHAVIOUR_ENDPOINT_INDEPENDENT,'full cone');
   CheckKind(true,RNL_TEST_NAT_ADDRESS_RESTRICTED,
-            RNL_NAT_MAPPING_BEHAVIOUR_ENDPOINT_INDEPENDENT,'address restricted');
+            RNL_NAT_MAPPING_BEHAVIOUR_ENDPOINT_INDEPENDENT,
+            RNL_NAT_FILTERING_BEHAVIOUR_ADDRESS_DEPENDENT,'address restricted');
   CheckKind(true,RNL_TEST_NAT_PORT_RESTRICTED,
-            RNL_NAT_MAPPING_BEHAVIOUR_ENDPOINT_INDEPENDENT,'port restricted');
+            RNL_NAT_MAPPING_BEHAVIOUR_ENDPOINT_INDEPENDENT,
+            RNL_NAT_FILTERING_BEHAVIOUR_ADDRESS_AND_PORT_DEPENDENT,'port restricted');
 
   // The symmetric one hands out a fresh external port per destination host and port, so the third
   // server is what separates it from a merely address dependent one
   CheckKind(true,RNL_TEST_NAT_SYMMETRIC,
-            RNL_NAT_MAPPING_BEHAVIOUR_ADDRESS_AND_PORT_DEPENDENT,'symmetric');
+            RNL_NAT_MAPPING_BEHAVIOUR_ADDRESS_AND_PORT_DEPENDENT,
+            RNL_NAT_FILTERING_BEHAVIOUR_ADDRESS_AND_PORT_DEPENDENT,'symmetric');
 
   // And what all of that is for: saying beforehand whether a direct connection is worth trying
   Check(TRNLNATUtils.PredictHolePunchingViability(RNL_NAT_MAPPING_BEHAVIOUR_ENDPOINT_INDEPENDENT,
@@ -3153,6 +3176,249 @@ begin
                                                   RNL_NAT_MAPPING_BEHAVIOUR_ENDPOINT_INDEPENDENT)=
         RNL_HOLE_PUNCHING_VIABILITY_UNKNOWN,
         'while one unknown side makes the whole prediction unknown');
+
+ finally
+  FreeAndNil(Watchdog);
+  TestEnd;
+ end;
+
+end;
+
+// ---------------------------------------------------------------------------------------
+// One socket per interface, and pairing candidates with all of them
+// ---------------------------------------------------------------------------------------
+
+// A host used to bind one socket per address family, so "which socket does this leave over" had one
+// answer and there was nothing to pair. With one socket per interface there are as many answers as
+// there are interfaces, and two things follow that were not true before.
+//
+// The first is the fan out. A path exists between one local socket and one remote candidate, not
+// between a host and an address, so every combination of the two is worth trying - what ICE calls a
+// candidate pair. A remote candidate reachable only over the second interface is only found by
+// sending to it from there.
+//
+// The second is the answer. A peer whose handshake ran over one socket has to keep using it: with
+// several sockets of the same family, picking one by family again could pick a different one, and the
+// counter side is waiting for the answer on the mapping the question created. That is invisible with
+// one socket per family, which is why it is worth a test of its own.
+//
+// The bystander is what makes the fan out observable: it counts how many distinct source addresses
+// datagrams reached it from, and with two local sockets that has to be two.
+procedure TestOneSocketPerInterfaceIsPairedWithEveryCandidate;
+const FIRST_LOCAL_HOST='127.0.0.1';
+      SECOND_LOCAL_HOST='127.0.0.2';
+      LOCAL_PORT=18600;
+      SERVER_HOST='127.0.0.3';
+      SERVER_PORT=18601;
+      BYSTANDER_HOST='127.0.0.4';
+      BYSTANDER_PORT=18602;
+      BYSTANDER_PROTOCOL_ID=TRNLUInt64($0f0f0f0f0f0f0f0f);
+      MESSAGE_COUNT=4;
+var Watchdog:TRNLTestWatchdog;
+    Instance:TRNLInstance;
+    VirtualNetwork:TRNLVirtualNetwork;
+    FaultInjector:TRNLNetworkFaultInjector;
+    Client,Server,Bystander:TRNLHost;
+    FirstLocal,SecondLocal,ServerAddress,BystanderAddress:TRNLAddress;
+    Candidates:TRNLCandidates;
+    Peer:TRNLPeer;
+    Event:TRNLHostEvent;
+    StartTime:TRNLTime;
+    Index:TRNLSizeInt;
+    Connected:boolean;
+    SeenAtServer:TRNLAddress;
+    CountServerReceived:TRNLSizeInt;
+
+ function AddressOf(const aHost:TRNLRawByteString;const aPort:TRNLUInt16):TRNLAddress;
+ begin
+  FillChar(result,SizeOf(TRNLAddress),#0);
+  VirtualNetwork.AddressSetHost(result,aHost);
+  result.Port:=aPort;
+ end;
+
+ procedure Pump(const aMilliseconds:TRNLInt64);
+ var Until_:TRNLTime;
+ begin
+  Until_:=Instance.Time+aMilliseconds;
+  repeat
+   while Server.Service(Event,0)=RNL_HOST_SERVICE_STATUS_EVENT do begin
+    case Event.Type_ of
+     RNL_HOST_EVENT_TYPE_PEER_CONNECT:begin
+      SeenAtServer:=Event.Peer.Address^;
+     end;
+     RNL_HOST_EVENT_TYPE_PEER_RECEIVE:begin
+      inc(CountServerReceived);
+     end;
+     else begin
+     end;
+    end;
+    Event.Free;
+   end;
+   Event.Free;
+   while Client.Service(Event,0)=RNL_HOST_SERVICE_STATUS_EVENT do begin
+    if Event.Type_=RNL_HOST_EVENT_TYPE_PEER_APPROVAL then begin
+     Connected:=true;
+    end;
+    Event.Free;
+   end;
+   Event.Free;
+   while Bystander.Service(Event,0)=RNL_HOST_SERVICE_STATUS_EVENT do begin
+    Event.Free;
+   end;
+   Event.Free;
+   Sleep(1);
+  until Instance.Time>=Until_;
+ end;
+
+begin
+
+ TestBegin('a host binds one socket per named local address and pairs every candidate with all of them');
+ Watchdog:=TRNLTestWatchdog.Create('socket per interface',120000);
+ try
+
+  Connected:=false;
+  CountServerReceived:=0;
+  Candidates:=nil;
+  FillChar(SeenAtServer,SizeOf(TRNLAddress),#0);
+
+  Instance:=TRNLInstance.Create;
+  try
+   VirtualNetwork:=TRNLVirtualNetwork.Create(Instance);
+   try
+
+    FaultInjector:=TRNLNetworkFaultInjector.Create(Instance,VirtualNetwork);
+    try
+
+    FirstLocal:=AddressOf(FIRST_LOCAL_HOST,LOCAL_PORT);
+    SecondLocal:=AddressOf(SECOND_LOCAL_HOST,LOCAL_PORT);
+    ServerAddress:=AddressOf(SERVER_HOST,SERVER_PORT);
+    BystanderAddress:=AddressOf(BYSTANDER_HOST,BYSTANDER_PORT);
+
+    Server:=TRNLHost.Create(Instance,FaultInjector);
+    try
+
+     Server.Address.Host:=ServerAddress.Host;
+     Server.Address.Port:=SERVER_PORT;
+     Server.Start(RNL_HOST_ADDRESS_FAMILY_WORK_MODE_IPV4_ONLY);
+
+     // Answers nothing, because its protocol id is another one. It is only here to count who wrote
+     // to it and from where.
+     Bystander:=TRNLHost.Create(Instance,FaultInjector);
+     try
+
+      Bystander.Address.Host:=BystanderAddress.Host;
+      Bystander.Address.Port:=BYSTANDER_PORT;
+      Bystander.ProtocolID:=BYSTANDER_PROTOCOL_ID;
+      Bystander.Start(RNL_HOST_ADDRESS_FAMILY_WORK_MODE_IPV4_ONLY);
+
+      // From here on every datagram towards the bystander is noted with the address it left from
+      FaultInjector.ObserveOutgoingSourceAddressesTo(BystanderAddress);
+
+      Client:=TRNLHost.Create(Instance,FaultInjector);
+      try
+
+       // The port comes from the host, the addresses from the list: two sockets, same port, different
+       // addresses, which is what binding per interface amounts to
+       Client.Address.Host:=FirstLocal.Host;
+       Client.Address.Port:=LOCAL_PORT;
+       Client.AddLocalAddress(FirstLocal);
+       Client.AddLocalAddress(SecondLocal);
+       Client.Start(RNL_HOST_ADDRESS_FAMILY_WORK_MODE_IPV4_ONLY);
+
+       if not Check(Client.CountSockets=2,
+                    'two named local addresses have to give two sockets') then begin
+        exit;
+       end;
+
+       // Two candidates: one that answers and one that does not. Four pairs over two sockets, and the
+       // bystander is the one that shows they were all tried.
+       SetLength(Candidates,2);
+       for Index:=0 to 1 do begin
+        FillChar(Candidates[Index],SizeOf(TRNLCandidate),#0);
+        Candidates[Index].Kind:=RNL_CANDIDATE_KIND_HOST;
+        Candidates[Index].Priority:=TRNLCandidateUtils.Priority(RNL_CANDIDATE_KIND_HOST,Index);
+       end;
+       Candidates[0].Address:=BystanderAddress;
+       Candidates[1].Address:=ServerAddress;
+
+       Peer:=Client.ConnectViaCandidates(Candidates);
+       if not Check(assigned(Peer),'the attempt can be started') then begin
+        exit;
+       end;
+       Peer.IncRef;
+       try
+
+        StartTime:=Instance.Time;
+        Event.Initialize;
+        try
+         repeat
+          Pump(10);
+         until Connected or (TRNLTime.RelativeDifference(Instance.Time,StartTime)>=4000);
+
+         if Connected and (Peer.CountChannels>0) then begin
+          for Index:=1 to MESSAGE_COUNT do begin
+           Peer.Channels[0].SendMessageRawByteString(TestMessageText(Index,0));
+          end;
+         end;
+
+         StartTime:=Instance.Time;
+         repeat
+          Pump(10);
+         until (CountServerReceived>=MESSAGE_COUNT) or
+               (TRNLTime.RelativeDifference(Instance.Time,StartTime)>=4000);
+        finally
+         Event.Free;
+        end;
+
+       finally
+        Peer.DecRef;
+       end;
+
+       Info('sockets '+TRNLRawByteString(IntToStr(Client.CountSockets))+
+            ', distinct source addresses at the bystander '+
+            TRNLRawByteString(IntToStr(FaultInjector.CountDistinctObservedSourceAddresses))+
+            ', connected '+TRNLRawByteString(BoolToStr(Connected,true))+
+            ', server saw the client at '+TRNLRawByteString(SeenAtServer.ToString)+
+            ' and got '+TRNLRawByteString(IntToStr(CountServerReceived))+' message(s)');
+
+       // The fan out: both sockets were used towards the candidate that never answers, so the
+       // bystander was written to from two different addresses
+       CheckEqualsInt64(FaultInjector.CountDistinctObservedSourceAddresses,2,
+                        'every local socket has to be paired with every remote candidate, so the '+
+                        'bystander has to have been written to from both of them');
+
+       Check(Connected,'and the candidate which does answer still gets a connection');
+
+       CheckAtLeastInt64(CountServerReceived,MESSAGE_COUNT,
+                         'which then carries payload, so the answer went back out over the socket '+
+                         'the handshake had run over');
+
+       // Whichever of the two the handshake settled on, it is one of them and it stayed
+       Check(SeenAtServer.Host.Equals(FirstLocal.Host) or SeenAtServer.Host.Equals(SecondLocal.Host),
+             'and the server sees the client at one of the two named addresses');
+
+      finally
+       FreeAndNil(Client);
+      end;
+
+     finally
+      FreeAndNil(Bystander);
+     end;
+
+    finally
+     FreeAndNil(Server);
+    end;
+
+    finally
+     FreeAndNil(FaultInjector);
+    end;
+
+   finally
+    FreeAndNil(VirtualNetwork);
+   end;
+  finally
+   FreeAndNil(Instance);
+  end;
 
  finally
   FreeAndNil(Watchdog);
@@ -3508,6 +3774,1431 @@ begin
   CheckSHA1Streaming;
   CheckMD5Streaming;
   CheckHMACKeyLengthBoundary;
+
+ finally
+  FreeAndNil(Watchdog);
+  TestEnd;
+ end;
+
+end;
+
+// ---------------------------------------------------------------------------------------
+// Channel numbers come back
+// ---------------------------------------------------------------------------------------
+
+// A channel replaces the 36 byte Send indication around every datagram with a 4 byte header, and
+// there are sixteen thousand numbers to hand out. That sounds like plenty until an allocation lives
+// for days and cycles through peers: without ever letting one go, a long lived client runs out and
+// silently falls back to the expensive framing for the rest of its life. Refreshing a binding towards
+// a peer nobody talks to any more also costs a request every five minutes for nothing.
+//
+// So a channel which has carried nothing for a while is let go of, and its number comes back - but
+// not immediately. RFC 8656 section 12 wants the old binding to have expired at the server plus five
+// minutes on top before the same number may mean a different peer, so that a datagram still in flight
+// cannot be delivered to the wrong one.
+//
+// Driven straight through TRNLTURNNetwork rather than through a TRNLHost, because what is under test
+// is the bookkeeping and not a connection. The two timeouts are settable for exactly this reason.
+procedure TestTURNChannelNumbersAreReleasedAndReused;
+const TURN_HOST='203.0.113.8';
+      TURN_PORT=3481;
+      RELAYED_HOST='198.51.100.40';
+      PEER_A_HOST='127.0.0.1';
+      PEER_A_PORT=18590;
+      PEER_B_HOST='127.0.0.2';
+      PEER_B_PORT=18591;
+      PEER_C_HOST='127.0.0.3';
+      PEER_C_PORT=18593;
+      CLIENT_HOST='127.0.0.1';
+      CLIENT_PORT=18592;
+      TURN_USERNAME='rnl';
+      TURN_PASSWORD='secret';
+      IDLE_TIMEOUT=300;
+      REUSE_DELAY=300;
+      PAYLOAD:array[0..3] of TRNLUInt8=($de,$ad,$be,$ef);
+var Watchdog:TRNLTestWatchdog;
+    Instance:TRNLInstance;
+    VirtualNetwork:TRNLVirtualNetwork;
+    TURNNetwork:TRNLTURNNetwork;
+    TURNServer:TRNLTestTURNServer;
+    ClientSocket,PeerASocket,PeerBSocket,PeerCSocket:TRNLSocket;
+    ClientAddress,PeerAAddress,PeerBAddress,PeerCAddress,TURNAddress,ReceivedAddress:TRNLAddress;
+    RelayedHost:TRNLHostAddress;
+    Buffer:array[0..2047] of TRNLUInt8;
+    StartTime:TRNLTime;
+    Index:TRNLSizeInt;
+    FirstNumber,DuringDelayNumber,AfterDelayNumber:TRNLUInt16;
+
+ function AddressOf(const aHost:TRNLRawByteString;const aPort:TRNLUInt16):TRNLAddress;
+ begin
+  FillChar(result,SizeOf(TRNLAddress),#0);
+  VirtualNetwork.AddressSetHost(result,aHost);
+  result.Port:=aPort;
+ end;
+
+ function BindPlainSocket(const aAddress:TRNLAddress):TRNLSocket;
+ var Address:TRNLAddress;
+ begin
+  result:=VirtualNetwork.SocketCreate(RNL_SOCKET_TYPE_DATAGRAM,RNL_IPV4);
+  if result<>RNL_SOCKET_NULL then begin
+   Address:=aAddress;
+   VirtualNetwork.SocketSetOption(result,RNL_SOCKET_OPTION_NONBLOCK,1);
+   if not VirtualNetwork.SocketBind(result,@Address,RNL_IPV4) then begin
+    VirtualNetwork.SocketDestroy(result);
+    result:=RNL_SOCKET_NULL;
+   end;
+  end;
+ end;
+
+ // Keeps the relay network turning, which is what drives its timers, and throws away whatever comes
+ // back: none of it is what this test looks at.
+ procedure Pump(const aMilliseconds:TRNLInt64);
+ var Until_:TRNLTime;
+ begin
+  Until_:=Instance.Time+aMilliseconds;
+  repeat
+   TURNNetwork.Receive(ClientSocket,@ReceivedAddress,Buffer,SizeOf(Buffer),RNL_IPV4);
+   VirtualNetwork.Receive(PeerASocket,@ReceivedAddress,Buffer,SizeOf(Buffer),RNL_IPV4);
+   VirtualNetwork.Receive(PeerBSocket,@ReceivedAddress,Buffer,SizeOf(Buffer),RNL_IPV4);
+   VirtualNetwork.Receive(PeerCSocket,@ReceivedAddress,Buffer,SizeOf(Buffer),RNL_IPV4);
+   Sleep(1);
+  until Instance.Time>=Until_;
+ end;
+
+ // The number of the one channel which is currently bound, or zero if there is none
+ function CurrentChannelNumber:TRNLUInt16;
+ var Index:TRNLSizeInt;
+     Allocation:TRNLTURNAllocation;
+ begin
+  result:=0;
+  Allocation:=TURNNetwork.AllocationOf(ClientSocket);
+  if assigned(Allocation) then begin
+   for Index:=0 to Allocation.CountChannels-1 do begin
+    if Allocation.ChannelInUse(Index) and Allocation.ChannelConfirmed(Index) then begin
+     result:=Allocation.ChannelNumber(Index);
+    end;
+   end;
+  end;
+ end;
+
+begin
+
+ TestBegin('a turn channel is let go of when it goes quiet and its number comes back');
+ Watchdog:=TRNLTestWatchdog.Create('turn channel reuse',120000);
+ try
+
+  FirstNumber:=0;
+  DuringDelayNumber:=0;
+  AfterDelayNumber:=0;
+
+  Instance:=TRNLInstance.Create;
+  try
+   VirtualNetwork:=TRNLVirtualNetwork.Create(Instance);
+   try
+
+    ClientAddress:=AddressOf(CLIENT_HOST,CLIENT_PORT);
+    PeerAAddress:=AddressOf(PEER_A_HOST,PEER_A_PORT);
+    PeerBAddress:=AddressOf(PEER_B_HOST,PEER_B_PORT);
+    PeerCAddress:=AddressOf(PEER_C_HOST,PEER_C_PORT);
+    TURNAddress:=AddressOf(TURN_HOST,TURN_PORT);
+    RelayedHost:=AddressOf(RELAYED_HOST,0).Host;
+
+    TURNServer:=TRNLTestTURNServer.Create(Instance,VirtualNetwork,TURN_PORT,
+                                          RNL_TEST_TURN_SERVER_CORRECT,
+                                          TURNAddress.Host,RelayedHost,
+                                          TURN_USERNAME,TURN_PASSWORD);
+    try
+
+     PeerASocket:=BindPlainSocket(PeerAAddress);
+     PeerBSocket:=BindPlainSocket(PeerBAddress);
+     PeerCSocket:=BindPlainSocket(PeerCAddress);
+     try
+
+      if not Check((PeerASocket<>RNL_SOCKET_NULL) and
+                   (PeerBSocket<>RNL_SOCKET_NULL) and
+                   (PeerCSocket<>RNL_SOCKET_NULL),
+                   'every peer needs a socket for the relay to have somewhere to forward to') then begin
+       exit;
+      end;
+
+      TURNNetwork:=TRNLTURNNetwork.Create(Instance,VirtualNetwork,TURNAddress,
+                                          TURN_USERNAME,TURN_PASSWORD);
+      try
+
+       TURNNetwork.ChannelIdleTimeout:=IDLE_TIMEOUT;
+       TURNNetwork.ChannelNumberReuseDelay:=REUSE_DELAY;
+
+       ClientSocket:=TURNNetwork.SocketCreate(RNL_SOCKET_TYPE_DATAGRAM,RNL_IPV4);
+       try
+
+        TURNNetwork.SocketSetOption(ClientSocket,RNL_SOCKET_OPTION_NONBLOCK,1);
+        if not Check(TURNNetwork.SocketBind(ClientSocket,@ClientAddress,RNL_IPV4),
+                     'binding through the relay has to work') then begin
+         exit;
+        end;
+
+        if not Check(TURNNetwork.TotalAllocations=1,'and it has to have produced an allocation') then begin
+         exit;
+        end;
+
+        // First peer: this is what asks for the permission and the channel
+        TURNNetwork.Send(ClientSocket,@PeerAAddress,PAYLOAD,SizeOf(PAYLOAD),RNL_IPV4);
+        StartTime:=Instance.Time;
+        repeat
+         Pump(10);
+         TURNNetwork.Send(ClientSocket,@PeerAAddress,PAYLOAD,SizeOf(PAYLOAD),RNL_IPV4);
+        until (TURNNetwork.TotalBoundChannels>=1) or
+              (TRNLTime.RelativeDifference(Instance.Time,StartTime)>=3000);
+
+        FirstNumber:=CurrentChannelNumber;
+
+        if not Check(TURNNetwork.TotalBoundChannels=1,'the first peer has to get a channel') then begin
+         exit;
+        end;
+
+        CheckAtLeastInt64(FirstNumber,RNL_TURN_CHANNEL_NUMBER_FIRST,
+                          'and its number has to be inside the range rfc 8656 reserves for channels');
+
+        // Now nothing is sent at all, so the channel goes quiet and has to be let go of
+        StartTime:=Instance.Time;
+        repeat
+         Pump(10);
+        until (TURNNetwork.TotalReleasedChannels>=1) or
+              (TRNLTime.RelativeDifference(Instance.Time,StartTime)>=3000);
+
+        if not Check(TURNNetwork.TotalReleasedChannels=1,
+                     'a channel which carries nothing has to be let go of rather than refreshed for ever') then begin
+         exit;
+        end;
+
+        Check(CurrentChannelNumber=0,'and nothing may be left bound afterwards');
+
+        // A peer which asks while the delay is still running must get a fresh number, not the one
+        // just given up: a datagram still in flight towards the old peer would otherwise be delivered
+        // to this one
+        TURNNetwork.Send(ClientSocket,@PeerBAddress,PAYLOAD,SizeOf(PAYLOAD),RNL_IPV4);
+        StartTime:=Instance.Time;
+        repeat
+         Pump(5);
+         TURNNetwork.Send(ClientSocket,@PeerBAddress,PAYLOAD,SizeOf(PAYLOAD),RNL_IPV4);
+        until (TURNNetwork.TotalBoundChannels>=2) or
+              (TRNLTime.RelativeDifference(Instance.Time,StartTime)>=1000);
+
+        DuringDelayNumber:=CurrentChannelNumber;
+
+        CheckEqualsInt64(TURNNetwork.TotalReusedChannelNumbers,0,
+                         'the number may not come back before the delay of rfc 8656 section 12 is over');
+
+        Check(DuringDelayNumber<>FirstNumber,
+              'so a peer asking during the delay gets a fresh number');
+
+        // Waiting it out, then a third peer has to be given the recycled one
+        StartTime:=Instance.Time;
+        repeat
+         Pump(10);
+        until (TRNLTime.RelativeDifference(Instance.Time,StartTime)>=(REUSE_DELAY*2));
+
+        StartTime:=Instance.Time;
+        repeat
+         TURNNetwork.Send(ClientSocket,@PeerCAddress,PAYLOAD,SizeOf(PAYLOAD),RNL_IPV4);
+         Pump(5);
+        until (TURNNetwork.TotalReusedChannelNumbers>=1) or
+              (TRNLTime.RelativeDifference(Instance.Time,StartTime)>=2000);
+
+        AfterDelayNumber:=0;
+        for Index:=0 to TURNNetwork.AllocationOf(ClientSocket).CountChannels-1 do begin
+         if TURNNetwork.AllocationOf(ClientSocket).ChannelInUse(Index) and
+            TURNNetwork.AllocationOf(ClientSocket).ChannelPeerAddress(Index).Equals(PeerCAddress) then begin
+          AfterDelayNumber:=TURNNetwork.AllocationOf(ClientSocket).ChannelNumber(Index);
+         end;
+        end;
+
+        Info('first channel '+TRNLRawByteString(IntToStr(FirstNumber))+
+             ', released '+TRNLRawByteString(IntToStr(TURNNetwork.TotalReleasedChannels))+
+             ', during the delay '+TRNLRawByteString(IntToStr(DuringDelayNumber))+
+             ', reused '+TRNLRawByteString(IntToStr(TURNNetwork.TotalReusedChannelNumbers))+
+             ', after it '+TRNLRawByteString(IntToStr(AfterDelayNumber)));
+
+        CheckEqualsInt64(TURNNetwork.TotalReusedChannelNumbers,1,
+                         'once it is over the number has to come back into circulation');
+
+        CheckEqualsInt64(AfterDelayNumber,FirstNumber,
+                         'and the peer asking then has to be given that very number rather than a fresh one');
+
+        CheckEqualsInt64(TURNNetwork.TotalChannelNumbersExhausted,0,
+                         'with nothing having run out along the way');
+
+       finally
+        TURNNetwork.SocketDestroy(ClientSocket);
+       end;
+
+      finally
+       FreeAndNil(TURNNetwork);
+      end;
+
+     finally
+      if PeerASocket<>RNL_SOCKET_NULL then begin
+       VirtualNetwork.SocketDestroy(PeerASocket);
+      end;
+      if PeerBSocket<>RNL_SOCKET_NULL then begin
+       VirtualNetwork.SocketDestroy(PeerBSocket);
+      end;
+      if PeerCSocket<>RNL_SOCKET_NULL then begin
+       VirtualNetwork.SocketDestroy(PeerCSocket);
+      end;
+     end;
+
+    finally
+     FreeAndNil(TURNServer);
+    end;
+
+   finally
+    FreeAndNil(VirtualNetwork);
+   end;
+  finally
+   FreeAndNil(Instance);
+  end;
+
+ finally
+  FreeAndNil(Watchdog);
+  TestEnd;
+ end;
+
+end;
+
+// ---------------------------------------------------------------------------------------
+// The flooding limit behind a relay
+// ---------------------------------------------------------------------------------------
+
+// The per address flooding limit keys on the host address a request arrived from. Behind a relay
+// that address is the same for every client of it, so they all share one bucket - and two things go
+// wrong at once: a single connection spammer locks out every other client of that relay, and the
+// defence can no longer tell an attacker from a neighbour.
+//
+// There is no honest way to tell them apart, and pretending otherwise would be worse: the salt in
+// the request is attacker controlled, so keying on it would make the limit bypassable altogether.
+// What is left is to say so out loud - a declared relay address gets a bucket of its own, sized for
+// many clients rather than for one.
+//
+// The construction is two clients behind one relay against one server, run twice with nothing
+// different but that declaration. Both times the relay hands out two allocations on the same host
+// with different ports, which is exactly what makes them share a bucket.
+procedure TestRelayAddressGetsItsOwnFloodingBudget;
+const TURN_HOST='203.0.113.6';
+      TURN_PORT=3479;
+      RELAYED_HOST='198.51.100.30';
+      SERVER_HOST='127.0.0.1';
+      SERVER_PORT=18570;
+      FIRST_CLIENT_PORT=18571;
+      TURN_USERNAME='rnl';
+      TURN_PASSWORD='secret';
+var Watchdog:TRNLTestWatchdog;
+    CountWithoutDeclaration,CountWithDeclaration:TRNLSizeInt;
+    LimitedWithout,LimitedWith:TRNLUInt64;
+
+ procedure Run(const aDeclareRelay:boolean;
+               out aCountConnected:TRNLSizeInt;
+               out aCountRateLimited:TRNLUInt64);
+ var Instance:TRNLInstance;
+     VirtualNetwork:TRNLVirtualNetwork;
+     TURNNetwork:TRNLTURNNetwork;
+     TURNServer:TRNLTestTURNServer;
+     Server:TRNLHost;
+     Clients:array[0..1] of TRNLHost;
+     Peers:array[0..1] of TRNLPeer;
+     ServerAddress,TURNAddress:TRNLAddress;
+     RelayedHost:TRNLHostAddress;
+     Event:TRNLHostEvent;
+     StartTime:TRNLTime;
+     Index:TRNLSizeInt;
+
+  function AddressOf(const aHost:TRNLRawByteString;const aPort:TRNLUInt16):TRNLAddress;
+  begin
+   FillChar(result,SizeOf(TRNLAddress),#0);
+   VirtualNetwork.AddressSetHost(result,aHost);
+   result.Port:=aPort;
+  end;
+
+ begin
+
+  aCountConnected:=0;
+  aCountRateLimited:=0;
+
+  Instance:=TRNLInstance.Create;
+  try
+   VirtualNetwork:=TRNLVirtualNetwork.Create(Instance);
+   try
+
+    ServerAddress:=AddressOf(SERVER_HOST,SERVER_PORT);
+    TURNAddress:=AddressOf(TURN_HOST,TURN_PORT);
+    RelayedHost:=AddressOf(RELAYED_HOST,0).Host;
+
+    TURNServer:=TRNLTestTURNServer.Create(Instance,VirtualNetwork,TURN_PORT,
+                                          RNL_TEST_TURN_SERVER_CORRECT,
+                                          TURNAddress.Host,RelayedHost,
+                                          TURN_USERNAME,TURN_PASSWORD);
+    try
+
+     Server:=TRNLHost.Create(Instance,VirtualNetwork);
+     try
+
+      Server.Address.Host:=ServerAddress.Host;
+      Server.Address.Port:=SERVER_PORT;
+
+      // One single attempt per address and a period which outlasts the test, so that a budget once
+      // spent stays spent and the second client has nothing left to spend
+      Server.RateLimiterHostAddressBurst:=1;
+      Server.RateLimiterHostAddressPeriod:=60000;
+
+      if aDeclareRelay then begin
+       Server.AddRelayHostAddress(RelayedHost);
+       Server.RateLimiterRelayAddressBurst:=200;
+       Server.RateLimiterRelayAddressPeriod:=60000;
+      end;
+
+      Server.Start(RNL_HOST_ADDRESS_FAMILY_WORK_MODE_IPV4_ONLY);
+
+      TURNNetwork:=TRNLTURNNetwork.Create(Instance,VirtualNetwork,TURNAddress,
+                                          TURN_USERNAME,TURN_PASSWORD);
+      try
+
+       Clients[0]:=nil;
+       Clients[1]:=nil;
+       Peers[0]:=nil;
+       Peers[1]:=nil;
+       try
+
+        // Two clients on the same relay, so two allocations on the same host with different ports
+        for Index:=0 to 1 do begin
+         Clients[Index]:=TRNLHost.Create(Instance,TURNNetwork);
+         Clients[Index].Address.Host:=AddressOf(SERVER_HOST,0).Host;
+         Clients[Index].Address.Port:=FIRST_CLIENT_PORT+Index;
+         Clients[Index].Start(RNL_HOST_ADDRESS_FAMILY_WORK_MODE_IPV4_ONLY);
+        end;
+
+        if not Check(TURNNetwork.TotalAllocations=2,
+                     'both clients have to have got an allocation of their own') then begin
+         exit;
+        end;
+
+        for Index:=0 to 1 do begin
+         Peers[Index]:=Clients[Index].Connect(ServerAddress);
+         if assigned(Peers[Index]) then begin
+          Peers[Index].IncRef;
+         end;
+        end;
+
+        StartTime:=Instance.Time;
+        Event.Initialize;
+        try
+         repeat
+          while Server.Service(Event,0)=RNL_HOST_SERVICE_STATUS_EVENT do begin
+           if Event.Type_=RNL_HOST_EVENT_TYPE_PEER_CONNECT then begin
+            inc(aCountConnected);
+           end;
+           Event.Free;
+          end;
+          Event.Free;
+          for Index:=0 to 1 do begin
+           while Clients[Index].Service(Event,0)=RNL_HOST_SERVICE_STATUS_EVENT do begin
+            Event.Free;
+           end;
+           Event.Free;
+          end;
+          Sleep(1);
+         until (aCountConnected>=2) or
+               (TRNLTime.RelativeDifference(Instance.Time,StartTime)>=5000);
+        finally
+         Event.Free;
+        end;
+
+        aCountRateLimited:=Server.TotalRateLimitedConnectionRequests;
+
+       finally
+        for Index:=0 to 1 do begin
+         if assigned(Peers[Index]) then begin
+          Peers[Index].DecRef;
+         end;
+        end;
+        for Index:=0 to 1 do begin
+         FreeAndNil(Clients[Index]);
+        end;
+       end;
+
+      finally
+       FreeAndNil(TURNNetwork);
+      end;
+
+     finally
+      FreeAndNil(Server);
+     end;
+
+    finally
+     FreeAndNil(TURNServer);
+    end;
+
+   finally
+    FreeAndNil(VirtualNetwork);
+   end;
+  finally
+   FreeAndNil(Instance);
+  end;
+
+ end;
+
+begin
+
+ TestBegin('a declared relay address gets a flooding budget of its own');
+ Watchdog:=TRNLTestWatchdog.Create('relay flooding budget',180000);
+ try
+
+  Run(false,CountWithoutDeclaration,LimitedWithout);
+  Run(true,CountWithDeclaration,LimitedWith);
+
+  Info('without the declaration: '+TRNLRawByteString(IntToStr(CountWithoutDeclaration))+
+       ' of 2 clients connected, '+TRNLRawByteString(IntToStr(LimitedWithout))+
+       ' request(s) turned away as flooding');
+  Info('with it: '+TRNLRawByteString(IntToStr(CountWithDeclaration))+
+       ' of 2 clients connected, '+TRNLRawByteString(IntToStr(LimitedWith))+
+       ' request(s) turned away');
+
+  // The collapse itself: one budget for one address, two clients behind it, so one of them is left
+  // outside through no fault of its own
+  CheckEqualsInt64(CountWithoutDeclaration,1,
+                   'sharing one budget has to leave exactly one of the two clients outside');
+
+  CheckAtLeastInt64(LimitedWithout,1,
+                    'and the other one has to have been turned away as flooding');
+
+  CheckEqualsInt64(CountWithDeclaration,2,
+                   'while a budget of its own lets both of them in');
+
+  CheckEqualsInt64(LimitedWith,0,
+                   'with nothing turned away at all');
+
+ finally
+  FreeAndNil(Watchdog);
+  TestEnd;
+ end;
+
+end;
+
+// ---------------------------------------------------------------------------------------
+// Reaching the relay over a stream
+// ---------------------------------------------------------------------------------------
+
+// A relay exists for the case a direct path cannot be had. The worst of those cases is a network which
+// lets no UDP out at all - and against that, a relay reached over UDP is no help whatsoever. RFC 8656
+// section 3.1 therefore lets the path between client and relay be a stream, while the relayed side
+// stays UDP.
+//
+// Over a stream a datagram is no longer a datagram. It becomes a frame in a byte stream that may
+// arrive in pieces, or two at a time, so it needs a length to be read back by - which is why RFC 8656
+// section 12.5 pads a ChannelData frame to four bytes over a stream where it does not over a datagram.
+// Getting that padding wrong does not lose one frame, it puts the stream out of step and loses
+// everything after it, which is what makes it worth a test of its own.
+//
+// Run against real loopback sockets rather than against TRNLVirtualNetwork, because that one has no
+// streams at all: its SocketListen returns false and its SocketAccept returns nothing. Testing this
+// would mean building TCP into it first; a real socket pair is both cheaper and a better test, since
+// it is a real stack doing the segmenting.
+procedure TestRelayReachedOverAStream;
+const LOOPBACK='127.0.0.1';
+      TURN_UDP_PORT=34780;
+      TURN_TCP_PORT=34781;
+      RELAYED_PORT_BASE=34790;
+      SERVER_PORT=34800;
+      CLIENT_PORT=34801;
+      TURN_USERNAME='rnl';
+      TURN_PASSWORD='secret';
+      MESSAGE_COUNT=8;
+      // Long enough that a stream which segments awkwardly needs more than one read per message
+      MESSAGE_PADDING=900;
+var Watchdog:TRNLTestWatchdog;
+    Instance:TRNLInstance;
+    RealNetwork:TRNLRealNetwork;
+    TURNNetwork:TRNLTURNNetwork;
+    TURNServer:TRNLTestTURNServer;
+    Server,Client:TRNLHost;
+    ServerAddress,TURNAddress,SeenAtServer:TRNLAddress;
+    RelayedHost:TRNLHostAddress;
+    Peer:TRNLPeer;
+    Event:TRNLHostEvent;
+    StartTime:TRNLTime;
+    Index,CountServerReceived,CountClientReceived:TRNLSizeInt;
+    Connected:boolean;
+
+ function AddressOf(const aHost:TRNLRawByteString;const aPort:TRNLUInt16):TRNLAddress;
+ begin
+  FillChar(result,SizeOf(TRNLAddress),#0);
+  RealNetwork.AddressSetHost(result,aHost);
+  result.Port:=aPort;
+ end;
+
+ procedure Pump(const aMilliseconds:TRNLInt64);
+ var Until_:TRNLTime;
+ begin
+  Until_:=Instance.Time+aMilliseconds;
+  repeat
+   while Server.Service(Event,0)=RNL_HOST_SERVICE_STATUS_EVENT do begin
+    case Event.Type_ of
+     RNL_HOST_EVENT_TYPE_PEER_CONNECT:begin
+      SeenAtServer:=Event.Peer.Address^;
+     end;
+     RNL_HOST_EVENT_TYPE_PEER_RECEIVE:begin
+      inc(CountServerReceived);
+      if assigned(Event.Peer) and (Event.Peer.CountChannels>0) then begin
+       Event.Peer.Channels[0].SendMessageRawByteString('pong');
+      end;
+     end;
+     else begin
+     end;
+    end;
+    Event.Free;
+   end;
+   Event.Free;
+   while Client.Service(Event,0)=RNL_HOST_SERVICE_STATUS_EVENT do begin
+    case Event.Type_ of
+     RNL_HOST_EVENT_TYPE_PEER_APPROVAL:begin
+      Connected:=true;
+     end;
+     RNL_HOST_EVENT_TYPE_PEER_RECEIVE:begin
+      inc(CountClientReceived);
+     end;
+     else begin
+     end;
+    end;
+    Event.Free;
+   end;
+   Event.Free;
+   Sleep(1);
+  until Instance.Time>=Until_;
+ end;
+
+begin
+
+ TestBegin('a relay reached over a stream carries a connection');
+ Watchdog:=TRNLTestWatchdog.Create('turn over tcp',180000);
+ try
+
+  Connected:=false;
+  CountServerReceived:=0;
+  CountClientReceived:=0;
+  FillChar(SeenAtServer,SizeOf(TRNLAddress),#0);
+
+  Instance:=TRNLInstance.Create;
+  try
+   RealNetwork:=TRNLRealNetwork.Create(Instance);
+   try
+
+    ServerAddress:=AddressOf(LOOPBACK,SERVER_PORT);
+    TURNAddress:=AddressOf(LOOPBACK,TURN_TCP_PORT);
+    RelayedHost:=AddressOf(LOOPBACK,0).Host;
+
+    // Everything on loopback, so the relayed address is loopback as well. That is fine: what makes
+    // this a relay is that the peer aims at a different port which forwards, not a different machine.
+    TURNServer:=TRNLTestTURNServer.Create(Instance,RealNetwork,TURN_UDP_PORT,
+                                          RNL_TEST_TURN_SERVER_CORRECT,
+                                          RelayedHost,RelayedHost,
+                                          TURN_USERNAME,TURN_PASSWORD,'rnl.test',
+                                          TURN_TCP_PORT);
+    try
+
+     Server:=TRNLHost.Create(Instance,RealNetwork);
+     try
+
+      Server.Address.Host:=ServerAddress.Host;
+      Server.Address.Port:=SERVER_PORT;
+      Server.Start(RNL_HOST_ADDRESS_FAMILY_WORK_MODE_IPV4_ONLY);
+
+      TURNNetwork:=TRNLTURNNetwork.Create(Instance,RealNetwork,TURNAddress,
+                                          TURN_USERNAME,TURN_PASSWORD);
+      try
+
+       // The one thing under test, and it has to be set before the host binds: that is when the
+       // allocation is made and therefore when the stream is opened
+       TURNNetwork.Transport:=RNL_TURN_TRANSPORT_KIND_TCP;
+
+       Client:=TRNLHost.Create(Instance,TURNNetwork);
+       try
+
+        Client.Address.Host:=AddressOf(LOOPBACK,0).Host;
+        Client.Address.Port:=CLIENT_PORT;
+        Client.Start(RNL_HOST_ADDRESS_FAMILY_WORK_MODE_IPV4_ONLY);
+
+        if not Check(TURNNetwork.TotalAllocations=1,
+                     'the allocation has to have been made over the stream') then begin
+         Info('failed allocations: '+TRNLRawByteString(IntToStr(TURNNetwork.TotalFailedAllocations))+
+              ', last rejection '+TRNLRawByteString(IntToStr(TURNNetwork.LastFailedAllocationErrorCode)));
+         exit;
+        end;
+
+        Peer:=Client.Connect(ServerAddress);
+        if not Check(assigned(Peer),'the client can start a connection attempt') then begin
+         exit;
+        end;
+        Peer.IncRef;
+        try
+
+         StartTime:=Instance.Time;
+         Event.Initialize;
+         try
+          repeat
+           Pump(10);
+          until Connected or (TRNLTime.RelativeDifference(Instance.Time,StartTime)>=8000);
+
+          if Connected and (Peer.CountChannels>0) then begin
+           for Index:=1 to MESSAGE_COUNT do begin
+            Peer.Channels[0].SendMessageRawByteString(TestMessageText(Index,MESSAGE_PADDING));
+           end;
+          end;
+
+          StartTime:=Instance.Time;
+          repeat
+           Pump(10);
+          until ((CountServerReceived>=MESSAGE_COUNT) and (CountClientReceived>=MESSAGE_COUNT)) or
+                (TRNLTime.RelativeDifference(Instance.Time,StartTime)>=8000);
+         finally
+          Event.Free;
+         end;
+
+        finally
+         Peer.DecRef;
+        end;
+
+        Info('connected '+TRNLRawByteString(BoolToStr(Connected,true))+
+             ', server saw the client at '+TRNLRawByteString(SeenAtServer.ToString)+
+             ' and got '+TRNLRawByteString(IntToStr(CountServerReceived))+
+             ' of '+TRNLRawByteString(IntToStr(MESSAGE_COUNT))+
+             ' message(s), client got '+TRNLRawByteString(IntToStr(CountClientReceived))+' back');
+        Info('indications '+TRNLRawByteString(IntToStr(TURNNetwork.TotalSendIndications))+
+             ', channels bound '+TRNLRawByteString(IntToStr(TURNNetwork.TotalBoundChannels))+
+             ', channel data out '+TRNLRawByteString(IntToStr(TURNNetwork.TotalChannelDataSent))+
+             ', in '+TRNLRawByteString(IntToStr(TURNNetwork.TotalChannelDataReceived))+
+             ', dropped '+TRNLRawByteString(IntToStr(TURNNetwork.TotalDroppedFromServer)));
+        Info('the relay forwarded '+
+             TRNLRawByteString(IntToStr(TURNServer.Count(RNL_TEST_TURN_COUNT_FORWARDED_TO_PEER)))+
+             ' towards the peer and '+
+             TRNLRawByteString(IntToStr(TURNServer.Count(RNL_TEST_TURN_COUNT_FORWARDED_TO_CLIENT)))+
+             ' back, rejected '+
+             TRNLRawByteString(IntToStr(TURNServer.Count(RNL_TEST_TURN_COUNT_REJECTED_FOR_NO_PERMISSION)))+
+             ' for want of a permission, channel data from the client '+
+             TRNLRawByteString(IntToStr(TURNServer.Count(RNL_TEST_TURN_COUNT_CHANNEL_DATA_FROM_CLIENT))));
+
+        Check(Connected,'the connection has to come up over the stream');
+
+        // Messages of nine hundred bytes and a channel header of four: if the padding were wrong the
+        // stream would go out of step here and nothing after the first message would arrive
+        CheckAtLeastInt64(CountServerReceived,MESSAGE_COUNT,
+                          'and every message has to arrive, which is what shows the framing holds '+
+                          'across a stream that segments where it likes');
+
+        CheckAtLeastInt64(CountClientReceived,MESSAGE_COUNT,
+                          'and every answer has to find its way back the same way');
+
+        CheckEqualsInt64(TURNNetwork.TotalDroppedFromServer,0,
+                         'with nothing thrown away for a length that did not add up');
+
+        // The whole point: the server is talking to the relay, not to the client
+        Check(SeenAtServer.Port<>CLIENT_PORT,
+              'and the server has to see the client at the relayed address rather than at its own');
+
+       finally
+        FreeAndNil(Client);
+       end;
+
+      finally
+       FreeAndNil(TURNNetwork);
+      end;
+
+     finally
+      FreeAndNil(Server);
+     end;
+
+    finally
+     FreeAndNil(TURNServer);
+    end;
+
+   finally
+    FreeAndNil(RealNetwork);
+   end;
+  finally
+   FreeAndNil(Instance);
+  end;
+
+ finally
+  FreeAndNil(Watchdog);
+  TestEnd;
+ end;
+
+end;
+
+// ---------------------------------------------------------------------------------------
+// A connection over a relay
+// ---------------------------------------------------------------------------------------
+
+// The relay is the answer to the case punching cannot beat, so what has to be shown is not that the
+// messages arrive but that they arrive *through* it. The construction makes that unambiguous: the
+// server is on the bare virtual network, the client sits behind TRNLTURNNetwork, and the address the
+// server ends up seeing the client at is the one the relay handed out, not the one the client is
+// bound to. Nothing gets there directly.
+//
+// Four servers, four behaviours. The correct one carries a connection; the one with the stale nonce
+// carries it too, after the retry; the one wanting SHA-256 carries it with the newer integrity
+// method; and the one refusing to allocate has to leave the client with a working socket and no
+// relay rather than with a broken one.
+procedure TestConnectionOverATURNRelay;
+const TURN_HOST='203.0.113.5';
+      TURN_PORT=3478;
+      RELAYED_HOST='198.51.100.20';
+      SERVER_HOST='127.0.0.1';
+      SERVER_PORT=18560;
+      CLIENT_HOST='127.0.0.1';
+      CLIENT_PORT=18561;
+      TURN_USERNAME='rnl';
+      TURN_PASSWORD='secret';
+      MESSAGE_COUNT=4;
+var Watchdog:TRNLTestWatchdog;
+
+ procedure RunAgainst(const aBehaviour:TRNLTestTURNServerBehaviour;
+                      const aWhat:TRNLRawByteString;
+                      const aExpectRelay:boolean;
+                      const aFamilyPolicy:TRNLTURNAddressFamilyPolicy=RNL_TURN_ADDRESS_FAMILY_POLICY_FROM_SOCKET;
+                      const aExpectedFamilyRequests:TRNLSizeInt=0;
+                      const aExpectedRejection:TRNLUInt32=486);
+ var Instance:TRNLInstance;
+     VirtualNetwork:TRNLVirtualNetwork;
+     TURNNetwork:TRNLTURNNetwork;
+     TURNServer:TRNLTestTURNServer;
+     Server,Client:TRNLHost;
+     ServerAddress,ClientAddress,TURNAddress,RelayedAddress,SeenClientAddress:TRNLAddress;
+     RelayedHost:TRNLHostAddress;
+     Peer:TRNLPeer;
+     Event:TRNLHostEvent;
+     StartTime:TRNLTime;
+     Index:TRNLSizeInt;
+     Connected,HasRelayedCandidate:boolean;
+     CountServerReceived,CountClientReceived,CountServerConnects:TRNLSizeInt;
+     ServerPeer:TRNLPeer;
+     Candidates:TRNLCandidates;
+
+  function AddressOf(const aHost:TRNLRawByteString;const aPort:TRNLUInt16):TRNLAddress;
+  begin
+   FillChar(result,SizeOf(TRNLAddress),#0);
+   VirtualNetwork.AddressSetHost(result,aHost);
+   result.Port:=aPort;
+  end;
+
+  procedure PumpServer;
+  begin
+   while Server.Service(Event,0)=RNL_HOST_SERVICE_STATUS_EVENT do begin
+    case Event.Type_ of
+     RNL_HOST_EVENT_TYPE_PEER_CONNECT:begin
+      inc(CountServerConnects);
+      SeenClientAddress:=Event.Peer.Address^;
+      ServerPeer:=Event.Peer;
+     end;
+     RNL_HOST_EVENT_TYPE_PEER_RECEIVE:begin
+      inc(CountServerReceived);
+      // Answered straight away, so the way back through the relay is exercised as well
+      if assigned(Event.Peer) and (Event.Peer.CountChannels>0) then begin
+       Event.Peer.Channels[0].SendMessageRawByteString('pong');
+      end;
+     end;
+     else begin
+     end;
+    end;
+    Event.Free;
+   end;
+   Event.Free;
+  end;
+
+  procedure PumpClient;
+  begin
+   while Client.Service(Event,0)=RNL_HOST_SERVICE_STATUS_EVENT do begin
+    case Event.Type_ of
+     RNL_HOST_EVENT_TYPE_PEER_APPROVAL:begin
+      Connected:=true;
+     end;
+     RNL_HOST_EVENT_TYPE_PEER_RECEIVE:begin
+      inc(CountClientReceived);
+     end;
+     else begin
+     end;
+    end;
+    Event.Free;
+   end;
+   Event.Free;
+  end;
+
+ begin
+
+  Connected:=false;
+  CountServerReceived:=0;
+  CountClientReceived:=0;
+  CountServerConnects:=0;
+  ServerPeer:=nil;
+  Candidates:=nil;
+  HasRelayedCandidate:=false;
+  FillChar(SeenClientAddress,SizeOf(TRNLAddress),#0);
+  FillChar(RelayedAddress,SizeOf(TRNLAddress),#0);
+
+  Instance:=TRNLInstance.Create;
+  try
+   VirtualNetwork:=TRNLVirtualNetwork.Create(Instance);
+   try
+
+    ServerAddress:=AddressOf(SERVER_HOST,SERVER_PORT);
+    ClientAddress:=AddressOf(CLIENT_HOST,CLIENT_PORT);
+    TURNAddress:=AddressOf(TURN_HOST,TURN_PORT);
+    RelayedHost:=AddressOf(RELAYED_HOST,0).Host;
+
+    TURNServer:=TRNLTestTURNServer.Create(Instance,VirtualNetwork,TURN_PORT,aBehaviour,
+                                          TURNAddress.Host,RelayedHost,
+                                          TURN_USERNAME,TURN_PASSWORD);
+    try
+
+     Server:=TRNLHost.Create(Instance,VirtualNetwork);
+     try
+
+      Server.Address.Host:=ServerAddress.Host;
+      Server.Address.Port:=SERVER_PORT;
+      Server.Start(RNL_HOST_ADDRESS_FAMILY_WORK_MODE_IPV4_ONLY);
+
+      TURNNetwork:=TRNLTURNNetwork.Create(Instance,VirtualNetwork,TURNAddress,
+                                          TURN_USERNAME,TURN_PASSWORD);
+      try
+
+       TURNNetwork.RequestedAddressFamily:=aFamilyPolicy;
+
+       Client:=TRNLHost.Create(Instance,TURNNetwork);
+       try
+
+        Client.Address.Host:=ClientAddress.Host;
+        Client.Address.Port:=CLIENT_PORT;
+        // The allocation happens inside this call, which is why it is the one that may take a moment
+        Client.Start(RNL_HOST_ADDRESS_FAMILY_WORK_MODE_IPV4_ONLY);
+
+        if aExpectRelay then begin
+         if not Check(TURNNetwork.TotalAllocations=1,
+                      aWhat+': the relay has to have handed out exactly one allocation') then begin
+          exit;
+         end;
+        end else begin
+         Check(TURNNetwork.TotalFailedAllocations=1,
+               aWhat+': the allocation has to have failed');
+         Check(TURNNetwork.TotalAllocations=0,
+               aWhat+': and none may have been recorded');
+         Info(aWhat+': rejected with '+
+              TRNLRawByteString(IntToStr(TURNNetwork.LastFailedAllocationErrorCode)));
+         CheckEqualsInt64(TURNNetwork.LastFailedAllocationErrorCode,aExpectedRejection,
+                          aWhat+': and the reason has to be recorded rather than only the failure');
+        end;
+
+        // REQUESTED-ADDRESS-FAMILY is comprehension required, so a server which does not know the
+        // extension answers 420. Sending it where the server default already matches would therefore
+        // break relays for nothing, which is why the default policy keeps quiet for an IPv4 socket.
+        CheckEqualsInt64(TURNServer.Count(RNL_TEST_TURN_COUNT_REQUESTED_ADDRESS_FAMILY),
+                         aExpectedFamilyRequests,
+                         aWhat+': the address family may only be named where it is needed');
+
+        // Right after Start and before anything is serviced, which is where GatherCandidates
+        // belongs. Without STUN servers it touches no network at all, it only asks the sockets
+        // and the relay in front of them what they are reachable at.
+        Client.GatherCandidates([],Candidates,100);
+        for Index:=0 to length(Candidates)-1 do begin
+         if Candidates[Index].Kind=RNL_CANDIDATE_KIND_RELAYED then begin
+          HasRelayedCandidate:=true;
+          RelayedAddress:=Candidates[Index].Address;
+         end;
+        end;
+
+        Peer:=Client.Connect(ServerAddress);
+        if not Check(assigned(Peer),aWhat+': the client can start a connection attempt') then begin
+         exit;
+        end;
+        Peer.IncRef;
+        try
+
+         StartTime:=Instance.Time;
+         Event.Initialize;
+         try
+          repeat
+           PumpServer;
+           PumpClient;
+           Sleep(1);
+          until (Connected and (CountClientReceived>=MESSAGE_COUNT)) or
+                (TRNLTime.RelativeDifference(Instance.Time,StartTime)>=6000);
+
+          if Connected and assigned(Peer) and (Peer.CountChannels>0) then begin
+           for Index:=1 to MESSAGE_COUNT do begin
+            Peer.Channels[0].SendMessageRawByteString('ping');
+           end;
+          end;
+
+          StartTime:=Instance.Time;
+          repeat
+           PumpServer;
+           PumpClient;
+           Sleep(1);
+          until (CountClientReceived>=MESSAGE_COUNT) or
+                (TRNLTime.RelativeDifference(Instance.Time,StartTime)>=6000);
+         finally
+          Event.Free;
+         end;
+
+        finally
+         Peer.DecRef;
+        end;
+
+        Info(aWhat+': connected '+TRNLRawByteString(BoolToStr(Connected,true))+
+             ', server saw '+TRNLRawByteString(IntToStr(CountServerReceived))+
+             ' message(s), client got '+TRNLRawByteString(IntToStr(CountClientReceived))+' back');
+
+        Check(Connected,aWhat+': the connection has to come up');
+
+        CheckAtLeastInt64(CountServerReceived,MESSAGE_COUNT,
+                          aWhat+': and every message has to reach the server');
+
+        CheckAtLeastInt64(CountClientReceived,MESSAGE_COUNT,
+                          aWhat+': and every answer has to find its way back');
+
+        if aExpectRelay then begin
+
+         // The relayed address is reached through the candidate machinery of stage E rather than
+         // through the relay directly, which is how an application would get at it
+         if not Check(HasRelayedCandidate,
+                      aWhat+': gathering candidates has to turn up a relayed one') then begin
+          exit;
+         end;
+
+         Info(aWhat+': relayed address '+TRNLRawByteString(RelayedAddress.ToString)+
+              ', server saw the client at '+TRNLRawByteString(SeenClientAddress.ToString));
+
+         // The whole point: what the server talks to is the relay, not the client
+         Check(SeenClientAddress.Equals(RelayedAddress),
+               aWhat+': the server has to see the client at the address the relay handed out, '+
+               'which is what makes this a relayed connection and not a direct one');
+
+         Check(not SeenClientAddress.Equals(ClientAddress),
+               aWhat+': and not at the one the client is bound to');
+
+         Info(aWhat+': indications '+TRNLRawByteString(IntToStr(TURNNetwork.TotalSendIndications))+
+              ', channels bound '+TRNLRawByteString(IntToStr(TURNNetwork.TotalBoundChannels))+
+              ', channel data out '+TRNLRawByteString(IntToStr(TURNNetwork.TotalChannelDataSent))+
+              ', in '+TRNLRawByteString(IntToStr(TURNNetwork.TotalChannelDataReceived))+
+              ', stale nonces '+TRNLRawByteString(IntToStr(TURNNetwork.TotalStaleNonces)));
+
+         Info(aWhat+': the relay saw '+
+              TRNLRawByteString(IntToStr(TURNServer.Count(RNL_TEST_TURN_COUNT_ALLOCATE_REQUESTS)))+
+              ' allocate, '+
+              TRNLRawByteString(IntToStr(TURNServer.Count(RNL_TEST_TURN_COUNT_CREATE_PERMISSION_REQUESTS)))+
+              ' permission and '+
+              TRNLRawByteString(IntToStr(TURNServer.Count(RNL_TEST_TURN_COUNT_CHANNEL_BIND_REQUESTS)))+
+              ' channel bind request(s), forwarded '+
+              TRNLRawByteString(IntToStr(TURNServer.Count(RNL_TEST_TURN_COUNT_FORWARDED_TO_PEER)))+
+              ' towards the peer and '+
+              TRNLRawByteString(IntToStr(TURNServer.Count(RNL_TEST_TURN_COUNT_FORWARDED_TO_CLIENT)))+
+              ' back');
+
+         // Two allocate requests, because the first one goes out bare in order to be told the realm
+         CheckAtLeastInt64(TURNServer.Count(RNL_TEST_TURN_COUNT_ALLOCATE_REQUESTS),2,
+                           aWhat+': the first allocate is expected to be rejected for its realm');
+
+         CheckAtLeastInt64(TURNServer.Count(RNL_TEST_TURN_COUNT_CREATE_PERMISSION_REQUESTS),1,
+                           aWhat+': a permission has to have been asked for');
+
+         CheckEqualsInt64(TURNServer.Count(RNL_TEST_TURN_COUNT_REJECTED_FOR_NO_PERMISSION),0,
+                          aWhat+': and nothing may have been dropped for the lack of one');
+
+         // A channel replaces 36 bytes of indication with 4, so the first datagrams go the expensive
+         // way and everything after them the cheap one
+         CheckEqualsInt64(TURNNetwork.TotalBoundChannels,1,
+                          aWhat+': exactly one channel for one peer');
+
+         CheckAtLeastInt64(TURNNetwork.TotalChannelDataSent,1,
+                           aWhat+': and it has to actually be used once it is confirmed');
+
+         CheckAtLeastInt64(TURNNetwork.TotalChannelDataReceived,1,
+                           aWhat+': in both directions');
+
+         if aBehaviour=RNL_TEST_TURN_SERVER_STALE_NONCE_ONCE then begin
+          CheckAtLeastInt64(TURNNetwork.TotalStaleNonces,1,
+                            aWhat+': the stale nonce has to have been dealt with rather than fatal');
+         end;
+
+        end;
+
+       finally
+        FreeAndNil(Client);
+       end;
+
+      finally
+       FreeAndNil(TURNNetwork);
+      end;
+
+     finally
+      FreeAndNil(Server);
+     end;
+
+    finally
+     FreeAndNil(TURNServer);
+    end;
+
+   finally
+    FreeAndNil(VirtualNetwork);
+   end;
+  finally
+   FreeAndNil(Instance);
+  end;
+
+ end;
+
+begin
+
+ TestBegin('an rnl connection runs over a turn relay');
+ Watchdog:=TRNLTestWatchdog.Create('turn relay',240000);
+ try
+
+  RunAgainst(RNL_TEST_TURN_SERVER_CORRECT,'a correct relay',true);
+  RunAgainst(RNL_TEST_TURN_SERVER_STALE_NONCE_ONCE,'a relay whose nonce goes stale',true);
+  RunAgainst(RNL_TEST_TURN_SERVER_REQUIRE_SHA256,'a relay wanting sha-256 integrity',true);
+
+  // No relay to be had, and the client still has to work: the socket was bound, only the allocation
+  // failed, so everything goes out directly
+  RunAgainst(RNL_TEST_TURN_SERVER_REFUSE_ALLOCATION,'a relay refusing to allocate',false,
+             RNL_TURN_ADDRESS_FAMILY_POLICY_FROM_SOCKET,0,486);
+
+  // Naming the family explicitly, which is what a deployment that knows its relay would do. Counted
+  // once rather than twice although both allocate requests carry it: the server only gets as far as
+  // looking at the attribute once the request is authenticated, and the first one goes out bare.
+  RunAgainst(RNL_TEST_TURN_SERVER_CORRECT,'a relay asked for ipv4 explicitly',true,
+             RNL_TURN_ADDRESS_FAMILY_POLICY_IPV4,1,0);
+
+  // And a relay which cannot serve what was asked for. 440 is final: asking again unchanged would
+  // get the same answer, so the client has to give up with the reason recorded rather than loop.
+  RunAgainst(RNL_TEST_TURN_SERVER_REFUSE_ADDRESS_FAMILY,'a relay refusing that address family',false,
+             RNL_TURN_ADDRESS_FAMILY_POLICY_IPV6,1,440);
+
+ finally
+  FreeAndNil(Watchdog);
+  TestEnd;
+ end;
+
+end;
+
+// ---------------------------------------------------------------------------------------
+// The STUN message layer against a message somebody else built
+// ---------------------------------------------------------------------------------------
+
+// MESSAGE-INTEGRITY has one detail which is easy to get wrong and impossible to notice: the mac is
+// computed over the message with the length field already counting the attribute which is about to
+// be appended. Get that wrong on both sides of a test and both sides agree, the test passes, and
+// nothing interoperates with anything.
+//
+// So this does not build a message and check it against itself. It takes the sample request out of
+// RFC 5769 section 2.4 byte for byte - a message built by somebody else, with the mac somebody else
+// computed - and asks whether it verifies. Then it builds the very same message from the same three
+// attributes and asks whether every one of the 116 bytes comes out the same.
+//
+// The username in that vector is not ASCII, which is the point of it: it is six Japanese characters
+// in UTF-8, so a length taken in characters rather than in bytes would show here.
+procedure TestSTUNMessageIntegrityMatchesTheRFC5769Vector;
+const RFC5769_LONG_TERM_REQUEST:array[0..115] of TRNLUInt8=
+      (
+       $00,$01,$00,$60,$21,$12,$a4,$42,$78,$ad,$34,$33,
+       $c6,$ad,$72,$c0,$29,$da,$41,$2e,$00,$06,$00,$12,
+       $e3,$83,$9e,$e3,$83,$88,$e3,$83,$aa,$e3,$83,$83,
+       $e3,$82,$af,$e3,$82,$b9,$00,$00,$00,$15,$00,$1c,
+       $66,$2f,$2f,$34,$39,$39,$6b,$39,$35,$34,$64,$36,
+       $4f,$4c,$33,$34,$6f,$4c,$39,$46,$53,$54,$76,$79,
+       $36,$34,$73,$41,$00,$14,$00,$0b,$65,$78,$61,$6d,
+       $70,$6c,$65,$2e,$6f,$72,$67,$00,$00,$08,$00,$14,
+       $f6,$70,$24,$65,$6d,$d6,$4a,$3e,$02,$b8,$e0,$71,
+       $2e,$85,$c9,$a2,$8c,$a8,$96,$66
+      );
+      RFC5769_REALM='example.org';
+      RFC5769_NONCE='f//499k954d6OL34oL9FSTvy64sA';
+      // TheMatrIX, which is what the password of the vector reduces to once SASLprep has been over it
+      RFC5769_PASSWORD='TheMatrIX';
+      MESSAGE_INTEGRITY_POSITION=96;
+var Watchdog:TRNLTestWatchdog;
+    Message_:TRNLSTUNMessage;
+    Credentials:TRNLTURNCredentials;
+    Username:TRNLRawByteString;
+    Broken:array[0..115] of TRNLUInt8;
+    TransactionID:TRNLSTUNTransactionID;
+    Built:PRNLUInt8Array;
+    Index:TRNLSizeInt;
+    AllBytesMatch:boolean;
+begin
+
+ TestBegin('the stun message layer agrees with the rfc 5769 long term credential vector');
+ Watchdog:=TRNLTestWatchdog.Create('rfc 5769 vector',60000);
+ try
+
+  // Six characters, eighteen bytes
+  Username:=#$e3+#$83+#$9e+#$e3+#$83+#$88+#$e3+#$83+#$aa+#$e3+#$83+#$83+#$e3+#$82+#$af+#$e3+#$82+#$b9;
+
+  Credentials.Clear;
+  try
+
+   Credentials.Username:=Username;
+   Credentials.Realm:=RFC5769_REALM;
+   Credentials.Nonce:=RFC5769_NONCE;
+   Credentials.Password:=RFC5769_PASSWORD;
+   Credentials.UseSHA256:=false;
+   Credentials.DeriveKey;
+
+   CheckEqualsInt64(length(Username),18,'the username of the vector is eighteen bytes long');
+
+   CheckEqualsInt64(Credentials.KeySize,16,'and the long term key derived from it is an md5 digest');
+
+   if not Check(Message_.Assign(RFC5769_LONG_TERM_REQUEST,SizeOf(RFC5769_LONG_TERM_REQUEST)),
+                'the message of the vector has to be readable at all') then begin
+    exit;
+   end;
+
+   Check(Message_.VerifyMessageIntegrity(Credentials.Key[0],Credentials.KeySize),
+         'and its message integrity has to verify under that key, which is the whole point: the mac '+
+         'was computed by somebody else');
+
+   // One bit somewhere in the middle of the message, so the mac no longer belongs to it
+   Move(RFC5769_LONG_TERM_REQUEST[0],Broken[0],SizeOf(Broken));
+   Broken[40]:=Broken[40] xor $01;
+   if not Check(Message_.Assign(Broken,SizeOf(Broken)),'a message with one flipped bit still parses') then begin
+    exit;
+   end;
+
+   Check(not Message_.VerifyMessageIntegrity(Credentials.Key[0],Credentials.KeySize),
+         'while one flipped bit has to make it fail');
+
+   // And now the other direction: the same three attributes, built here
+   Move(RFC5769_LONG_TERM_REQUEST[8],TransactionID[0],SizeOf(TRNLSTUNTransactionID));
+   Message_.Initialize(RNL_STUN_METHOD_BINDING or RNL_STUN_CLASS_REQUEST,TransactionID);
+   Message_.AddStringAttribute(RNL_STUN_ATTRIBUTE_USERNAME,Username);
+   Message_.AddStringAttribute(RNL_STUN_ATTRIBUTE_NONCE,RFC5769_NONCE);
+   Message_.AddStringAttribute(RNL_STUN_ATTRIBUTE_REALM,RFC5769_REALM);
+   Message_.AddMessageIntegrity(Credentials.Key[0],Credentials.KeySize);
+
+   CheckEqualsInt64(Message_.Size,SizeOf(RFC5769_LONG_TERM_REQUEST),
+                    'the message built here has to be exactly as long as the one in the vector');
+
+   Built:=Message_.DataPointer;
+   AllBytesMatch:=Message_.Size=SizeOf(RFC5769_LONG_TERM_REQUEST);
+   if AllBytesMatch then begin
+    for Index:=0 to SizeOf(RFC5769_LONG_TERM_REQUEST)-1 do begin
+     if Built^[Index]<>RFC5769_LONG_TERM_REQUEST[Index] then begin
+      AllBytesMatch:=false;
+      Info('first difference at byte '+TRNLRawByteString(IntToStr(Index))+
+           ': built '+TRNLRawByteString(IntToHex(Built^[Index],2))+
+           ', vector '+TRNLRawByteString(IntToHex(RFC5769_LONG_TERM_REQUEST[Index],2)));
+      break;
+     end;
+    end;
+   end;
+
+   Check(AllBytesMatch,'and every one of its bytes has to match, the twenty of the mac included');
+
+   Info('message integrity at byte '+TRNLRawByteString(IntToStr(MESSAGE_INTEGRITY_POSITION))+
+        ' of '+TRNLRawByteString(IntToStr(SizeOf(RFC5769_LONG_TERM_REQUEST)))+
+        ', verified and rebuilt byte for byte');
+
+  finally
+   Credentials.Clear;
+  end;
+
+ finally
+  FreeAndNil(Watchdog);
+  TestEnd;
+ end;
+
+end;
+
+// ---------------------------------------------------------------------------------------
+// Asking a STUN server without stopping the host
+// ---------------------------------------------------------------------------------------
+
+// TRNLSTUNClient.QueryOnSocket waits for its answer and consumes from the socket while it does, so it
+// has to have that socket to itself. That makes it a startup tool: GatherCandidates and the nat
+// mapping detection both belong between Start and the first Service call, and neither can be used
+// again once the host is running. Which is exactly when it would be needed - a path changes, a nat
+// drops its mapping, and the reflexive candidate that was gathered at startup is stale.
+//
+// So the host answers its own binding requests out of its own receive path. BeginSTUNQuery sends one,
+// the service loop repeats it and gives up on it, and TakeSTUNResult hands the answer over.
+//
+// The third assertion is the one that matters most and is easy to forget: a new branch in the receive
+// path must not swallow anything that belongs to a peer. A connection therefore runs over the very
+// same socket throughout, and its messages have to arrive undisturbed.
+procedure TestSTUNQueryWhileTheHostIsRunning;
+const STUN_HOST='203.0.113.9';
+      STUN_PORT=3482;
+      SILENT_PORT=3483;
+      MESSAGE_COUNT=6;
+var Watchdog:TRNLTestWatchdog;
+    Instance:TRNLInstance;
+    VirtualNetwork:TRNLVirtualNetwork;
+    STUNServer,SilentServer:TRNLTestSTUNServer;
+    HostPair:TRNLTestHostPair;
+    STUNAddress,SilentAddress,Unused:TRNLAddress;
+    Result_:TRNLHostSTUNResult;
+    StartTime:TRNLTime;
+    Index,Elapsed:TRNLSizeInt;
+    Answered,TimedOut:boolean;
+    AnsweredAddress:TRNLAddress;
+    ElapsedMilliseconds:TRNLInt64;
+
+ function AddressOf(const aHost:TRNLRawByteString;const aPort:TRNLUInt16):TRNLAddress;
+ begin
+  FillChar(result,SizeOf(TRNLAddress),#0);
+  VirtualNetwork.AddressSetHost(result,aHost);
+  result.Port:=aPort;
+ end;
+
+begin
+
+ TestBegin('a running host can ask a stun server without stopping');
+ Watchdog:=TRNLTestWatchdog.Create('stun while running',120000);
+ try
+
+  Answered:=false;
+  TimedOut:=false;
+  FillChar(AnsweredAddress,SizeOf(TRNLAddress),#0);
+
+  Instance:=TRNLInstance.Create;
+  try
+   VirtualNetwork:=TRNLVirtualNetwork.Create(Instance);
+   try
+
+    STUNAddress:=AddressOf(STUN_HOST,STUN_PORT);
+    SilentAddress:=AddressOf(STUN_HOST,SILENT_PORT);
+    FillChar(Unused,SizeOf(TRNLAddress),#0);
+
+    // Reports what it actually sees, so the answer says something rather than repeating a constant
+    STUNServer:=TRNLTestSTUNServer.Create(Instance,VirtualNetwork,STUN_PORT,
+                                          RNL_TEST_STUN_SERVER_REPORTING_SENDER,Unused,
+                                          STUNAddress.Host);
+    try
+     SilentServer:=TRNLTestSTUNServer.Create(Instance,VirtualNetwork,SILENT_PORT,
+                                             RNL_TEST_STUN_SERVER_SILENT,Unused,
+                                             SilentAddress.Host);
+     try
+
+      HostPair:=TRNLTestHostPair.Create(Instance,VirtualNetwork);
+      try
+
+       // Short, so that the timeout half of this test does not take longer than the rest of it
+       HostPair.Client.STUNQueryTimeout:=100;
+       HostPair.Client.CountSTUNQueryAttempts:=3;
+
+       if not Check(HostPair.Connect(5000),'the connection has to come up first') then begin
+        exit;
+       end;
+
+       // Asked while the host is connected and being serviced, which is the whole point
+       if not Check(HostPair.Client.BeginSTUNQuery(STUNAddress,0),
+                    'a binding request has to go out on the running host') then begin
+        exit;
+       end;
+
+       CheckEqualsInt64(HostPair.Client.CountPendingSTUNQueries,1,
+                        'and be outstanding until it is answered');
+
+       // Payload over the same socket at the same time, both ways
+       for Index:=1 to MESSAGE_COUNT do begin
+        HostPair.ClientPeer.Channels[RNL_TEST_HOST_PAIR_CHANNEL_RELIABLE_ORDERED].SendMessageRawByteString(TestMessageText(Index,0));
+       end;
+
+       StartTime:=Instance.Time;
+       repeat
+        if not HostPair.Pump(10) then begin
+         break;
+        end;
+        while HostPair.Client.TakeSTUNResult(Result_) do begin
+         if Result_.Success then begin
+          Answered:=true;
+          AnsweredAddress:=Result_.MappedAddress;
+         end;
+        end;
+       until (Answered and (HostPair.ServerReceivedMessages.Count>=MESSAGE_COUNT)) or
+             (TRNLTime.RelativeDifference(Instance.Time,StartTime)>=5000);
+
+       Info('mapped address '+TRNLRawByteString(AnsweredAddress.ToString)+
+            ', queries '+TRNLRawByteString(IntToStr(HostPair.Client.TotalSTUNQueries))+
+            ', answered '+TRNLRawByteString(IntToStr(HostPair.Client.TotalAnsweredSTUNQueries))+
+            ', messages through '+TRNLRawByteString(IntToStr(HostPair.ServerReceivedMessages.Count)));
+
+       Check(Answered,'the answer has to arrive through the running host');
+
+       CheckEqualsInt64(HostPair.Client.TotalAnsweredSTUNQueries,1,
+                        'counted as answered');
+
+       CheckEqualsInt64(HostPair.Client.CountPendingSTUNQueries,0,
+                        'and nothing left outstanding');
+
+       // No nat in this construction, so the server sees the client under the address it is bound to
+       Check(AnsweredAddress.Port=HostPair.Client.Address.Port,
+             'and with no nat in the way the mapped port has to be the one the socket is bound to');
+
+       // The point of running it alongside a connection
+       CheckAtLeastInt64(HostPair.ServerReceivedMessages.Count,MESSAGE_COUNT,
+                         'while every message of the connection still arrives, which is what shows '+
+                         'that the new branch in the receive path swallows nothing');
+
+       // And a server which never answers has to end as a failure rather than as silence
+       if not Check(HostPair.Client.BeginSTUNQuery(SilentAddress,0),
+                    'a request towards a silent server also goes out') then begin
+        exit;
+       end;
+
+       StartTime:=Instance.Time;
+       repeat
+        if not HostPair.Pump(10) then begin
+         break;
+        end;
+        while HostPair.Client.TakeSTUNResult(Result_) do begin
+         if not Result_.Success then begin
+          TimedOut:=true;
+         end;
+        end;
+       until TimedOut or (TRNLTime.RelativeDifference(Instance.Time,StartTime)>=5000);
+
+       ElapsedMilliseconds:=TRNLTime.RelativeDifference(Instance.Time,StartTime);
+
+       Info('the silent server was given up on after '+TRNLRawByteString(IntToStr(ElapsedMilliseconds))+
+            ' ms, timed out '+TRNLRawByteString(IntToStr(HostPair.Client.TotalTimedOutSTUNQueries))+
+            ', requests seen by it '+TRNLRawByteString(IntToStr(SilentServer.CountRequests)));
+
+       Check(TimedOut,'a server which never answers has to end as a failed result, not as silence');
+
+       CheckEqualsInt64(HostPair.Client.TotalTimedOutSTUNQueries,1,
+                        'counted as timed out');
+
+       // Three attempts of a hundred milliseconds, so this has to be over well inside a second
+       CheckAtMostInt64(ElapsedMilliseconds,2000,
+                        'and it has to give up after its attempts rather than wait for ever');
+
+       CheckAtLeastInt64(SilentServer.CountRequests,2,
+                         'having asked more than once before giving up');
+
+      finally
+       FreeAndNil(HostPair);
+      end;
+
+     finally
+      FreeAndNil(SilentServer);
+     end;
+    finally
+     FreeAndNil(STUNServer);
+    end;
+
+   finally
+    FreeAndNil(VirtualNetwork);
+   end;
+  finally
+   FreeAndNil(Instance);
+  end;
 
  finally
   FreeAndNil(Watchdog);
@@ -5674,6 +7365,12 @@ begin
 
  // The STUN client, which is where a parser meets datagrams from a stranger
  TestSTUNClientReadsItsMappedAddressAndRejectsMalformedAnswers;
+ TestSTUNQueryWhileTheHostIsRunning;
+ TestSTUNMessageIntegrityMatchesTheRFC5769Vector;
+ TestConnectionOverATURNRelay;
+ TestRelayReachedOverAStream;
+ TestRelayAddressGetsItsOwnFloodingBudget;
+ TestTURNChannelNumbersAreReleasedAndReused;
 
  // The NAT simulator, which every later punching test will rest on
  TestNATNetworkSimulatesTheFourNATKinds;
@@ -5683,6 +7380,7 @@ begin
  TestGatherCandidatesFindsHostAndServerReflexive;
  TestHolePunchingOpensTheWayForAnIncomingConnection;
  TestCandidateFanOutStaysBoundedForALongCandidateList;
+ TestOneSocketPerInterfaceIsPairedWithEveryCandidate;
  TestNATMappingBehaviourIsDetectedForEveryNATKind;
  TestSimultaneousConnectResolvesToOneConnection;
 

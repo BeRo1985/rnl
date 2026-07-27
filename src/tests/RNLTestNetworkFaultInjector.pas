@@ -114,10 +114,19 @@ type TRNLNetworkFaultInjector=class(TRNLNetwork)
        fCountOversizedDatagrams:TRNLUInt64;
        fCountDeterministicallyDroppedDatagrams:TRNLUInt64;
        fCountRebindenSourceAddresses:TRNLUInt64;
+
+       // Which source addresses datagrams towards one particular destination have left from.
+       // With one socket per address family that is always one; with one socket per interface it is
+       // as many as were actually paired with that destination, which is the only way to see the
+       // fan out from the outside.
+       fObserveSourcesEnabled:boolean;
+       fObserveSourcesToAddress:TRNLAddress;
+       fObservedSourceAddresses:array of TRNLAddress;
        fCountDatagramsToStaleAddress:TRNLUInt64;
        fCountRewrittenHandshakePackets:TRNLUInt64;
 
        function Roll(const aProbabilityFactor:TRNLUInt32):boolean;
+       procedure RememberSourceAddress(const aSocket:TRNLSocket);
 
        class function HandshakePacketChecksum(const aData;const aDataLength:TRNLSizeUInt):TRNLUInt32; static;
 
@@ -155,6 +164,11 @@ type TRNLNetworkFaultInjector=class(TRNLNetwork)
        // The datagram payload is never touched, so it still passes its authentication.
        procedure RebindSourceAddress(const aFromAddress,aToAddress:TRNLAddress);
        procedure StopRebindingSourceAddress;
+       // Starts remembering the distinct source addresses of everything sent towards that address
+       procedure ObserveOutgoingSourceAddressesTo(const aAddress:TRNLAddress);
+       procedure StopObservingOutgoingSourceAddresses;
+       function CountDistinctObservedSourceAddresses:TRNLSizeInt;
+       function ObservedSourceAddress(const aIndex:TRNLSizeInt):TRNLAddress;
 
        // Overwrites aValueLength bytes at aOffset in every outgoing handshake packet whose type
        // is aPacketType, and recomputes the packet checksum afterwards.
@@ -304,6 +318,71 @@ begin
   fRebindFromAddress:=aFromAddress;
   fRebindToAddress:=aToAddress;
   fRebindEnabled:=true;
+ finally
+  fLock.Release;
+ end;
+end;
+
+// Asks the network underneath what that socket is bound to, which is the source address the far
+// side is going to see. Called with the lock already held.
+procedure TRNLNetworkFaultInjector.RememberSourceAddress(const aSocket:TRNLSocket);
+var SourceAddress:TRNLAddress;
+    Index,Count:TRNLSizeInt;
+begin
+ if not fNetwork.SocketGetAddress(aSocket,SourceAddress,RNL_IPV4) then begin
+  exit;
+ end;
+ for Index:=0 to length(fObservedSourceAddresses)-1 do begin
+  if fObservedSourceAddresses[Index].Equals(SourceAddress) then begin
+   exit;
+  end;
+ end;
+ Count:=length(fObservedSourceAddresses);
+ SetLength(fObservedSourceAddresses,Count+1);
+ fObservedSourceAddresses[Count]:=SourceAddress;
+end;
+
+procedure TRNLNetworkFaultInjector.ObserveOutgoingSourceAddressesTo(const aAddress:TRNLAddress);
+begin
+ fLock.Acquire;
+ try
+  fObserveSourcesToAddress:=aAddress;
+  fObservedSourceAddresses:=nil;
+  fObserveSourcesEnabled:=true;
+ finally
+  fLock.Release;
+ end;
+end;
+
+procedure TRNLNetworkFaultInjector.StopObservingOutgoingSourceAddresses;
+begin
+ fLock.Acquire;
+ try
+  fObserveSourcesEnabled:=false;
+ finally
+  fLock.Release;
+ end;
+end;
+
+function TRNLNetworkFaultInjector.CountDistinctObservedSourceAddresses:TRNLSizeInt;
+begin
+ fLock.Acquire;
+ try
+  result:=length(fObservedSourceAddresses);
+ finally
+  fLock.Release;
+ end;
+end;
+
+function TRNLNetworkFaultInjector.ObservedSourceAddress(const aIndex:TRNLSizeInt):TRNLAddress;
+begin
+ fLock.Acquire;
+ try
+  if (aIndex>=0) and (aIndex<length(fObservedSourceAddresses)) then begin
+   result:=fObservedSourceAddresses[aIndex];
+  end else begin
+   FillChar(result,SizeOf(TRNLAddress),#0);
+  end;
  finally
   fLock.Release;
  end;
@@ -484,6 +563,9 @@ begin
  if assigned(aAddress) then begin
   fLock.Acquire;
   try
+   if fObserveSourcesEnabled and aAddress^.Equals(fObserveSourcesToAddress) then begin
+    RememberSourceAddress(aSocket);
+   end;
    if fRebindEnabled then begin
     if aAddress^.Equals(fRebindToAddress) then begin
      // Towards the new address, so deliver it to the socket which really sits behind it
