@@ -47,11 +47,19 @@ deterministically:
 * hard receive failures (`Receive` returns `-1`)
 * a maximum datagram size, which makes larger datagrams fail like `EMSGSIZE` does
 * deterministic loss of the next N outgoing datagrams above a given size
+* a complete address change of one side, the way a NAT rebinding behaves
 
 The deterministic variant is what makes timing assertions possible at all: losing one exactly
 known datagram and then measuring the recovery is reproducible, whereas the total duration of
 a bulk transfer under probabilistic loss varies by a factor of two between runs and is
 dominated by the backoff rather than by the initial retransmission timeout.
+
+The address change deliberately models all three parts of a real rebinding at once: the source
+address of arriving datagrams changes, datagrams towards the new address reach the socket which
+really sits behind it, and datagrams towards the old address are lost because that mapping is
+gone. Leaving the last part out would make the old address stay reachable, and a counter side
+which never notices the change would then keep working by accident — which is exactly the
+situation a real network does not offer, and exactly why such a test would prove nothing.
 
 ## The watchdog
 

@@ -2992,6 +2992,13 @@ type PRNLVersion=^TRNLVersion;
 
        function GetMaximumUnfragmentedMessageSize:TRNLSizeUInt; virtual;
 
+       // Number of outgoing items of this channel which have not been handed over to the peer
+       // and acknowledged yet. Deliberately derived from the queues and sequence numbers rather
+       // than maintained as a counter, because a counter has to be incremented and decremented
+       // on every single path through the channel, and one missed decrement makes it stick above
+       // zero forever, which then silently blocks whatever waits for it to reach zero.
+       function GetCountPendingOutgoing:TRNLSizeInt; virtual;
+
        procedure DispatchOutgoingBlockPackets; virtual;
 
        procedure DispatchIncomingBlockPacket(const aBlockPacket:TRNLPeerBlockPacket); virtual;
@@ -3088,6 +3095,8 @@ type PRNLVersion=^TRNLVersion;
        function GetMaximumUnfragmentedMessageSize:TRNLSizeUInt; override;
 
        function GetMaximumFragmentedMessageSize:TRNLSizeUInt;
+
+       function GetCountPendingOutgoing:TRNLSizeInt; override;
 
        procedure DispatchOutgoingBlockPacketsTimeout;
 
@@ -3318,7 +3327,16 @@ type PRNLVersion=^TRNLVersion;
 
      TRNLPeerKeepAliveWindowItems=array of TRNLPeerKeepAliveWindowItem;
 
-     TRNLPeerIncomingPacketQueue=TRNLQueue<TBytes>;
+     PRNLPeerIncomingPacket=^TRNLPeerIncomingPacket;
+     TRNLPeerIncomingPacket=record
+      // The address the datagram really came from. It is needed all the way down into the peer,
+      // because only there, after the authenticated decryption and the replay check, is it known
+      // whether this datagram may be trusted enough to move the peer address over to it.
+      Address:TRNLAddress;
+      Data:TBytes;
+     end;
+
+     TRNLPeerIncomingPacketQueue=TRNLQueue<TRNLPeerIncomingPacket>;
 
      TRNLPeerListNode=TRNLCircularDoublyLinkedListNode<TRNLPeer>;
 
@@ -3387,8 +3405,6 @@ type PRNLVersion=^TRNLVersion;
        fSharedSecretKey:TRNLKey;
 
        fConnectionChallengeResponse:PRNLConnectionChallenge;
-
-       fUnacknowlegmentedBlockPackets:TRNLUInt32;
 
        fRoundTripTimeFirst:boolean;
 
@@ -3537,6 +3553,8 @@ type PRNLVersion=^TRNLVersion;
        function DispatchPeer:boolean;
 
        procedure SendNewHostBandwidthLimits;
+
+       function GetCountPendingOutgoing:TRNLSizeInt;
 
       public
        constructor Create(const aHost:TRNLHost); reintroduce;
@@ -3691,6 +3709,8 @@ type PRNLVersion=^TRNLVersion;
 
        fMaximumRetransmissionTimeoutLimit:TRNLInt64;
 
+       fMaximumReliableBlockPacketSendAttempts:TRNLUInt32;
+
        fRateLimiterHostAddressBurst:TRNLInt64;
 
        fRateLimiterHostAddressPeriod:TRNLUInt64;
@@ -3742,6 +3762,10 @@ type PRNLVersion=^TRNLVersion;
        fTotalHardReceiveFailures:TRNLUInt64;
 
        fTotalDroppedOutgoingMessages:TRNLUInt64;
+
+       fTotalPeersGivenUpOn:TRNLUInt64;
+
+       fTotalPeerAddressChanges:TRNLUInt64;
 
        fConnectionChallengeDifficultyLevel:TRNLUInt32;
 
@@ -3900,6 +3924,14 @@ type PRNLVersion=^TRNLVersion;
        property MaximumRetransmissionTimeout:TRNLInt64 read fMaximumRetransmissionTimeout write fMaximumRetransmissionTimeout;
        property MinimumRetransmissionTimeoutLimit:TRNLInt64 read fMinimumRetransmissionTimeoutLimit write fMinimumRetransmissionTimeoutLimit;
        property MaximumRetransmissionTimeoutLimit:TRNLInt64 read fMaximumRetransmissionTimeoutLimit write fMaximumRetransmissionTimeoutLimit;
+       // How often a single reliable block packet may be retransmitted before its peer is given
+       // up on. Zero means never give up, which is what the protocol did unconditionally before:
+       // a block packet whose acknowledgement is lost for good was retransmitted until the end of
+       // time. The connection timeout does cover the ordinary case, but not the one where other
+       // traffic keeps arriving and thus keeps the connection looking alive while one channel is
+       // permanently stuck. With the default backoff ceiling the default of 64 attempts amounts
+       // to several minutes, so this can not fire during any kind of normal operation.
+       property MaximumReliableBlockPacketSendAttempts:TRNLUInt32 read fMaximumReliableBlockPacketSendAttempts write fMaximumReliableBlockPacketSendAttempts;
        property RateLimiterHostAddressBurst:TRNLInt64 read fRateLimiterHostAddressBurst write fRateLimiterHostAddressBurst;
        property RateLimiterHostAddressPeriod:TRNLUInt64 read fRateLimiterHostAddressPeriod write fRateLimiterHostAddressPeriod;
 {$if defined(RNL_LINEAR_PEER_LIST)}
@@ -3920,6 +3952,12 @@ type PRNLVersion=^TRNLVersion;
        // Number of outgoing messages which were dropped because they violated a size
        // constraint of their channel, most notably by not fitting into the send window
        property TotalDroppedOutgoingMessages:TRNLUInt64 read fTotalDroppedOutgoingMessages;
+       // Number of peers which were given up on because a reliable block packet of theirs
+       // exceeded MaximumReliableBlockPacketSendAttempts
+       property TotalPeersGivenUpOn:TRNLUInt64 read fTotalPeersGivenUpOn;
+       // Number of times a peer was followed to a new source address, which is what a NAT
+       // rebinding or a network handover of a counter side looks like from here
+       property TotalPeerAddressChanges:TRNLUInt64 read fTotalPeerAddressChanges;
       published
        property Instance:TRNLInstance read fInstance;
        property Network:TRNLNetwork read fNetwork;
@@ -12295,9 +12333,12 @@ end;
 {$ifend}
 
 procedure TRNLSpinLock.Acquire;
-var Wait,Index:TRNLSizeUInt;
+const SPINS_UNTIL_YIELD=64;
+      SPINS_UNTIL_SLEEP=1024;
+var Wait,Index,Spins:TRNLSizeUInt;
 begin
  Wait:=1;
+ Spins:=0;
  while {$ifdef fpc}InterlockedCompareExchange{$else}AtomicCmpExchange{$endif}(fState,-1,0)<>0 do begin
 //while {$ifdef fpc}InterlockedExchange{$else}AtomicExchange{$endif}(fState,-1)<>0 do begin
   for Index:=1 to Wait do begin
@@ -12307,8 +12348,21 @@ begin
    if Wait<1024 then begin
     inc(Wait,Wait);
    end;
-   for Index:=1 to Wait do begin
-    TRNLSpinLockCPURelax;
+   inc(Spins);
+   // Pure spinning is only the right thing to do while the lock holder is actually running on
+   // another core. That assumption stops holding as soon as the holder gets preempted, which
+   // happens routinely on a busy machine, inside a container with a CPU quota, on a single core
+   // system, or whenever the two threads have different priorities. From that moment on
+   // spinning burns a whole time slice and delays precisely the thread which would release the
+   // lock, so the waiting has to escalate into giving the time slice up instead.
+   if Spins>SPINS_UNTIL_SLEEP then begin
+    Sleep(1);
+   end else if Spins>SPINS_UNTIL_YIELD then begin
+    TThread.Yield;
+   end else begin
+    for Index:=1 to Wait do begin
+     TRNLSpinLockCPURelax;
+    end;
    end;
   end;
  end;
@@ -12582,7 +12636,13 @@ begin
  fSpinLock.Acquire;
  try
   if fSize<=fCount then begin
-   GrowResize(fCount+1);
+   // Geometric growth. Growing by a single element instead would reallocate and copy the whole
+   // queue on every single enqueue once the capacity is reached, which makes growing a queue to
+   // n elements cost O(n^2) element copies, and all of that while holding the spin lock. With a
+   // queue which really does back up, for example because a peer stops acknowledging, that
+   // turns into a multi second freeze of the service thread and is indistinguishable from a
+   // deadlock in a debugger.
+   GrowResize(Max(16,fSize+fSize));
   end;
   dec(fHead);
   if fHead<0 then begin
@@ -12602,7 +12662,13 @@ begin
  fSpinLock.Acquire;
  try
   if fSize<=fCount then begin
-   GrowResize(fCount+1);
+   // Geometric growth. Growing by a single element instead would reallocate and copy the whole
+   // queue on every single enqueue once the capacity is reached, which makes growing a queue to
+   // n elements cost O(n^2) element copies, and all of that while holding the spin lock. With a
+   // queue which really does back up, for example because a peer stops acknowledging, that
+   // turns into a multi second freeze of the service thread and is indistinguishable from a
+   // deadlock in a debugger.
+   GrowResize(Max(16,fSize+fSize));
   end;
   Index:=fTail;
   inc(fTail);
@@ -20591,6 +20657,13 @@ begin
  end;
 end;
 
+function TRNLPeerChannel.GetCountPendingOutgoing:TRNLSizeInt;
+begin
+ // The unreliable channels hand every message straight over to the peer, so nothing of theirs
+ // stays behind once their message queue has been drained
+ result:=fOutgoingMessageQueue.Count;
+end;
+
 function TRNLPeerChannel.GetMaximumUnfragmentedMessageSize:TRNLSizeUInt;
 begin
  result:=fPeer.fMTU-(RNL_IP_HEADER_SIZE+
@@ -20776,6 +20849,15 @@ begin
                      SizeOf(TRNLPeerReliableChannelShortMessagePacketHeader));
 end;
 
+function TRNLPeerReliableChannel.GetCountPendingOutgoing:TRNLSizeInt;
+begin
+ // Messages not fragmented yet, plus block packets not handed over to the peer yet, plus block
+ // packets handed over but not acknowledged yet
+ result:=fOutgoingMessageQueue.Count+
+         fOutgoingBlockPacketQueue.Count+
+         TRNLSequenceNumber.Difference(fOutgoingBlockPacketSequenceNumber,fIncomingAcknowledgementSequenceNumber);
+end;
+
 function TRNLPeerReliableChannel.GetMaximumFragmentedMessageSize:TRNLSizeUInt;
 begin
  // One block packet per fragment, and all fragments of one message are created in a single
@@ -20802,6 +20884,15 @@ begin
   BlockPacket:=CurrentBlockPacketListNode.fValue;
 
   if TRNLTime.Difference(fHost.fTime,BlockPacket.fSentTime)>=BlockPacket.fRoundTripTimeout then begin
+
+   // Give up on a block packet which can evidently not be delivered any more, instead of
+   // retransmitting it forever. fCountSendAttempts was counted all along but never evaluated.
+   if (fHost.fMaximumReliableBlockPacketSendAttempts>0) and
+      (BlockPacket.fCountSendAttempts>=fHost.fMaximumReliableBlockPacketSendAttempts) then begin
+    inc(fHost.fTotalPeersGivenUpOn);
+    fPeer.Disconnect;
+    break;
+   end;
 
    inc(fPeer.fCountPacketLoss);
 
@@ -21069,7 +21160,6 @@ begin
     try
      fIncomingAcknowledgements[aBlockPacketSequenceNumber.fValue and fHost.fReliableChannelBlockPacketWindowMask]:=aBlockPacketSequenceNumber.fValue;
      fPeer.UpdateRoundTripTime(abs(TRNLInt16(TRNLUInt16(aBlockPacketReceivedTime.fValue-IndirectBlockPacket^.fSentTime.fValue))));
-     dec(fPeer.fUnacknowlegmentedBlockPackets);
      IndirectBlockPacket^.Remove;
     finally
      IndirectBlockPacket^.DecRef;
@@ -21153,23 +21243,35 @@ begin
 
      // Enqueue (and, if not ordered channel, dispatch) received block packet
      IndirectBlockPacket:=@fIncomingBlockPackets[BlockPacketSequenceNumber.fValue and fHost.fReliableChannelBlockPacketWindowMask];
-     try
-      if assigned(IndirectBlockPacket^) then begin
-       try
-        IndirectBlockPacket^.DecRef;
-       finally
-        IndirectBlockPacket^:=nil;
+
+     // A retransmission of a block packet which is still sitting in the window is an exact
+     // duplicate and must not be taken in again. On an unordered channel the payload is handed
+     // to the application straight away down below, so accepting the duplicate would deliver
+     // the very same message a second time, which breaks the exactly once promise of a reliable
+     // channel. Its acknowledgement still gets queued further below, which is precisely what
+     // the counter side is missing if it retransmitted in the first place.
+     if not (assigned(IndirectBlockPacket^) and
+             (IndirectBlockPacket^.fSequenceNumber.fValue=BlockPacketSequenceNumber.fValue)) then begin
+
+      try
+       if assigned(IndirectBlockPacket^) then begin
+        try
+         IndirectBlockPacket^.DecRef;
+        finally
+         IndirectBlockPacket^:=nil;
+        end;
        end;
+       aBlockPacket.fSequenceNumber:=BlockPacketSequenceNumber;
+       IndirectBlockPacket^:=aBlockPacket;
+       if not fOrdered then begin
+        DispatchIncomingMessageBlockPacket(aBlockPacket);
+        aBlockPacket.fBlockPacketData:=nil; // The actual block packet payload data are no more needed
+        aBlockPacket.fBlockPacketDataLength:=0;
+       end;
+      finally
+       IndirectBlockPacket^.IncRef;
       end;
-      aBlockPacket.fSequenceNumber:=BlockPacketSequenceNumber;
-      IndirectBlockPacket^:=aBlockPacket;
-      if not fOrdered then begin
-       DispatchIncomingMessageBlockPacket(aBlockPacket);
-       aBlockPacket.fBlockPacketData:=nil; // The actual block packet payload data are no more needed
-       aBlockPacket.fBlockPacketDataLength:=0;
-      end;
-     finally
-      IndirectBlockPacket^.IncRef;
+
      end;
 
      // Dequeue (and, if ordered channel, dispatch) so many received block packets as much as possible in a single straight row
@@ -21323,7 +21425,6 @@ begin
 
        inc(fOutgoingMessageBlockPacketSequenceNumber);
 
-       inc(fPeer.fUnacknowlegmentedBlockPackets);
 
        // Without this the whole outgoing message queue would be converted in one go,
        // regardless of the window, so that the message block packet sequence number could
@@ -21383,7 +21484,6 @@ begin
 
         inc(fOutgoingMessageBlockPacketSequenceNumber);
 
-        inc(fPeer.fUnacknowlegmentedBlockPackets);
 
         // One window slot per fragment, so that the check above stays meaningful for the
         // next message of this same dispatching round
@@ -21482,6 +21582,16 @@ begin
    LongMessagePacketHeader^.MessageNumber:=TRNLEndianness.LittleEndianToHost16(LongMessagePacketHeader^.MessageNumber);
    LongMessagePacketHeader^.Offset:=TRNLEndianness.LittleEndianToHost32(LongMessagePacketHeader^.Offset);
    LongMessagePacketHeader^.Length:=TRNLEndianness.LittleEndianToHost32(LongMessagePacketHeader^.Length);
+
+   // Length is a raw wire value which is about to drive a heap allocation, so it has to be
+   // bounded before it is used for anything. Unbounded, a single block packet can ask for up to
+   // four gigabytes, and the unordered variants ask for that twice, once for the payload and
+   // once for the fragment flags. Simply ignoring such a block packet is the right reaction,
+   // since no correctly behaving counter side can ever produce one.
+   if (LongMessagePacketHeader^.Length=0) or
+      (LongMessagePacketHeader^.Length>fHost.fMaximumMessageSize) then begin
+    exit;
+   end;
 
    if LongMessagePacketHeader^.Offset=0 then begin
 
@@ -21764,7 +21874,6 @@ begin
 
        inc(fOutgoingMessageBlockPacketSequenceNumber);
 
-       inc(fPeer.fUnacknowlegmentedBlockPackets);
 
        // Without this the whole outgoing message queue would be converted in one go,
        // regardless of the window, so that the message block packet sequence number could
@@ -21824,7 +21933,6 @@ begin
 
         inc(fOutgoingMessageBlockPacketSequenceNumber);
 
-        inc(fPeer.fUnacknowlegmentedBlockPackets);
 
         // One window slot per fragment, so that the check above stays meaningful for the
         // next message of this same dispatching round
@@ -21914,6 +22022,16 @@ begin
    LongMessagePacketHeader^.MessageNumber:=TRNLEndianness.LittleEndianToHost16(LongMessagePacketHeader^.MessageNumber);
    LongMessagePacketHeader^.Offset:=TRNLEndianness.LittleEndianToHost32(LongMessagePacketHeader^.Offset);
    LongMessagePacketHeader^.Length:=TRNLEndianness.LittleEndianToHost32(LongMessagePacketHeader^.Length);
+
+   // Length is a raw wire value which is about to drive a heap allocation, so it has to be
+   // bounded before it is used for anything. Unbounded, a single block packet can ask for up to
+   // four gigabytes, and the unordered variants ask for that twice, once for the payload and
+   // once for the fragment flags. Simply ignoring such a block packet is the right reaction,
+   // since no correctly behaving counter side can ever produce one.
+   if (LongMessagePacketHeader^.Length=0) or
+      (LongMessagePacketHeader^.Length>fHost.fMaximumMessageSize) then begin
+    exit;
+   end;
 
    BlockPacketDataPosition:=SizeOf(TRNLPeerReliableChannelLongMessagePacketHeader);
    BlockDataLength:=aBlockPacket.fBlockPacketDataLength-BlockPacketDataPosition;
@@ -22195,6 +22313,16 @@ begin
    LongMessagePacketHeader^.Offset:=TRNLEndianness.LittleEndianToHost32(LongMessagePacketHeader^.Offset);
    LongMessagePacketHeader^.Length:=TRNLEndianness.LittleEndianToHost32(LongMessagePacketHeader^.Length);
 
+   // Length is a raw wire value which is about to drive a heap allocation, so it has to be
+   // bounded before it is used for anything. Unbounded, a single block packet can ask for up to
+   // four gigabytes, and the unordered variants ask for that twice, once for the payload and
+   // once for the fragment flags. Simply ignoring such a block packet is the right reaction,
+   // since no correctly behaving counter side can ever produce one.
+   if (LongMessagePacketHeader^.Length=0) or
+      (LongMessagePacketHeader^.Length>fHost.fMaximumMessageSize) then begin
+    exit;
+   end;
+
    if LongMessagePacketHeader^.Offset=0 then begin
 
     fIncomingMessageNumber:=LongMessagePacketHeader^.MessageNumber;
@@ -22467,6 +22595,16 @@ begin
    LongMessagePacketHeader^.Offset:=TRNLEndianness.LittleEndianToHost32(LongMessagePacketHeader^.Offset);
    LongMessagePacketHeader^.Length:=TRNLEndianness.LittleEndianToHost32(LongMessagePacketHeader^.Length);
 
+   // Length is a raw wire value which is about to drive a heap allocation, so it has to be
+   // bounded before it is used for anything. Unbounded, a single block packet can ask for up to
+   // four gigabytes, and the unordered variants ask for that twice, once for the payload and
+   // once for the fragment flags. Simply ignoring such a block packet is the right reaction,
+   // since no correctly behaving counter side can ever produce one.
+   if (LongMessagePacketHeader^.Length=0) or
+      (LongMessagePacketHeader^.Length>fHost.fMaximumMessageSize) then begin
+    exit;
+   end;
+
    if fIncomingMessageNumber<>LongMessagePacketHeader^.MessageNumber then begin
 
     fIncomingMessageNumber:=LongMessagePacketHeader^.MessageNumber;
@@ -22682,8 +22820,6 @@ begin
  fConnectionToken:=nil;
 
  fAuthenticationToken:=nil;
-
- fUnacknowlegmentedBlockPackets:=0;
 
  fRoundTripTimeFirst:=true;
 
@@ -23384,9 +23520,17 @@ begin
    repeat
     case fState of
      RNL_PEER_STATE_DISCONNECT_LATER:begin
-      if fOutgoingBlockPackets.IsEmpty and
-         (fUnacknowlegmentedBlockPackets=0) then begin
+      // A delayed disconnect waits for everything still outgoing to be delivered, but it has to
+      // do so with an upper bound, otherwise one single item which can not be delivered any more
+      // keeps the peer in this state forever, and it then only ever goes away through the
+      // connection timeout
+      if fDisconnectionTimeout.fValue=0 then begin
+       fDisconnectionTimeout:=fHost.fTime+fHost.fPendingDisconnectionTimeout;
+      end;
+      if (fOutgoingBlockPackets.IsEmpty and (GetCountPendingOutgoing=0)) or
+         (fHost.fTime>=fDisconnectionTimeout) then begin
        fState:=RNL_PEER_STATE_DISCONNECTING;
+       fDisconnectionTimeout.fValue:=0;
       end else begin
        break;
       end;
@@ -24114,13 +24258,19 @@ var NormalPacketHeader:PRNLProtocolNormalPacketHeader;
     PayloadMAC:TRNLCipherMAC;
     CipherNonce:TRNLCipherNonce;
     PacketData:TBytes;
+    SentTime:TRNLUInt16;
+    IncomingPacket:TRNLPeerIncomingPacket;
 begin
 
  PacketData:=nil;
 
  try
 
-  while fIncomingPacketQueue.Dequeue(PacketData) do begin
+  while fIncomingPacketQueue.Dequeue(IncomingPacket) do begin
+
+   // Hand the payload over to PacketData, which owns it from here on
+   PacketData:=IncomingPacket.Data;
+   IncomingPacket.Data:=nil;
 
    try
 
@@ -24145,6 +24295,11 @@ begin
     end;
 
     EncryptedPacketSequenceNumber:=TRNLEndianness.LittleEndianToHost64(NormalPacketHeader^.EncryptedPacketSequenceNumber);
+
+    // Read out while PacketData, which NormalPacketHeader points into, is definitely still
+    // alive. The decompression path below releases PacketData and switches PayloadData over to
+    // the compression buffer, after which NormalPacketHeader dangles.
+    SentTime:=TRNLEndianness.LittleEndianToHost16(NormalPacketHeader^.SentTime);
 
     PayloadData:=TRNLPointer(@PRNLUInt8Array(TRNLPointer(@PacketData[0]))^[SizeOf(TRNLProtocolNormalPacketHeader)]);
 
@@ -24236,6 +24391,24 @@ begin
      fIncomingEncryptedPacketSequenceBuffer[Index]:=EncryptedPacketSequenceNumber;
     end;
 
+    // Only now is this datagram trustworthy: the authenticated decryption above proves that the
+    // sender holds the shared secret of this connection, and the replay window just proved that
+    // this is not a recording of an older one. Both together are what makes it safe to follow the
+    // peer to a new address here.
+    //
+    // Following it is necessary, because the source address of a peer does change in practice,
+    // through a NAT rebinding after an idle period, through a carrier grade NAT reassigning its
+    // ports, or through a handover between networks. Without this, a host keeps sending to the
+    // old address while still receiving from the new one, since the peer lookup goes by peer ID.
+    // The result is a half open connection which the connection timeout can not even clean up,
+    // because incoming traffic keeps refreshing it, while everything sent towards that peer
+    // silently disappears.
+    if not fAddress.Equals(IncomingPacket.Address) then begin
+     fAddress:=IncomingPacket.Address;
+     fPointerToAddress:=@fAddress;
+     inc(fHost.fTotalPeerAddressChanges);
+    end;
+
     if (NormalPacketHeader^.Flags and RNL_PROTOCOL_PACKET_HEADER_FLAG_COMPRESSED)<>0 then begin
 
      if not assigned(fHost.fCompressor) then begin
@@ -24271,13 +24444,11 @@ begin
      PayloadData:=@fHost.fCompressionBuffer[0];
      PayloadDataLength:=DecompressedDataLength;
 
-     PacketData:=nil;
-
     end;
 
     DispatchIncomingPacket(PayloadData^,
                            PayloadDataLength,
-                           TRNLEndianness.LittleEndianToHost16(NormalPacketHeader^.SentTime));
+                           SentTime);
 
    finally
     PacketData:=nil;
@@ -24485,6 +24656,15 @@ begin
 
 end;
 
+function TRNLPeer.GetCountPendingOutgoing:TRNLSizeInt;
+var Channel:TRNLPeerChannel;
+begin
+ result:=0;
+ for Channel in fChannels do begin
+  inc(result,Channel.GetCountPendingOutgoing);
+ end;
+end;
+
 procedure TRNLPeer.SendNewHostBandwidthLimits;
 begin
  if not fSendNewHostBandwidthLimits then begin
@@ -24673,6 +24853,8 @@ begin
 
  fMaximumRetransmissionTimeoutLimit:=320;
 
+ fMaximumReliableBlockPacketSendAttempts:=64;
+
  fRateLimiterHostAddressBurst:=20;
 
  fRateLimiterHostAddressPeriod:=1000;
@@ -24710,6 +24892,10 @@ begin
  fTotalHardReceiveFailures:=0;
 
  fTotalDroppedOutgoingMessages:=0;
+
+ fTotalPeersGivenUpOn:=0;
+
+ fTotalPeerAddressChanges:=0;
 
  fConnectionCandidateHashTable:=nil;
 
@@ -26529,7 +26715,7 @@ procedure TRNLHost.DispatchReceivedNormalPacketData(var aPacketData;const aPacke
 var NormalPacketHeader:PRNLProtocolNormalPacketHeader;
     LocalPeerID:TRNLID;
     Peer:TRNLPeer;
-    PacketData:TBytes;
+    IncomingPacket:TRNLPeerIncomingPacket;
 begin
 
  NormalPacketHeader:=@aPacketData;
@@ -26546,10 +26732,18 @@ begin
   exit;
  end;
 
- SetLength(PacketData,aPacketDataLength);
- Move(aPacketData,PacketData[0],aPacketDataLength);
+ // Deliberately no comparison against the address of the peer here. Doing it here would mean
+ // deciding about an unauthenticated datagram, and it is also what has to stay possible at all:
+ // the source address of a peer does change in practice, through a NAT rebinding after an idle
+ // period, through a carrier grade NAT reassigning its ports, or through a handover between
+ // networks. The address travels along instead and is judged inside the peer, after the
+ // authenticated decryption and the replay window have vouched for the datagram.
+ IncomingPacket.Address:=fReceivedAddress;
 
- Peer.fIncomingPacketQueue.Enqueue(PacketData);
+ SetLength(IncomingPacket.Data,aPacketDataLength);
+ Move(aPacketData,IncomingPacket.Data[0],aPacketDataLength);
+
+ Peer.fIncomingPacketQueue.Enqueue(IncomingPacket);
 
 end;
 

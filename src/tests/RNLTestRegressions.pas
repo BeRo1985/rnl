@@ -1753,6 +1753,623 @@ begin
 
 end;
 
+
+// ---------------------------------------------------------------------------------------
+// Container behaviour
+// ---------------------------------------------------------------------------------------
+
+// The queues of RNL back up in exactly the situations which matter most: a peer which stops
+// acknowledging, a burst which the socket does not accept right now, an application which does
+// not drain its events fast enough. Growing such a queue by a single element per enqueue makes
+// growing it to n elements cost O(n^2) element copies, all of it while holding the queue lock,
+// which turns into a multi second freeze of the service thread and is indistinguishable from a
+// deadlock when looked at in a debugger.
+//
+// This goes straight at the container rather than through a host, because the quadratic term
+// only becomes unmistakable at element counts which no host level test would ever produce.
+procedure TestQueueGrowthIsNotQuadratic;
+const COUNT_ITEMS=200000;
+      TIME_BUDGET_MILLISECONDS=2000;
+var Instance:TRNLInstance;
+    Queue:TRNLQueue<TRNLSizeInt>;
+    Index,Value:TRNLSizeInt;
+    StartTime:TRNLTime;
+    ElapsedMilliseconds:TRNLInt64;
+    Ordered:boolean;
+    Watchdog:TRNLTestWatchdog;
+begin
+
+ TestBegin('queue growth is not quadratic');
+ Watchdog:=TRNLTestWatchdog.Create('queue growth',120000);
+ try
+
+  Instance:=TRNLInstance.Create;
+  try
+
+   Queue:=TRNLQueue<TRNLSizeInt>.Create;
+   try
+
+    StartTime:=Instance.Time;
+
+    for Index:=1 to COUNT_ITEMS do begin
+     Queue.Enqueue(Index);
+    end;
+
+    ElapsedMilliseconds:=TRNLTime.RelativeDifference(Instance.Time,StartTime);
+
+    Info('enqueueing '+TRNLRawByteString(IntToStr(COUNT_ITEMS))+' items took '+
+         TRNLRawByteString(IntToStr(ElapsedMilliseconds))+' ms');
+
+    CheckEqualsInt64(Queue.Count,COUNT_ITEMS,'every item must be in the queue');
+
+    CheckAtMostInt64(ElapsedMilliseconds,TIME_BUDGET_MILLISECONDS,
+                     'enqueueing must not degrade into a quadratic number of element copies');
+
+    // And the queue has to still be a queue afterwards, in order and complete
+    Ordered:=true;
+    for Index:=1 to COUNT_ITEMS do begin
+     if not Queue.Dequeue(Value) then begin
+      Ordered:=false;
+      break;
+     end;
+     if Value<>Index then begin
+      Ordered:=false;
+      break;
+     end;
+    end;
+
+    Check(Ordered,'the geometric growth must not disturb the order or completeness of the queue');
+
+    CheckEqualsInt64(Queue.Count,0,'the queue must be empty again afterwards');
+
+   finally
+    FreeAndNil(Queue);
+   end;
+
+  finally
+   FreeAndNil(Instance);
+  end;
+
+ finally
+  FreeAndNil(Watchdog);
+  TestEnd;
+ end;
+
+end;
+
+// ---------------------------------------------------------------------------------------
+// Address changes
+// ---------------------------------------------------------------------------------------
+
+// The source address of a peer does change in practice, through a NAT rebinding after an idle
+// period, through a carrier grade NAT reassigning its ports, or through a handover between
+// networks. A host has to follow such a change, and it may only do so for a datagram which
+// authenticated correctly and passed the replay window, so that an address can not be moved by
+// anyone who merely knows a peer ID.
+//
+// Not following it does not produce a clean failure either. Since the peer lookup goes by peer
+// ID, the receiving side keeps receiving and therefore keeps considering the connection alive,
+// while everything it sends goes to an address which no longer exists. The result is a half open
+// connection which the connection timeout can not clean up, because incoming traffic keeps
+// refreshing it.
+procedure TestPeerFollowsAnAuthenticatedAddressChange;
+const SERVER_PORT=18244;
+      CLIENT_PORT=18245;
+      CLIENT_PORT_AFTER_REBINDING=18246;
+var Instance:TRNLInstance;
+    VirtualNetwork:TRNLVirtualNetwork;
+    FaultInjector:TRNLNetworkFaultInjector;
+    HostPair:TRNLTestHostPair;
+    OldClientAddress,NewClientAddress:TRNLAddress;
+    ElapsedMilliseconds:TRNLInt64;
+    Watchdog:TRNLTestWatchdog;
+begin
+
+ TestBegin('a peer follows an authenticated address change');
+ Watchdog:=TRNLTestWatchdog.Create('address change',120000);
+ try
+
+  Instance:=TRNLInstance.Create;
+  try
+   VirtualNetwork:=TRNLVirtualNetwork.Create(Instance);
+   try
+    FaultInjector:=TRNLNetworkFaultInjector.Create(Instance,VirtualNetwork);
+    try
+
+     HostPair:=TRNLTestHostPair.Create(Instance,FaultInjector,SERVER_PORT,CLIENT_PORT);
+     try
+
+      if not Check(HostPair.Connect(5000),'the handshake must succeed') then begin
+       exit;
+      end;
+
+      // Both directions have to work before anything is changed, so that a later failure can
+      // not be blamed on the setup
+      HostPair.ClientPeer.Channels[RNL_TEST_HOST_PAIR_CHANNEL_RELIABLE_ORDERED].SendMessageRawByteString(TestMessageText(1));
+      HostPair.ServerPeer.Channels[RNL_TEST_HOST_PAIR_CHANNEL_RELIABLE_ORDERED].SendMessageRawByteString(TestMessageText(2));
+
+      if not Check(HostPair.PumpUntilServerReceived(1,10000,ElapsedMilliseconds) and
+                   HostPair.PumpUntilClientReceived(1,10000,ElapsedMilliseconds),
+                   'the host service loop must stay alive') then begin
+       exit;
+      end;
+
+      if not (CheckEqualsInt64(HostPair.ServerReceivedMessages.Count,1,'the setup must deliver towards the server') and
+              CheckEqualsInt64(HostPair.ClientReceivedMessages.Count,1,'the setup must deliver towards the client')) then begin
+       exit;
+      end;
+
+      Info('server sees the client at port '+TRNLRawByteString(IntToStr(HostPair.ServerPeer.Address^.Port)));
+
+      FaultInjector.AddressSetHost(OldClientAddress,'127.0.0.1');
+      OldClientAddress.Port:=CLIENT_PORT;
+
+      FaultInjector.AddressSetHost(NewClientAddress,'127.0.0.1');
+      NewClientAddress.Port:=CLIENT_PORT_AFTER_REBINDING;
+
+      // And now the address of the client changes underneath the running connection
+      FaultInjector.RebindSourceAddress(OldClientAddress,NewClientAddress);
+
+      HostPair.ClientPeer.Channels[RNL_TEST_HOST_PAIR_CHANNEL_RELIABLE_ORDERED].SendMessageRawByteString(TestMessageText(3));
+      HostPair.ServerPeer.Channels[RNL_TEST_HOST_PAIR_CHANNEL_RELIABLE_ORDERED].SendMessageRawByteString(TestMessageText(4));
+
+      if not Check(HostPair.PumpUntilServerReceived(2,20000,ElapsedMilliseconds),
+                   'the host service loop must stay alive') then begin
+       exit;
+      end;
+
+      if not Check(HostPair.PumpUntilClientReceived(2,20000,ElapsedMilliseconds),
+                   'the host service loop must stay alive') then begin
+       exit;
+      end;
+
+      Info('server sees the client at port '+TRNLRawByteString(IntToStr(HostPair.ServerPeer.Address^.Port))+' now');
+      Info('rebound source addresses: '+TRNLRawByteString(IntToStr(FaultInjector.CountRebindenSourceAddresses)));
+      Info('datagrams towards the stale address: '+TRNLRawByteString(IntToStr(FaultInjector.CountDatagramsToStaleAddress)));
+      Info('server counted peer address changes: '+TRNLRawByteString(IntToStr(HostPair.Server.TotalPeerAddressChanges)));
+
+      CheckAtLeastInt64(FaultInjector.CountRebindenSourceAddresses,1,
+                        'the test must actually have changed the source address of the client');
+
+      CheckAtLeastInt64(HostPair.Server.TotalPeerAddressChanges,1,
+                        'the server must have followed the address change');
+
+      CheckEqualsInt64(HostPair.ServerPeer.Address^.Port,CLIENT_PORT_AFTER_REBINDING,
+                       'the server must have adopted the new address of its peer');
+
+      CheckEqualsInt64(HostPair.ServerReceivedMessages.Count,2,
+                       'traffic towards the server must continue across the address change');
+
+      CheckEqualsInt64(HostPair.ClientReceivedMessages.Count,2,
+                       'traffic towards the client must continue across the address change, '+
+                       'which it only can if the server followed the address');
+
+      CheckEqualsInt64(HostPair.CountClientDisconnectEvents,0,
+                       'the client must not drop the connection over an address change');
+
+      CheckEqualsInt64(HostPair.CountServerDisconnectEvents,0,
+                       'the server must not drop the connection over an address change');
+
+     finally
+      FreeAndNil(HostPair);
+     end;
+
+    finally
+     FreeAndNil(FaultInjector);
+    end;
+   finally
+    FreeAndNil(VirtualNetwork);
+   end;
+  finally
+   FreeAndNil(Instance);
+  end;
+
+ finally
+  FreeAndNil(Watchdog);
+  TestEnd;
+ end;
+
+end;
+
+// ---------------------------------------------------------------------------------------
+// Disconnecting
+// ---------------------------------------------------------------------------------------
+
+// A delayed disconnect waits for everything still outgoing to be delivered. That wait needs an
+// upper bound of its own, because otherwise one single item which can not be delivered any more
+// keeps the peer in that state, and the disconnect then only ever happens through the connection
+// timeout, which is a completely different and much longer period.
+procedure TestDelayedDisconnectAlwaysTerminates;
+const SMALL_DATAGRAM_LIMIT=400;
+      MESSAGE_PADDING_SIZE=600;
+      PENDING_DISCONNECTION_TIMEOUT=1000;
+      CONNECTION_TIMEOUT=30000;
+var Instance:TRNLInstance;
+    VirtualNetwork:TRNLVirtualNetwork;
+    FaultInjector:TRNLNetworkFaultInjector;
+    HostPair:TRNLTestHostPair;
+    StartTime:TRNLTime;
+    ElapsedMilliseconds,TimeBudgetMilliseconds:TRNLInt64;
+    Watchdog:TRNLTestWatchdog;
+begin
+
+ TestBegin('a delayed disconnect always terminates');
+ Watchdog:=TRNLTestWatchdog.Create('delayed disconnect',120000);
+ try
+
+  Instance:=TRNLInstance.Create;
+  try
+   VirtualNetwork:=TRNLVirtualNetwork.Create(Instance);
+   try
+    FaultInjector:=TRNLNetworkFaultInjector.Create(Instance,VirtualNetwork);
+    try
+
+     HostPair:=TRNLTestHostPair.Create(Instance,FaultInjector);
+     try
+
+      // A short disconnection timeout against a long connection timeout, so that it is
+      // unambiguous which of the two ended the wait
+      HostPair.Client.PendingDisconnectionTimeout:=PENDING_DISCONNECTION_TIMEOUT;
+      HostPair.Client.ConnectionTimeout:=CONNECTION_TIMEOUT;
+      HostPair.Server.ConnectionTimeout:=CONNECTION_TIMEOUT;
+
+      if not Check(HostPair.Connect(5000),'the handshake must succeed') then begin
+       exit;
+      end;
+
+      // Undeliverable from here on
+      FaultInjector.MaximumDatagramSize:=SMALL_DATAGRAM_LIMIT;
+
+      HostPair.ClientPeer.Channels[RNL_TEST_HOST_PAIR_CHANNEL_RELIABLE_ORDERED].SendMessageRawByteString(TestMessageText(1,MESSAGE_PADDING_SIZE));
+
+      if not Check(HostPair.Pump(300),'the host service loop must stay alive') then begin
+       exit;
+      end;
+
+      HostPair.ClientPeer.Disconnect(0,true);
+
+      // Generous enough for the disconnection handshake itself, and still far below the
+      // connection timeout
+      TimeBudgetMilliseconds:=(PENDING_DISCONNECTION_TIMEOUT*4)+2000;
+
+      Info('pending disconnection timeout: '+TRNLRawByteString(IntToStr(PENDING_DISCONNECTION_TIMEOUT))+' ms');
+      Info('connection timeout: '+TRNLRawByteString(IntToStr(CONNECTION_TIMEOUT))+' ms');
+      Info('time budget: '+TRNLRawByteString(IntToStr(TimeBudgetMilliseconds))+' ms');
+
+      StartTime:=Instance.Time;
+
+      repeat
+       if not Check(HostPair.Pump(100),'the host service loop must stay alive') then begin
+        exit;
+       end;
+       ElapsedMilliseconds:=TRNLTime.RelativeDifference(Instance.Time,StartTime);
+      until (HostPair.CountClientDisconnectEvents>0) or
+            (ElapsedMilliseconds>=CONNECTION_TIMEOUT);
+
+      Info('the delayed disconnect completed after '+TRNLRawByteString(IntToStr(ElapsedMilliseconds))+' ms');
+
+      if not CheckAtLeastInt64(HostPair.CountClientDisconnectEvents,1,
+                               'the delayed disconnect must complete at all') then begin
+       exit;
+      end;
+
+      CheckAtMostInt64(ElapsedMilliseconds,TimeBudgetMilliseconds,
+                       'the delayed disconnect must be bounded by the disconnection timeout '+
+                       'and not by the connection timeout');
+
+     finally
+      FreeAndNil(HostPair);
+     end;
+
+    finally
+     FreeAndNil(FaultInjector);
+    end;
+   finally
+    FreeAndNil(VirtualNetwork);
+   end;
+  finally
+   FreeAndNil(Instance);
+  end;
+
+ finally
+  FreeAndNil(Watchdog);
+  TestEnd;
+ end;
+
+end;
+
+// A reliable block packet whose acknowledgement is lost for good used to be retransmitted until
+// the end of time. The connection timeout does cover the ordinary case, but not the one where
+// other traffic keeps arriving and therefore keeps the connection looking alive while one
+// channel is permanently stuck, so the retransmission itself needs a bound.
+procedure TestUndeliverableReliablePacketGivesUpOnThePeer;
+const SMALL_DATAGRAM_LIMIT=400;
+      MESSAGE_PADDING_SIZE=600;
+      MAXIMUM_SEND_ATTEMPTS=4;
+      CONNECTION_TIMEOUT=60000;
+var Instance:TRNLInstance;
+    VirtualNetwork:TRNLVirtualNetwork;
+    FaultInjector:TRNLNetworkFaultInjector;
+    HostPair:TRNLTestHostPair;
+    StartTime:TRNLTime;
+    ElapsedMilliseconds:TRNLInt64;
+    Watchdog:TRNLTestWatchdog;
+begin
+
+ TestBegin('an undeliverable reliable packet leads to giving up on the peer');
+ Watchdog:=TRNLTestWatchdog.Create('give up on peer',180000);
+ try
+
+  Instance:=TRNLInstance.Create;
+  try
+   VirtualNetwork:=TRNLVirtualNetwork.Create(Instance);
+   try
+    FaultInjector:=TRNLNetworkFaultInjector.Create(Instance,VirtualNetwork);
+    try
+
+     HostPair:=TRNLTestHostPair.Create(Instance,FaultInjector);
+     try
+
+      // A connection timeout far beyond the test, so that giving up is unambiguously what ended
+      // this connection, and a low attempt limit, so that it happens quickly
+      HostPair.Client.ConnectionTimeout:=CONNECTION_TIMEOUT;
+      HostPair.Server.ConnectionTimeout:=CONNECTION_TIMEOUT;
+      HostPair.Client.MaximumReliableBlockPacketSendAttempts:=MAXIMUM_SEND_ATTEMPTS;
+
+      if not Check(HostPair.Connect(5000),'the handshake must succeed') then begin
+       exit;
+      end;
+
+      Info('maximum send attempts: '+TRNLRawByteString(IntToStr(MAXIMUM_SEND_ATTEMPTS)));
+      Info('connection timeout: '+TRNLRawByteString(IntToStr(CONNECTION_TIMEOUT))+' ms');
+
+      // The payload can not get through from here on, while the keep alive still can, so the
+      // connection keeps looking perfectly alive
+      FaultInjector.MaximumDatagramSize:=SMALL_DATAGRAM_LIMIT;
+
+      HostPair.ClientPeer.Channels[RNL_TEST_HOST_PAIR_CHANNEL_RELIABLE_ORDERED].SendMessageRawByteString(TestMessageText(1,MESSAGE_PADDING_SIZE));
+
+      StartTime:=Instance.Time;
+
+      repeat
+       if not Check(HostPair.Pump(100),'the host service loop must stay alive') then begin
+        exit;
+       end;
+       ElapsedMilliseconds:=TRNLTime.RelativeDifference(Instance.Time,StartTime);
+      until (HostPair.Client.TotalPeersGivenUpOn>0) or
+            (ElapsedMilliseconds>=40000);
+
+      Info('gave up after '+TRNLRawByteString(IntToStr(ElapsedMilliseconds))+' ms');
+      Info('peers given up on: '+TRNLRawByteString(IntToStr(HostPair.Client.TotalPeersGivenUpOn)));
+
+      CheckAtLeastInt64(HostPair.Client.TotalPeersGivenUpOn,1,
+                        'an endlessly undeliverable reliable block packet must lead to giving up');
+
+      CheckAtMostInt64(ElapsedMilliseconds,TRNLInt64(CONNECTION_TIMEOUT) div 2,
+                       'giving up must happen well before the connection timeout would, '+
+                       'because the connection timeout is exactly what does not fire here');
+
+      // And it has to actually result in a disconnect, not just in a counter
+      if not Check(HostPair.Pump(5000),'the host service loop must stay alive') then begin
+       exit;
+      end;
+
+      CheckAtLeastInt64(HostPair.CountClientDisconnectEvents,1,
+                        'giving up on a peer must surface as a disconnect event');
+
+     finally
+      FreeAndNil(HostPair);
+     end;
+
+    finally
+     FreeAndNil(FaultInjector);
+    end;
+   finally
+    FreeAndNil(VirtualNetwork);
+   end;
+  finally
+   FreeAndNil(Instance);
+  end;
+
+ finally
+  FreeAndNil(Watchdog);
+  TestEnd;
+ end;
+
+end;
+
+// ---------------------------------------------------------------------------------------
+// Exactly once delivery
+// ---------------------------------------------------------------------------------------
+
+// A reliable channel promises every message exactly once. On an unordered one the payload is
+// handed to the application as soon as it arrives, rather than in sequence, so a retransmission
+// which arrives while the original is still inside the receive window has to be recognised as the
+// duplicate it is. The replay window one layer below does not help here, because a retransmission
+// carries a fresh encrypted packet sequence number and is therefore not a replay at all.
+//
+// Packet loss is what produces the situation: whenever the payload arrives but its acknowledgement
+// gets lost, the counter side retransmits something which has already been delivered.
+procedure TestReliableUnorderedChannelDeliversEachMessageOnce;
+const COUNT_MESSAGES=20;
+      MESSAGE_PADDING_SIZE=600;
+var Instance:TRNLInstance;
+    VirtualNetwork:TRNLVirtualNetwork;
+    Simulator:TRNLNetworkInterferenceSimulator;
+    HostPair:TRNLTestHostPair;
+    Seen:TStringList;
+    Index,CountDuplicates:TRNLSizeInt;
+    ElapsedMilliseconds:TRNLInt64;
+    Watchdog:TRNLTestWatchdog;
+begin
+
+ TestBegin('a reliable unordered channel delivers each message exactly once');
+ Watchdog:=TRNLTestWatchdog.Create('exactly once delivery',180000);
+ try
+
+  Instance:=TRNLInstance.Create;
+  try
+   VirtualNetwork:=TRNLVirtualNetwork.Create(Instance);
+   try
+    Simulator:=TRNLNetworkInterferenceSimulator.Create(Instance,VirtualNetwork);
+    try
+
+     Simulator.SimulatedIncomingPacketLossProbabilityFactor:=PROBABILITY_THIRTY_PERCENT;
+     Simulator.SimulatedOutgoingPacketLossProbabilityFactor:=PROBABILITY_THIRTY_PERCENT;
+
+     HostPair:=TRNLTestHostPair.Create(Instance,Simulator);
+     try
+
+      if not Check(HostPair.Connect(20000),'the handshake must survive the packet loss') then begin
+       exit;
+      end;
+
+      for Index:=1 to COUNT_MESSAGES do begin
+       HostPair.ClientPeer.Channels[RNL_TEST_HOST_PAIR_CHANNEL_RELIABLE_UNORDERED].SendMessageRawByteString(TestMessageText(Index,MESSAGE_PADDING_SIZE));
+      end;
+
+      if not Check(HostPair.PumpUntilServerReceived(COUNT_MESSAGES,120000,ElapsedMilliseconds),
+                   'the host service loop must stay alive') then begin
+       exit;
+      end;
+
+      // And a while longer, so that any late duplicate would still show up
+      if not Check(HostPair.Pump(2000),'the host service loop must stay alive') then begin
+       exit;
+      end;
+
+      Info('received '+TRNLRawByteString(IntToStr(HostPair.ServerReceivedMessages.Count))+
+           ' message(s) of '+TRNLRawByteString(IntToStr(COUNT_MESSAGES))+' sent, in '+
+           TRNLRawByteString(IntToStr(ElapsedMilliseconds))+' ms');
+
+      Seen:=TStringList.Create;
+      try
+       CountDuplicates:=0;
+       for Index:=0 to HostPair.ServerReceivedMessages.Count-1 do begin
+        if Seen.IndexOf(HostPair.ServerReceivedMessages[Index])>=0 then begin
+         inc(CountDuplicates);
+        end else begin
+         Seen.Add(HostPair.ServerReceivedMessages[Index]);
+        end;
+       end;
+       Info('distinct messages: '+TRNLRawByteString(IntToStr(Seen.Count))+
+            ', duplicates: '+TRNLRawByteString(IntToStr(CountDuplicates)));
+       CheckEqualsInt64(CountDuplicates,0,
+                        'a reliable channel must not hand the same message to the application twice');
+       CheckEqualsInt64(Seen.Count,COUNT_MESSAGES,
+                        'every sent message must arrive exactly once');
+      finally
+       FreeAndNil(Seen);
+      end;
+
+      CheckEqualsInt64(HostPair.ServerReceivedMessages.Count,COUNT_MESSAGES,
+                       'the total number of delivered messages must match the number sent');
+
+     finally
+      FreeAndNil(HostPair);
+     end;
+
+    finally
+     FreeAndNil(Simulator);
+    end;
+   finally
+    FreeAndNil(VirtualNetwork);
+   end;
+  finally
+   FreeAndNil(Instance);
+  end;
+
+ finally
+  FreeAndNil(Watchdog);
+  TestEnd;
+ end;
+
+end;
+
+// ---------------------------------------------------------------------------------------
+// Compression
+// ---------------------------------------------------------------------------------------
+
+// The compressed receive path replaces the payload pointer with the decompression buffer and
+// releases the original packet data, which makes everything still pointing into that packet data
+// dangle. Nothing exercised this path before, so it is worth covering on its own, with payloads
+// which actually do compress.
+procedure TestCompressedTransferStaysIntact;
+const COUNT_MESSAGES=20;
+var Instance:TRNLInstance;
+    VirtualNetwork:TRNLVirtualNetwork;
+    HostPair:TRNLTestHostPair;
+    Index:TRNLSizeInt;
+    ElapsedMilliseconds:TRNLInt64;
+    Expected:TRNLRawByteString;
+    Watchdog:TRNLTestWatchdog;
+begin
+
+ TestBegin('a compressed transfer stays intact');
+ Watchdog:=TRNLTestWatchdog.Create('compressed transfer',120000);
+ try
+
+  Instance:=TRNLInstance.Create;
+  try
+   VirtualNetwork:=TRNLVirtualNetwork.Create(Instance);
+   try
+
+    HostPair:=TRNLTestHostPair.Create(Instance,VirtualNetwork);
+    try
+
+     HostPair.Client.Compressor:=TRNLCompressorLZBRRC.Create;
+     HostPair.Server.Compressor:=TRNLCompressorLZBRRC.Create;
+
+     if not Check(HostPair.Connect(5000),'the handshake must succeed with a compressor in place') then begin
+      exit;
+     end;
+
+     for Index:=1 to COUNT_MESSAGES do begin
+      // Highly repetitive, so that the compressor really does kick in and the compressed
+      // receive path is the one being taken
+      HostPair.ClientPeer.Channels[RNL_TEST_HOST_PAIR_CHANNEL_RELIABLE_ORDERED].SendMessageRawByteString(TestMessageText(Index,700));
+     end;
+
+     if not Check(HostPair.PumpUntilServerReceived(COUNT_MESSAGES,30000,ElapsedMilliseconds),
+                  'the host service loop must stay alive with a compressor in place') then begin
+      exit;
+     end;
+
+     Info('transferred '+TRNLRawByteString(IntToStr(COUNT_MESSAGES))+
+          ' compressible messages in '+TRNLRawByteString(IntToStr(ElapsedMilliseconds))+' ms');
+
+     if not CheckEqualsInt64(HostPair.ServerReceivedMessages.Count,COUNT_MESSAGES,
+                             'every message must arrive through the compressed path') then begin
+      exit;
+     end;
+
+     for Index:=1 to COUNT_MESSAGES do begin
+      Expected:=TestMessageText(Index,700);
+      CheckEqualsRawByteString(TRNLRawByteString(HostPair.ServerReceivedMessages[Index-1]),Expected,
+                               'compressed message '+TRNLRawByteString(IntToStr(Index))+' must arrive intact and in order');
+     end;
+
+     CheckEqualsInt64(HostPair.CountServerDisconnectEvents,0,
+                      'compression must not drop the connection');
+
+    finally
+     FreeAndNil(HostPair);
+    end;
+
+   finally
+    FreeAndNil(VirtualNetwork);
+   end;
+  finally
+   FreeAndNil(Instance);
+  end;
+
+ finally
+  FreeAndNil(Watchdog);
+  TestEnd;
+ end;
+
+end;
+
 procedure RunRegressionTests;
 begin
 
@@ -1785,6 +2402,16 @@ begin
  // Message size constraints and keep alive independence
  TestOversizedReliableMessageDoesNotStallTheChannel;
  TestKeepAliveSurvivesOutstandingReliableBlockPackets;
+
+ // Container behaviour
+ TestQueueGrowthIsNotQuadratic;
+
+ // Address changes, disconnecting and exactly once delivery
+ TestPeerFollowsAnAuthenticatedAddressChange;
+ TestDelayedDisconnectAlwaysTerminates;
+ TestUndeliverableReliablePacketGivesUpOnThePeer;
+ TestReliableUnorderedChannelDeliversEachMessageOnce;
+ TestCompressedTransferStaysIntact;
 
  // The platform specific poll and select code paths
  TestInterruptibleHostBlocksUntilItsTimeout;

@@ -76,12 +76,21 @@ type TRNLNetworkFaultInjector=class(TRNLNetwork)
        fCountOutgoingDatagramsToDrop:TRNLSizeInt;
        fMinimumSizeOfOutgoingDatagramsToDrop:TRNLSizeUInt;
 
+       // Rewrites the source address of every datagram coming from fRebindFromAddress, which is
+       // what a NAT rebinding, a carrier grade NAT reassigning its ports, or a handover between
+       // networks looks like from the far side
+       fRebindEnabled:boolean;
+       fRebindFromAddress:TRNLAddress;
+       fRebindToAddress:TRNLAddress;
+
        fCountSoftSendFailures:TRNLUInt64;
        fCountHardSendFailures:TRNLUInt64;
        fCountSoftReceiveFailures:TRNLUInt64;
        fCountHardReceiveFailures:TRNLUInt64;
        fCountOversizedDatagrams:TRNLUInt64;
        fCountDeterministicallyDroppedDatagrams:TRNLUInt64;
+       fCountRebindenSourceAddresses:TRNLUInt64;
+       fCountDatagramsToStaleAddress:TRNLUInt64;
 
        function Roll(const aProbabilityFactor:TRNLUInt32):boolean;
 
@@ -99,6 +108,18 @@ type TRNLNetworkFaultInjector=class(TRNLNetwork)
        // test can target its own payload carrying datagrams precisely.
        procedure DropNextOutgoingDatagrams(const aCount:TRNLSizeInt;
                                            const aMinimumSize:TRNLSizeUInt=0);
+
+       // Models a complete address change of one side, the way a NAT rebinding or a network
+       // handover really behaves, which needs all three of these at once:
+       //   every datagram arriving from aFromAddress appears to come from aToAddress instead,
+       //   every datagram sent towards aToAddress is delivered to aFromAddress, and
+       //   every datagram sent towards aFromAddress is lost, because that mapping is gone.
+       // The last one is what makes the difference observable at all. Without it the old address
+       // stays reachable and a counter side which never notices the change keeps working by
+       // accident, which is precisely the situation a real network does not offer.
+       // The datagram payload is never touched, so it still passes its authentication.
+       procedure RebindSourceAddress(const aFromAddress,aToAddress:TRNLAddress);
+       procedure StopRebindingSourceAddress;
 
        function AddressSetHost(var aAddress:TRNLAddress;const aName:TRNLRawByteString):boolean; override;
        function AddressGetHost(const aAddress:TRNLAddress;out aName;const aNameLength:TRNLInt32;const aFlags:TRNLInt32=0):boolean; override;
@@ -132,6 +153,8 @@ type TRNLNetworkFaultInjector=class(TRNLNetwork)
        property CountHardReceiveFailures:TRNLUInt64 read fCountHardReceiveFailures;
        property CountOversizedDatagrams:TRNLUInt64 read fCountOversizedDatagrams;
        property CountDeterministicallyDroppedDatagrams:TRNLUInt64 read fCountDeterministicallyDroppedDatagrams;
+       property CountRebindenSourceAddresses:TRNLUInt64 read fCountRebindenSourceAddresses;
+       property CountDatagramsToStaleAddress:TRNLUInt64 read fCountDatagramsToStaleAddress;
 
      end;
 
@@ -158,6 +181,8 @@ begin
  fCountOutgoingDatagramsToDrop:=0;
  fMinimumSizeOfOutgoingDatagramsToDrop:=0;
 
+ fRebindEnabled:=false;
+
  ResetCounters;
 
 end;
@@ -179,6 +204,8 @@ begin
   fCountHardReceiveFailures:=0;
   fCountOversizedDatagrams:=0;
   fCountDeterministicallyDroppedDatagrams:=0;
+  fCountRebindenSourceAddresses:=0;
+  fCountDatagramsToStaleAddress:=0;
  finally
   fLock.Release;
  end;
@@ -191,6 +218,28 @@ begin
  try
   fCountOutgoingDatagramsToDrop:=aCount;
   fMinimumSizeOfOutgoingDatagramsToDrop:=aMinimumSize;
+ finally
+  fLock.Release;
+ end;
+end;
+
+procedure TRNLNetworkFaultInjector.RebindSourceAddress(const aFromAddress,aToAddress:TRNLAddress);
+begin
+ fLock.Acquire;
+ try
+  fRebindFromAddress:=aFromAddress;
+  fRebindToAddress:=aToAddress;
+  fRebindEnabled:=true;
+ finally
+  fLock.Release;
+ end;
+end;
+
+procedure TRNLNetworkFaultInjector.StopRebindingSourceAddress;
+begin
+ fLock.Acquire;
+ try
+  fRebindEnabled:=false;
  finally
   fLock.Release;
  end;
@@ -292,10 +341,42 @@ begin
 end;
 
 function TRNLNetworkFaultInjector.Send(const aSocket:TRNLSocket;const aAddress:PRNLAddress;const aData;const aDataLength:TRNLSizeInt;const aFamily:TRNLAddressFamily):TRNLSizeInt;
-var DoDrop:boolean;
+var DoDrop,DoRedirect:boolean;
+    RedirectedAddress:TRNLAddress;
 begin
 
  DoDrop:=false;
+ DoRedirect:=false;
+
+ if assigned(aAddress) then begin
+  fLock.Acquire;
+  try
+   if fRebindEnabled then begin
+    if aAddress^.Equals(fRebindToAddress) then begin
+     // Towards the new address, so deliver it to the socket which really sits behind it
+     RedirectedAddress:=fRebindFromAddress;
+     DoRedirect:=true;
+    end else if aAddress^.Equals(fRebindFromAddress) then begin
+     // Towards the stale address, whose mapping no longer exists
+     inc(fCountDatagramsToStaleAddress);
+     DoDrop:=true;
+    end;
+   end;
+  finally
+   fLock.Release;
+  end;
+ end;
+
+ if DoDrop then begin
+  // Lost, because nothing is listening behind that mapping any more
+  result:=aDataLength;
+  exit;
+ end;
+
+ if DoRedirect then begin
+  result:=fNetwork.Send(aSocket,@RedirectedAddress,aData,aDataLength,aFamily);
+  exit;
+ end;
 
  fLock.Acquire;
  try
@@ -381,6 +462,18 @@ begin
    fLock.Release;
   end;
   result:=0;
+ end;
+
+ if (result>0) and assigned(aAddress) then begin
+  fLock.Acquire;
+  try
+   if fRebindEnabled and aAddress^.Equals(fRebindFromAddress) then begin
+    aAddress^:=fRebindToAddress;
+    inc(fCountRebindenSourceAddresses);
+   end;
+  finally
+   fLock.Release;
+  end;
  end;
 
 end;
