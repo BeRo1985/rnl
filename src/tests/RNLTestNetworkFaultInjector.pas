@@ -116,8 +116,8 @@ type TRNLNetworkFaultInjector=class(TRNLNetwork)
        // directions apart, and that is what it takes to lose an acknowledgement of one side
        // without touching the payload of the other.
        procedure DropNextOutgoingDatagramsToAddress(const aAddress:TRNLAddress;
-                                                   const aCount:TRNLSizeInt;
-                                                   const aMinimumSize:TRNLSizeUInt=0);
+                                                    const aCount:TRNLSizeInt;
+                                                    const aMinimumSize:TRNLSizeUInt=0);
 
        // Models a complete address change of one side, the way a NAT rebinding or a network
        // handover really behaves, which needs all three of these at once:
@@ -236,8 +236,8 @@ begin
 end;
 
 procedure TRNLNetworkFaultInjector.DropNextOutgoingDatagramsToAddress(const aAddress:TRNLAddress;
-                                                                     const aCount:TRNLSizeInt;
-                                                                     const aMinimumSize:TRNLSizeUInt=0);
+                                                                      const aCount:TRNLSizeInt;
+                                                                      const aMinimumSize:TRNLSizeUInt=0);
 begin
  fLock.Acquire;
  try

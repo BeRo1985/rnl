@@ -69,3 +69,4 @@ __recovery/
 /src/tests/RNLTests
 /src/tests/RNLTests.exe
 /src/tests/units/
+/src/tests/units-win64/

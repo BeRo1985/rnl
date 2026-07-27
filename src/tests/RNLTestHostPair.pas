@@ -65,8 +65,8 @@ type TRNLTestHostPair=class
        fClientServiceStatus:TRNLHostServiceStatus;
 
        function ServiceHost(const aHost:TRNLHost;
-                           const aIsServer:boolean;
-                           const aTimeout:TRNLInt64):boolean;
+                            const aIsServer:boolean;
+                            const aTimeout:TRNLInt64):boolean;
 
       public
 

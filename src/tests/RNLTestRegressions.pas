@@ -39,6 +39,17 @@ const PROBABILITY_ALWAYS=TRNLUInt32($ffffffff);
 
       TEST_MESSAGE_PREFIX='RNLRegressionTestMessage';
 
+{$if defined(Windows)}
+// Declared locally rather than by pulling the whole Windows unit into this test unit.
+// GetProcessHandleCount is not present in every version of the FreePascal and Delphi Windows
+// units anyway, and wine implements it, which is what makes this measurable from a non Windows
+// machine as well.
+function GetCurrentProcess:THandle; stdcall;
+         external 'kernel32.dll' name 'GetCurrentProcess';
+function GetProcessHandleCount(hProcess:THandle;var pdwHandleCount:TRNLUInt32):LongBool; stdcall;
+         external 'kernel32.dll' name 'GetProcessHandleCount';
+{$ifend}
+
 type TRNLTestInterrupterThread=class(TThread)
       private
        fHost:TRNLHost;
@@ -2466,6 +2477,282 @@ begin
 
 end;
 
+
+// ---------------------------------------------------------------------------------------
+// Kernel object usage
+// ---------------------------------------------------------------------------------------
+
+// On Windows the socket wait is emulated on top of WSAEventSelect and
+// WSAWaitForMultipleEvents, and that emulation used to create one event object per socket per
+// call and destroy it again at the end of the same call. A host running a thousand service
+// iterations per second, which is nothing unusual for a game server, therefore created and
+// destroyed a couple of thousand kernel objects per second.
+//
+// Besides being wasteful, that is a failure path: under handle pressure WSACreateEvent returns
+// WSA_INVALID_EVENT, the emulation reports an error, and the host service loop terminates over
+// it. So the handle count has to stay flat no matter how often the host is serviced.
+//
+// Everywhere except Windows this test has nothing to measure, since those platforms call poll
+// or select directly and allocate nothing per call.
+procedure TestSocketWaitDoesNotChurnKernelObjects;
+const COUNT_ITERATIONS=1000;
+      // Must not be zero. With a timeout of zero DispatchIteration returns before it ever gets to
+      // the socket wait, and then this test measures nothing at all.
+      SERVICE_TIMEOUT_MILLISECONDS=1;
+      // One host, one address family, so one socket, and therefore one event object. The bound is
+      // a little above that, so that this asserts "proportional to the sockets" rather than an
+      // exact number.
+      TOLERATED_EVENTS=4;
+var Instance:TRNLInstance;
+    Network:TRNLRealNetwork;
+    Host:TRNLHost;
+    Event:TRNLHostEvent;
+    Index:TRNLSizeInt;
+    EventsAfterWarmup,EventsAtEnd:TRNLUInt64;
+{$if defined(Windows)}
+    HandlesBefore,HandlesAfter:TRNLUInt32;
+{$ifend}
+    Watchdog:TRNLTestWatchdog;
+begin
+
+ TestBegin('the socket wait does not churn kernel objects');
+ Watchdog:=TRNLTestWatchdog.Create('kernel object churn',120000);
+ try
+
+  Instance:=TRNLInstance.Create;
+  try
+   Network:=TRNLRealNetwork.Create(Instance);
+   try
+    Host:=TRNLHost.Create(Instance,Network);
+    try
+
+     Host.Address.Host:=RNL_HOST_ANY;
+     Host.Address.Port:=0;
+     Host.Interruptible:=true;
+     Host.Start(RNL_HOST_ADDRESS_FAMILY_WORK_MODE_IPV4_ONLY);
+
+{$if defined(Windows)}
+     HandlesBefore:=0;
+     HandlesAfter:=0;
+{$ifend}
+
+     Event.Initialize;
+     try
+
+      // A few rounds up front, so that whatever is allocated once and then kept is already in
+      // place when the baseline is taken
+      for Index:=1 to 32 do begin
+       Host.Service(Event,SERVICE_TIMEOUT_MILLISECONDS);
+       Event.Free;
+      end;
+
+      EventsAfterWarmup:=Network.TotalCreatedSocketWaitEvents;
+
+{$if defined(Windows)}
+      GetProcessHandleCount(GetCurrentProcess,HandlesBefore);
+{$ifend}
+
+      for Index:=1 to COUNT_ITERATIONS do begin
+       Host.Service(Event,SERVICE_TIMEOUT_MILLISECONDS);
+       Event.Free;
+      end;
+
+      EventsAtEnd:=Network.TotalCreatedSocketWaitEvents;
+
+{$if defined(Windows)}
+      GetProcessHandleCount(GetCurrentProcess,HandlesAfter);
+{$ifend}
+
+     finally
+      Event.Free;
+     end;
+
+     Info('socket wait event objects created: '+TRNLRawByteString(IntToStr(EventsAtEnd))+
+          ' in total, '+TRNLRawByteString(IntToStr(EventsAtEnd-EventsAfterWarmup))+
+          ' of them during '+TRNLRawByteString(IntToStr(COUNT_ITERATIONS))+' service iterations');
+
+     // Both branches assert the correct expectation of their platform, and both count as one
+     // check, so that the total number of checks stays the same everywhere. On Windows this also
+     // guards against the test quietly measuring nothing, which is what happens with a service
+     // timeout of zero, since the socket wait is then never reached at all.
+{$if defined(Windows)}
+     CheckAtLeastInt64(TRNLInt64(EventsAtEnd),1,
+                       'the socket wait must actually have been reached, otherwise this test '+
+                       'measures nothing');
+{$else}
+     CheckEqualsInt64(TRNLInt64(EventsAtEnd),0,
+                      'no event objects may be created where the socket wait uses poll or '+
+                      'select directly');
+{$ifend}
+
+{$if defined(Windows)}
+     // Only an extra observation, because wine reports zero here, which makes it useless as the
+     // actual measure
+     Info('process handle count: '+TRNLRawByteString(IntToStr(HandlesBefore))+
+          ' before, '+TRNLRawByteString(IntToStr(HandlesAfter))+' after');
+{$ifend}
+
+     // The decisive one. Before the event objects were cached per socket, this grew by one per
+     // socket per service iteration, so by two thousand over this loop.
+     CheckEqualsInt64(TRNLInt64(EventsAtEnd-EventsAfterWarmup),0,
+                      'servicing a host must not create further kernel objects per call');
+
+     CheckAtMostInt64(TRNLInt64(EventsAtEnd),TOLERATED_EVENTS,
+                      'the number of event objects must stay proportional to the number of '+
+                      'sockets and not to the number of calls');
+
+     // And the host has to still work afterwards, so that the caching did not simply break the
+     // socket wait
+     CheckEqualsInt64(TRNLInt64(Host.TotalHardReceiveFailures+Host.TotalHardSendFailures),0,
+                      'the cached event objects must not break the socket wait');
+
+    finally
+     FreeAndNil(Host);
+    end;
+   finally
+    FreeAndNil(Network);
+   end;
+  finally
+   FreeAndNil(Instance);
+  end;
+
+ finally
+  FreeAndNil(Watchdog);
+  TestEnd;
+ end;
+
+end;
+
+// ---------------------------------------------------------------------------------------
+// Unreliable channels
+// ---------------------------------------------------------------------------------------
+
+// Both unreliable channels share one fragmentation implementation and differ only in the size and
+// the content of their two packet headers, so both of them have to be exercised, and both of them
+// with a payload small enough for a single block packet and with one large enough to be split
+// across several. A wrong header size would corrupt the payload offset within the block packet, a
+// wrong header content would break the reassembly, and neither would show up on the short path
+// alone.
+//
+// No loss is injected here. These channels do not retransmit, so the point of this test is that
+// what does arrive arrives intact, complete and, on the ordered channel, in order.
+procedure TestUnreliableChannelsTransportShortAndLongMessages;
+const COUNT_MESSAGES=8;
+      SHORT_PAYLOAD_SIZE=64;
+      // Several times the default MTU, so that this really is split into several block packets
+      LONG_PAYLOAD_SIZE=3000;
+var Instance:TRNLInstance;
+    VirtualNetwork:TRNLVirtualNetwork;
+    HostPair:TRNLTestHostPair;
+    Index,Channel,CountFound:TRNLSizeInt;
+    Expected:TRNLRawByteString;
+    ElapsedMilliseconds:TRNLInt64;
+    Watchdog:TRNLTestWatchdog;
+begin
+
+ TestBegin('the unreliable channels transport short and long messages');
+ Watchdog:=TRNLTestWatchdog.Create('unreliable channels',120000);
+ try
+
+  Instance:=TRNLInstance.Create;
+  try
+   VirtualNetwork:=TRNLVirtualNetwork.Create(Instance);
+   try
+
+    HostPair:=TRNLTestHostPair.Create(Instance,VirtualNetwork);
+    try
+
+     if not Check(HostPair.Connect(5000),'the handshake must succeed') then begin
+      exit;
+     end;
+
+     for Channel:=RNL_TEST_HOST_PAIR_CHANNEL_UNRELIABLE_ORDERED to RNL_TEST_HOST_PAIR_CHANNEL_UNRELIABLE_UNORDERED do begin
+
+      HostPair.ServerReceivedMessages.Clear;
+
+      // Alternating short and long, so that both block packet shapes of this channel are used and
+      // a wrong header size shows up as a corrupted or missing payload
+      for Index:=1 to COUNT_MESSAGES do begin
+       if (Index and 1)<>0 then begin
+        HostPair.ClientPeer.Channels[Channel].SendMessageRawByteString(TestMessageText(Index,SHORT_PAYLOAD_SIZE));
+       end else begin
+        HostPair.ClientPeer.Channels[Channel].SendMessageRawByteString(TestMessageText(Index,LONG_PAYLOAD_SIZE));
+       end;
+      end;
+
+      if not Check(HostPair.PumpUntilServerReceived(COUNT_MESSAGES,20000,ElapsedMilliseconds),
+                   'the host service loop must stay alive') then begin
+       exit;
+      end;
+
+      Info('channel '+TRNLRawByteString(IntToStr(Channel))+': '+
+           TRNLRawByteString(IntToStr(HostPair.ServerReceivedMessages.Count))+' of '+
+           TRNLRawByteString(IntToStr(COUNT_MESSAGES))+' message(s) in '+
+           TRNLRawByteString(IntToStr(ElapsedMilliseconds))+' ms');
+
+      // Nothing is lost on a virtual network without any injected interference, so everything
+      // which was sent has to be here
+      if not CheckEqualsInt64(HostPair.ServerReceivedMessages.Count,COUNT_MESSAGES,
+                              'every message must arrive on channel '+TRNLRawByteString(IntToStr(Channel))) then begin
+       exit;
+      end;
+
+      CountFound:=0;
+      for Index:=1 to COUNT_MESSAGES do begin
+       if (Index and 1)<>0 then begin
+        Expected:=TestMessageText(Index,SHORT_PAYLOAD_SIZE);
+       end else begin
+        Expected:=TestMessageText(Index,LONG_PAYLOAD_SIZE);
+       end;
+       if HostPair.ServerReceivedMessages.IndexOf(String(Expected))>=0 then begin
+        inc(CountFound);
+       end;
+      end;
+
+      CheckEqualsInt64(CountFound,COUNT_MESSAGES,
+                       'every message must arrive intact and complete on channel '+
+                       TRNLRawByteString(IntToStr(Channel)));
+
+      // The ordered channel additionally has to preserve the order it was given
+      if Channel=RNL_TEST_HOST_PAIR_CHANNEL_UNRELIABLE_ORDERED then begin
+       CountFound:=0;
+       for Index:=1 to COUNT_MESSAGES do begin
+        if (Index and 1)<>0 then begin
+         Expected:=TestMessageText(Index,SHORT_PAYLOAD_SIZE);
+        end else begin
+         Expected:=TestMessageText(Index,LONG_PAYLOAD_SIZE);
+        end;
+        if TRNLRawByteString(HostPair.ServerReceivedMessages[Index-1])=Expected then begin
+         inc(CountFound);
+        end;
+       end;
+       CheckEqualsInt64(CountFound,COUNT_MESSAGES,
+                        'the unreliable ordered channel must preserve the order of its messages');
+      end;
+
+     end;
+
+     CheckEqualsInt64(HostPair.CountServerDisconnectEvents,0,
+                      'none of this may drop the connection');
+
+    finally
+     FreeAndNil(HostPair);
+    end;
+
+   finally
+    FreeAndNil(VirtualNetwork);
+   end;
+  finally
+   FreeAndNil(Instance);
+  end;
+
+ finally
+  FreeAndNil(Watchdog);
+  TestEnd;
+ end;
+
+end;
+
 procedure RunRegressionTests;
 begin
 
@@ -2495,6 +2782,9 @@ begin
  TestMTUProbingStaysWithinTheDeclaredLimits;
  TestShrinkingMTUDoesNotBlockTheOutgoingQueue;
 
+ // The unreliable channels and their shared fragmentation
+ TestUnreliableChannelsTransportShortAndLongMessages;
+
  // Message size constraints and keep alive independence
  TestOversizedReliableMessageDoesNotStallTheChannel;
  TestKeepAliveSurvivesOutstandingReliableBlockPackets;
@@ -2512,6 +2802,7 @@ begin
  // The platform specific poll and select code paths
  TestInterruptibleHostBlocksUntilItsTimeout;
  TestInterruptibleHostWakesUpOnInterrupt;
+ TestSocketWaitDoesNotChurnKernelObjects;
 
 end;
 

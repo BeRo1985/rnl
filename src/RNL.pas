@@ -2711,6 +2711,12 @@ type PRNLVersion=^TRNLVersion;
      ERNLRealNetwork=class(Exception);
 
      TRNLRealNetwork=class(TRNLNetwork)
+      private
+       // Counts the event objects which the Windows socket wait emulation really had to create.
+       // It has to stay proportional to the number of sockets and not to the number of calls, so
+       // it is worth being able to look at. Stays zero everywhere else, where the socket wait
+       // goes straight to poll or select and allocates nothing per call.
+       fTotalCreatedSocketWaitEvents:TRNLUInt64;
 {$ifdef Windows}
       private
        type TRNLRealNetworkHandles=array of THandle;
@@ -2722,7 +2728,21 @@ type PRNLVersion=^TRNLVersion;
             end;
             PRNLRealNetworkPollFDs=^TRNLRealNetworkPollFDs;
             TRNLRealNetworkPollFDs=array[0..65535] of TRNLRealNetworkPollFD;
+            TRNLRealNetworkSocketWaitEvent=record
+             Socket:TRNLSocket;
+             Event:THandle;
+            end;
+            TRNLRealNetworkSocketWaitEvents=array of TRNLRealNetworkSocketWaitEvent;
       private
+       fSocketWaitEventLock:TCriticalSection;
+       fSocketWaitEvents:TRNLRealNetworkSocketWaitEvents;
+       // One event object per socket, created on demand and kept until that socket goes away.
+       // Creating and destroying one per call is both wasteful and a failure path, since
+       // WSACreateEvent starts failing under handle pressure and the whole host service loop
+       // used to be terminated over that.
+       function AcquireSocketWaitEvent(const aSocket:TRNLSocket):THandle;
+       procedure ReleaseSocketWaitEvent(const aSocket:TRNLSocket);
+       procedure ReleaseAllSocketWaitEvents;
        function EmulatePoll(const aPollFDs:PRNLRealNetworkPollFDs;const aCount:TRNLSizeInt;const aTimeout:TRNLInt64;const aEvent:TRNLNetworkEvent=nil):TRNLInt32;
 {$else}
       private
@@ -2732,6 +2752,7 @@ type PRNLVersion=^TRNLVersion;
       public
        constructor Create(const aInstance:TRNLInstance); override;
        destructor Destroy; override;
+       property TotalCreatedSocketWaitEvents:TRNLUInt64 read fTotalCreatedSocketWaitEvents;
        function AddressSetHost(var aAddress:TRNLAddress;const aName:TRNLRawByteString):boolean; override;
        function AddressGetHost(const aAddress:TRNLAddress;out aName;const aNameLength:TRNLInt32;const aFlags:TRNLInt32=0):boolean; override;
        function AddressGetHostIP(const aAddress:TRNLAddress;out aName;const aNameLength:TRNLInt32):boolean; override;
@@ -3238,7 +3259,48 @@ type PRNLVersion=^TRNLVersion;
       Length:TRNLUInt32;
      end;
 
-     TRNLPeerUnreliableOrderedChannel=class(TRNLPeerChannel)
+     // Both unreliable channels fragment their outgoing messages in exactly the same way. The
+     // only things which really differ are the size of their two packet headers and what goes
+     // into them, so that is what the hooks below are for, and the shared loop lives here
+     // instead of being duplicated in both of them.
+     //
+     // Note that the reliable channels deliberately do not share this. Their fragmentation is a
+     // different algorithm rather than a different header: it is admitted by a send window
+     // rather than by a per round budget, it counts window slots per fragment, it rejects a
+     // message which can never fit the window at all, it assigns a block packet sequence number
+     // to every fragment, and it hands the result to a channel local queue rather than straight
+     // to the peer. Forcing all of that through common hooks would take about six of them and
+     // would read worse than the two separate implementations do.
+     TRNLPeerUnreliableChannel=class(TRNLPeerChannel)
+      private
+
+       fOutgoingMessageNumber:TRNLSequenceNumber;
+
+       // Sizes of the two channel protocol headers which precede the payload
+       function GetShortMessageHeaderSize:TRNLSizeUInt; virtual; abstract;
+       function GetLongMessageHeaderSize:TRNLSizeUInt; virtual; abstract;
+
+       // Fill in those headers. Called once per block packet, in the order in which the block
+       // packets are produced, so an implementation may advance its own sequence numbering here.
+       procedure WriteShortMessageHeader(const aData:TRNLPointer); virtual; abstract;
+       procedure WriteLongMessageHeader(const aData:TRNLPointer;
+                                        const aMessageNumber:TRNLUInt16;
+                                        const aOffset,aLength:TRNLUInt32); virtual; abstract;
+
+       function GetShortMessageCommandType:TRNLInt32; virtual; abstract;
+       function GetLongMessageCommandType:TRNLInt32; virtual; abstract;
+
+       function GetMaximumUnfragmentedMessageSize:TRNLSizeUInt; override;
+
+       procedure DispatchOutgoingBlockPackets; override;
+
+      public
+
+       constructor Create(const aPeer:TRNLPeer;const aChannelNumber:TRNLUInt16); override;
+
+     end;
+
+     TRNLPeerUnreliableOrderedChannel=class(TRNLPeerUnreliableChannel)
       private
 
        fIncomingSequenceNumber:TRNLSequenceNumber;
@@ -3255,11 +3317,14 @@ type PRNLVersion=^TRNLVersion;
 
        fOutgoingSequenceNumber:TRNLSequenceNumber;
 
-       fOutgoingMessageNumber:TRNLSequenceNumber;
-
-       function GetMaximumUnfragmentedMessageSize:TRNLSizeUInt; override;
-
-       procedure DispatchOutgoingBlockPackets; override;
+       function GetShortMessageHeaderSize:TRNLSizeUInt; override;
+       function GetLongMessageHeaderSize:TRNLSizeUInt; override;
+       procedure WriteShortMessageHeader(const aData:TRNLPointer); override;
+       procedure WriteLongMessageHeader(const aData:TRNLPointer;
+                                        const aMessageNumber:TRNLUInt16;
+                                        const aOffset,aLength:TRNLUInt32); override;
+       function GetShortMessageCommandType:TRNLInt32; override;
+       function GetLongMessageCommandType:TRNLInt32; override;
 
        procedure DispatchIncomingBlockPacket(const aBlockPacket:TRNLPeerBlockPacket); override;
 
@@ -3289,7 +3354,7 @@ type PRNLVersion=^TRNLVersion;
       Length:TRNLUInt32;
      end;
 
-     TRNLPeerUnreliableUnorderedChannel=class(TRNLPeerChannel)
+     TRNLPeerUnreliableUnorderedChannel=class(TRNLPeerUnreliableChannel)
       private
 
        fIncomingMessageNumber:TRNLSequenceNumber;
@@ -3302,11 +3367,14 @@ type PRNLVersion=^TRNLVersion;
 
        fIncomingMessageReceiveBufferFlagData:TRNLPointer;
 
-       fOutgoingMessageNumber:TRNLSequenceNumber;
-
-       function GetMaximumUnfragmentedMessageSize:TRNLSizeUInt; override;
-
-       procedure DispatchOutgoingBlockPackets; override;
+       function GetShortMessageHeaderSize:TRNLSizeUInt; override;
+       function GetLongMessageHeaderSize:TRNLSizeUInt; override;
+       procedure WriteShortMessageHeader(const aData:TRNLPointer); override;
+       procedure WriteLongMessageHeader(const aData:TRNLPointer;
+                                        const aMessageNumber:TRNLUInt16;
+                                        const aOffset,aLength:TRNLUInt32); override;
+       function GetShortMessageCommandType:TRNLInt32; override;
+       function GetLongMessageCommandType:TRNLInt32; override;
 
        procedure DispatchIncomingBlockPacket(const aBlockPacket:TRNLPeerBlockPacket); override;
 
@@ -16285,11 +16353,20 @@ begin
   GlobalInitialize;
   inc(RNLNetworkInitializationReferenceCounter);
  end;
+ fTotalCreatedSocketWaitEvents:=0;
+{$ifdef Windows}
+ fSocketWaitEventLock:=TCriticalSection.Create;
+ fSocketWaitEvents:=nil;
+{$endif}
  inherited Create(aInstance);
 end;
 
 destructor TRNLRealNetwork.Destroy;
 begin
+{$ifdef Windows}
+ ReleaseAllSocketWaitEvents;
+ FreeAndNil(fSocketWaitEventLock);
+{$endif}
  inherited Destroy;
  if RNLNetworkInitializationReferenceCounter>0 then begin
   dec(RNLNetworkInitializationReferenceCounter);
@@ -16300,10 +16377,76 @@ begin
 end;
 
 {$ifdef Windows}
+
+function TRNLRealNetwork.AcquireSocketWaitEvent(const aSocket:TRNLSocket):THandle;
+var Index:TRNLSizeInt;
+begin
+ result:=0;
+ fSocketWaitEventLock.Acquire;
+ try
+  for Index:=0 to length(fSocketWaitEvents)-1 do begin
+   if fSocketWaitEvents[Index].Socket=aSocket then begin
+    result:=fSocketWaitEvents[Index].Event;
+    exit;
+   end;
+  end;
+  result:=WSACreateEvent;
+  if result=THandle(WSA_INVALID_EVENT) then begin
+   result:=THandle(WSA_INVALID_EVENT);
+   exit;
+  end;
+  inc(fTotalCreatedSocketWaitEvents);
+  Index:=length(fSocketWaitEvents);
+  SetLength(fSocketWaitEvents,Index+1);
+  fSocketWaitEvents[Index].Socket:=aSocket;
+  fSocketWaitEvents[Index].Event:=result;
+ finally
+  fSocketWaitEventLock.Release;
+ end;
+end;
+
+procedure TRNLRealNetwork.ReleaseSocketWaitEvent(const aSocket:TRNLSocket);
+var Index,Last:TRNLSizeInt;
+begin
+ fSocketWaitEventLock.Acquire;
+ try
+  Last:=length(fSocketWaitEvents)-1;
+  for Index:=0 to Last do begin
+   if fSocketWaitEvents[Index].Socket=aSocket then begin
+    WSACloseEvent(fSocketWaitEvents[Index].Event);
+    if Index<>Last then begin
+     fSocketWaitEvents[Index]:=fSocketWaitEvents[Last];
+    end;
+    SetLength(fSocketWaitEvents,Last);
+    exit;
+   end;
+  end;
+ finally
+  fSocketWaitEventLock.Release;
+ end;
+end;
+
+procedure TRNLRealNetwork.ReleaseAllSocketWaitEvents;
+var Index:TRNLSizeInt;
+begin
+ if not assigned(fSocketWaitEventLock) then begin
+  exit;
+ end;
+ fSocketWaitEventLock.Acquire;
+ try
+  for Index:=0 to length(fSocketWaitEvents)-1 do begin
+   WSACloseEvent(fSocketWaitEvents[Index].Event);
+  end;
+  fSocketWaitEvents:=nil;
+ finally
+  fSocketWaitEventLock.Release;
+ end;
+end;
+
 function TRNLRealNetwork.EmulatePoll(const aPollFDs:PRNLRealNetworkPollFDs;const aCount:TRNLSizeInt;const aTimeout:TRNLInt64;const AEvent:TRNLNetworkEvent=nil):TRNLInt32;
 var Timeout,Mask,CountEvents,LastResult:TRNLUInt32;
     Events:TRNLRealNetworkHandles;
-    Count,Index,CloseEventIndex:TRNLSizeInt;
+    Count,Index:TRNLSizeInt;
     PollFD:PRNLRealNetworkPollFD;
     ReadSet,WriteSet,ExceptSet:TRNLSocketSet;
     tv:{$if defined(Windows)}TTimeVal{$elseif defined(fpc)}TTimeVal{$else}TimeVal{$ifend};
@@ -16395,19 +16538,15 @@ begin
 
    PollFD^.revents:=0;
 
-   Events[CountEvents]:=WSACreateEvent;
+   // One event object per socket, kept for as long as that socket exists. Creating and
+   // destroying one per call cost two kernel object operations per socket per call, which for a
+   // host doing a thousand service iterations per second means thousands of them per second, and
+   // it turned handle pressure into a terminated host service loop, because WSACreateEvent starts
+   // failing there and this function reported that failure as a hard error.
+   Events[CountEvents]:=AcquireSocketWaitEvent(PollFD^.fd);
 
-   if Events[CountEvents]=WSA_INVALID_EVENT then begin
-    // Everything successfully created so far lives at 0..CountEvents-1. The one at CountEvents
-    // is not a handle at all, and index 0 has to be closed too, so the range is exactly that.
-    // CountEvents is unsigned, so the upper bound has to be computed as a signed value, since
-    // CountEvents can still be zero here, and it must not use the control variable of the
-    // enclosing loop either.
-    CloseEventIndex:=TRNLSizeInt(CountEvents)-1;
-    while CloseEventIndex>=0 do begin
-     WSACloseEvent(Events[CloseEventIndex]);
-     dec(CloseEventIndex);
-    end;
+   if Events[CountEvents]=THandle(WSA_INVALID_EVENT) then begin
+    // Nothing to unwind, the cached events stay owned by their sockets
     result:=-1;
     exit;
    end;
@@ -16455,12 +16594,11 @@ begin
 
    PollFD:=@aPollFDs^[Index];
 
+   // Also resets the event object and the internal network event record of the socket, which is
+   // why the association can simply stay in place until the next round re-arms it
    if WSAEnumNetworkEvents(PollFD^.fd,Events[Index],@NetworkEvents)<>0 then begin
     FillChar(NetworkEvents,SizeOf(TWSANETWORKEVENTS),#0);
    end;
-
-   WSAEventSelect(PollFD^.fd,Events[Index],0);
-   WSACloseEvent(Events[Index]);
 
    if (NetworkEvents.lNetworkEvents and FD_CONNECT)<>0 then begin
     PollFD^.revents:=PollFD^.revents or POLLWRNORM;
@@ -16835,6 +16973,8 @@ procedure TRNLRealNetwork.SocketDestroy(const aSocket:TRNLSocket);
 {$if defined(Windows)}
 begin
  if aSocket<>RNL_INVALID_SOCKET then begin
+  // Before the socket goes away, so that its cached wait event goes with it
+  ReleaseSocketWaitEvent(aSocket);
   CloseSocket(aSocket);
  end;
 end;
@@ -21887,46 +22027,31 @@ begin
 
 end;
 
-constructor TRNLPeerUnreliableOrderedChannel.Create(const aPeer:TRNLPeer;const aChannelNumber:TRNLUInt16);
+constructor TRNLPeerUnreliableChannel.Create(const aPeer:TRNLPeer;const aChannelNumber:TRNLUInt16);
 begin
  inherited Create(aPeer,aChannelNumber);
- fIncomingSequenceNumber:=$ffff;
- fIncomingMessageNumber:=$ffff;
- fIncomingMessageLength:=0;
- fIncomingMessageReceiveBufferData:=nil;
- fIncomingSawLost:=false;
- fOutgoingSequenceNumber:=0;
  fOutgoingMessageNumber:=0;
 end;
 
-destructor TRNLPeerUnreliableOrderedChannel.Destroy;
-begin
- if assigned(fIncomingMessageReceiveBufferData) then begin
-  FreeMem(fIncomingMessageReceiveBufferData);
-  fIncomingMessageReceiveBufferData:=nil;
- end;
- inherited Destroy;
-end;
-
-function TRNLPeerUnreliableOrderedChannel.GetMaximumUnfragmentedMessageSize:TRNLSizeUInt;
+function TRNLPeerUnreliableChannel.GetMaximumUnfragmentedMessageSize:TRNLSizeUInt;
 begin
  result:=fPeer.fMTU-(RNL_IP_HEADER_SIZE+
                      RNL_UDP_HEADER_SIZE+
                      SizeOf(TRNLProtocolNormalPacketHeader)+
                      SizeOf(TRNLProtocolBlockPacketChannel)+
-                     SizeOf(TRNLPeerUnreliableOrderedChannelShortMessagePacketHeader));
+                     GetShortMessageHeaderSize);
 end;
 
-procedure TRNLPeerUnreliableOrderedChannel.DispatchOutgoingBlockPackets;
+procedure TRNLPeerUnreliableChannel.DispatchOutgoingBlockPackets;
 var Message:TRNLMessage;
+    ShortMessageHeaderSize,
+    LongMessageHeaderSize,
     MaximumShortMessageBlockPacketSize,
     MaximumLongMessageBlockPacketSize,
     MessagePartLength,
     MessagePosition:TRNLSizeUInt;
     MaxBlockPacketsToSend,CountBlockPacketsSent:TRNLSizeUInt;
     BlockPacket:TRNLPeerBlockPacket;
-    ShortMessagePacketHeader:PRNLPeerUnreliableOrderedChannelShortMessagePacketHeader;
-    LongMessagePacketHeader:PRNLPeerUnreliableOrderedChannelLongMessagePacketHeader;
 begin
 
  CountBlockPacketsSent:=0;
@@ -21935,17 +22060,20 @@ begin
   exit;
  end;
 
+ ShortMessageHeaderSize:=GetShortMessageHeaderSize;
+ LongMessageHeaderSize:=GetLongMessageHeaderSize;
+
  MaximumShortMessageBlockPacketSize:=fPeer.fMTU-(RNL_IP_HEADER_SIZE+
                                                  RNL_UDP_HEADER_SIZE+
                                                  SizeOf(TRNLProtocolNormalPacketHeader)+
                                                  SizeOf(TRNLProtocolBlockPacketChannel)+
-                                                 SizeOf(TRNLPeerUnreliableOrderedChannelShortMessagePacketHeader));
+                                                 ShortMessageHeaderSize);
 
  MaximumLongMessageBlockPacketSize:=fPeer.fMTU-(RNL_IP_HEADER_SIZE+
                                                 RNL_UDP_HEADER_SIZE+
                                                 SizeOf(TRNLProtocolNormalPacketHeader)+
                                                 SizeOf(TRNLProtocolBlockPacketChannel)+
-                                                SizeOf(TRNLPeerUnreliableOrderedChannelLongMessagePacketHeader));
+                                                LongMessageHeaderSize);
 
  // Bounded on purpose. Whatever is left over stays in the queue and goes out in the next round,
  // which costs a little latency under an extreme burst and in exchange keeps one round from
@@ -21967,20 +22095,18 @@ begin
      try
 
       BlockPacket.fBlockPacket.Channel.Header.TypeAndSubtype:=(TRNLInt32(TRNLProtocolBlockPacketType(RNL_PROTOCOL_BLOCK_PACKET_TYPE_CHANNEL)) shl 0) or
-                                                              (TRNLInt32(TRNLPeerUnreliableOrderedChannelCommandType(RNL_PEER_UNRELIABLE_ORDERED_CHANNEL_COMMAND_TYPE_SHORT_MESSAGE)) shl 4);
+                                                              (GetShortMessageCommandType shl 4);
       BlockPacket.fBlockPacket.Channel.ChannelNumber:=fChannelNumber;
-      BlockPacket.fBlockPacket.Channel.PayloadDataLength:=TRNLEndianness.HostToLittleEndian16(SizeOf(TRNLPeerUnreliableOrderedChannelShortMessagePacketHeader)+Message.fDataLength);
+      BlockPacket.fBlockPacket.Channel.PayloadDataLength:=TRNLEndianness.HostToLittleEndian16(ShortMessageHeaderSize+Message.fDataLength);
 
-      BlockPacket.fBlockPacketDataLength:=SizeOf(TRNLPeerUnreliableOrderedChannelShortMessagePacketHeader)+Message.fDataLength;
+      BlockPacket.fBlockPacketDataLength:=ShortMessageHeaderSize+Message.fDataLength;
 
       SetLength(BlockPacket.fBlockPacketData,BlockPacket.fBlockPacketDataLength);
 
-      ShortMessagePacketHeader:=TRNLPointer(@BlockPacket.fBlockPacketData[0]);
-      ShortMessagePacketHeader^.SequenceNumber:=TRNLEndianness.HostToLittleEndian16(fOutgoingSequenceNumber);
-      inc(fOutgoingSequenceNumber);
+      WriteShortMessageHeader(TRNLPointer(@BlockPacket.fBlockPacketData[0]));
 
       Move(Message.fData^,
-           BlockPacket.fBlockPacketData[SizeOf(TRNLPeerUnreliableOrderedChannelShortMessagePacketHeader)],
+           BlockPacket.fBlockPacketData[ShortMessageHeaderSize],
            Message.fDataLength);
 
      finally
@@ -21999,23 +22125,21 @@ begin
       try
 
        BlockPacket.fBlockPacket.Channel.Header.TypeAndSubtype:=(TRNLInt32(TRNLProtocolBlockPacketType(RNL_PROTOCOL_BLOCK_PACKET_TYPE_CHANNEL)) shl 0) or
-                                                               (TRNLInt32(TRNLPeerUnreliableOrderedChannelCommandType(RNL_PEER_UNRELIABLE_ORDERED_CHANNEL_COMMAND_TYPE_LONG_MESSAGE)) shl 4);
+                                                               (GetLongMessageCommandType shl 4);
        BlockPacket.fBlockPacket.Channel.ChannelNumber:=fChannelNumber;
-       BlockPacket.fBlockPacket.Channel.PayloadDataLength:=TRNLEndianness.HostToLittleEndian16(SizeOf(TRNLPeerUnreliableOrderedChannelLongMessagePacketHeader)+MessagePartLength);
+       BlockPacket.fBlockPacket.Channel.PayloadDataLength:=TRNLEndianness.HostToLittleEndian16(LongMessageHeaderSize+MessagePartLength);
 
-       BlockPacket.fBlockPacketDataLength:=SizeOf(TRNLPeerUnreliableOrderedChannelLongMessagePacketHeader)+MessagePartLength;
+       BlockPacket.fBlockPacketDataLength:=LongMessageHeaderSize+MessagePartLength;
 
        SetLength(BlockPacket.fBlockPacketData,BlockPacket.fBlockPacketDataLength);
 
-       LongMessagePacketHeader:=TRNLPointer(@BlockPacket.fBlockPacketData[0]);
-       LongMessagePacketHeader^.SequenceNumber:=TRNLEndianness.HostToLittleEndian16(fOutgoingSequenceNumber);
-       LongMessagePacketHeader^.MessageNumber:=TRNLEndianness.HostToLittleEndian16(fOutgoingMessageNumber);
-       LongMessagePacketHeader^.Offset:=TRNLEndianness.HostToLittleEndian32(MessagePosition);
-       LongMessagePacketHeader^.Length:=TRNLEndianness.HostToLittleEndian32(Message.fDataLength);
-       inc(fOutgoingSequenceNumber);
+       WriteLongMessageHeader(TRNLPointer(@BlockPacket.fBlockPacketData[0]),
+                              fOutgoingMessageNumber,
+                              MessagePosition,
+                              Message.fDataLength);
 
        Move(PRNLUInt8Array(TRNLPointer(Message.fData))^[MessagePosition],
-            BlockPacket.fBlockPacketData[SizeOf(TRNLPeerUnreliableOrderedChannelLongMessagePacketHeader)],
+            BlockPacket.fBlockPacketData[LongMessageHeaderSize],
             MessagePartLength);
 
       finally
@@ -22038,8 +22162,104 @@ begin
   end;
 
  end;
-
 end;
+
+function TRNLPeerUnreliableOrderedChannel.GetShortMessageHeaderSize:TRNLSizeUInt;
+begin
+ result:=SizeOf(TRNLPeerUnreliableOrderedChannelShortMessagePacketHeader);
+end;
+
+function TRNLPeerUnreliableOrderedChannel.GetLongMessageHeaderSize:TRNLSizeUInt;
+begin
+ result:=SizeOf(TRNLPeerUnreliableOrderedChannelLongMessagePacketHeader);
+end;
+
+procedure TRNLPeerUnreliableOrderedChannel.WriteShortMessageHeader(const aData:TRNLPointer);
+begin
+ PRNLPeerUnreliableOrderedChannelShortMessagePacketHeader(aData)^.SequenceNumber:=TRNLEndianness.HostToLittleEndian16(fOutgoingSequenceNumber);
+ inc(fOutgoingSequenceNumber);
+end;
+
+procedure TRNLPeerUnreliableOrderedChannel.WriteLongMessageHeader(const aData:TRNLPointer;
+                                                                  const aMessageNumber:TRNLUInt16;
+                                                                  const aOffset,aLength:TRNLUInt32);
+var Header:PRNLPeerUnreliableOrderedChannelLongMessagePacketHeader;
+begin
+ Header:=aData;
+ Header^.SequenceNumber:=TRNLEndianness.HostToLittleEndian16(fOutgoingSequenceNumber);
+ Header^.MessageNumber:=TRNLEndianness.HostToLittleEndian16(aMessageNumber);
+ Header^.Offset:=TRNLEndianness.HostToLittleEndian32(aOffset);
+ Header^.Length:=TRNLEndianness.HostToLittleEndian32(aLength);
+ inc(fOutgoingSequenceNumber);
+end;
+
+function TRNLPeerUnreliableOrderedChannel.GetShortMessageCommandType:TRNLInt32;
+begin
+ result:=TRNLInt32(TRNLPeerUnreliableOrderedChannelCommandType(RNL_PEER_UNRELIABLE_ORDERED_CHANNEL_COMMAND_TYPE_SHORT_MESSAGE));
+end;
+
+function TRNLPeerUnreliableOrderedChannel.GetLongMessageCommandType:TRNLInt32;
+begin
+ result:=TRNLInt32(TRNLPeerUnreliableOrderedChannelCommandType(RNL_PEER_UNRELIABLE_ORDERED_CHANNEL_COMMAND_TYPE_LONG_MESSAGE));
+end;
+
+function TRNLPeerUnreliableUnorderedChannel.GetShortMessageHeaderSize:TRNLSizeUInt;
+begin
+ result:=SizeOf(TRNLPeerUnreliableUnorderedChannelShortMessagePacketHeader);
+end;
+
+function TRNLPeerUnreliableUnorderedChannel.GetLongMessageHeaderSize:TRNLSizeUInt;
+begin
+ result:=SizeOf(TRNLPeerUnreliableUnorderedChannelLongMessagePacketHeader);
+end;
+
+procedure TRNLPeerUnreliableUnorderedChannel.WriteShortMessageHeader(const aData:TRNLPointer);
+begin
+ // This header is empty, an unordered channel carries no sequencing of its own
+end;
+
+procedure TRNLPeerUnreliableUnorderedChannel.WriteLongMessageHeader(const aData:TRNLPointer;
+                                                                    const aMessageNumber:TRNLUInt16;
+                                                                    const aOffset,aLength:TRNLUInt32);
+var Header:PRNLPeerUnreliableUnorderedChannelLongMessagePacketHeader;
+begin
+ Header:=aData;
+ Header^.MessageNumber:=TRNLEndianness.HostToLittleEndian16(aMessageNumber);
+ Header^.Offset:=TRNLEndianness.HostToLittleEndian32(aOffset);
+ Header^.Length:=TRNLEndianness.HostToLittleEndian32(aLength);
+end;
+
+function TRNLPeerUnreliableUnorderedChannel.GetShortMessageCommandType:TRNLInt32;
+begin
+ result:=TRNLInt32(TRNLPeerUnreliableUnorderedChannelCommandType(RNL_PEER_UNRELIABLE_UNORDERED_CHANNEL_COMMAND_TYPE_SHORT_MESSAGE));
+end;
+
+function TRNLPeerUnreliableUnorderedChannel.GetLongMessageCommandType:TRNLInt32;
+begin
+ result:=TRNLInt32(TRNLPeerUnreliableUnorderedChannelCommandType(RNL_PEER_UNRELIABLE_UNORDERED_CHANNEL_COMMAND_TYPE_LONG_MESSAGE));
+end;
+
+constructor TRNLPeerUnreliableOrderedChannel.Create(const aPeer:TRNLPeer;const aChannelNumber:TRNLUInt16);
+begin
+ inherited Create(aPeer,aChannelNumber);
+ fIncomingSequenceNumber:=$ffff;
+ fIncomingMessageNumber:=$ffff;
+ fIncomingMessageLength:=0;
+ fIncomingMessageReceiveBufferData:=nil;
+ fIncomingSawLost:=false;
+ fOutgoingSequenceNumber:=0;
+end;
+
+destructor TRNLPeerUnreliableOrderedChannel.Destroy;
+begin
+ if assigned(fIncomingMessageReceiveBufferData) then begin
+  FreeMem(fIncomingMessageReceiveBufferData);
+  fIncomingMessageReceiveBufferData:=nil;
+ end;
+ inherited Destroy;
+end;
+
+
 
 procedure TRNLPeerUnreliableOrderedChannel.DispatchIncomingBlockPacket(const aBlockPacket:TRNLPeerBlockPacket);
 var ChannelCommandType:TRNLPeerUnreliableOrderedChannelCommandType;
@@ -22251,7 +22471,6 @@ begin
  fIncomingMessageLength:=0;
  fIncomingMessageReceiveBufferData:=nil;
  fIncomingMessageReceiveBufferFlagData:=nil;
- fOutgoingMessageNumber:=0;
 end;
 
 destructor TRNLPeerUnreliableUnorderedChannel.Destroy;
@@ -22267,130 +22486,7 @@ begin
  inherited Destroy;
 end;
 
-function TRNLPeerUnreliableUnorderedChannel.GetMaximumUnfragmentedMessageSize:TRNLSizeUInt;
-begin
- result:=fPeer.fMTU-(RNL_IP_HEADER_SIZE+
-                     RNL_UDP_HEADER_SIZE+
-                     SizeOf(TRNLProtocolNormalPacketHeader)+
-                     SizeOf(TRNLProtocolBlockPacketChannel)+
-                     SizeOf(TRNLPeerUnreliableUnorderedChannelShortMessagePacketHeader));
-end;
 
-procedure TRNLPeerUnreliableUnorderedChannel.DispatchOutgoingBlockPackets;
-var Message:TRNLMessage;
-    MaximumShortMessageBlockPacketSize,
-    MaximumLongMessageBlockPacketSize,
-    MessagePartLength,
-    MessagePosition:TRNLSizeUInt;
-    MaxBlockPacketsToSend,CountBlockPacketsSent:TRNLSizeUInt;
-    BlockPacket:TRNLPeerBlockPacket;
-    LongMessagePacketHeader:PRNLPeerUnreliableUnorderedChannelLongMessagePacketHeader;
-begin
-
- CountBlockPacketsSent:=0;
-
- if fOutgoingMessageQueue.IsEmpty then begin
-  exit;
- end;
-
- MaximumShortMessageBlockPacketSize:=fPeer.fMTU-(RNL_IP_HEADER_SIZE+
-                                                 RNL_UDP_HEADER_SIZE+
-                                                 SizeOf(TRNLProtocolNormalPacketHeader)+
-                                                 SizeOf(TRNLProtocolBlockPacketChannel)+
-                                                 SizeOf(TRNLPeerUnreliableUnorderedChannelShortMessagePacketHeader));
-
- MaximumLongMessageBlockPacketSize:=fPeer.fMTU-(RNL_IP_HEADER_SIZE+
-                                                RNL_UDP_HEADER_SIZE+
-                                                SizeOf(TRNLProtocolNormalPacketHeader)+
-                                                SizeOf(TRNLProtocolBlockPacketChannel)+
-                                                SizeOf(TRNLPeerUnreliableUnorderedChannelLongMessagePacketHeader));
-
- // Bounded on purpose. Whatever is left over stays in the queue and goes out in the next round,
- // which costs a little latency under an extreme burst and in exchange keeps one round from
- // turning an arbitrarily long message queue into an equally long burst of datagrams.
- MaxBlockPacketsToSend:=fHost.fMaximumUnreliableBlockPacketsPerDispatch;
-
- while ((MaxBlockPacketsToSend=0) or (CountBlockPacketsSent<MaxBlockPacketsToSend)) and
-       fOutgoingMessageQueue.Peek(Message) do begin
-
-  fOutgoingMessageQueue.Dequeue;
-
-  try
-
-   if (Message.fDataLength>0) and (Message.fDataLength<=fHost.fMaximumMessageSize) then begin
-
-    if Message.fDataLength<=MaximumShortMessageBlockPacketSize then begin
-
-     BlockPacket:=TRNLPeerBlockPacket.Create(fPeer);
-     try
-
-      BlockPacket.fBlockPacket.Channel.Header.TypeAndSubtype:=(TRNLInt32(TRNLProtocolBlockPacketType(RNL_PROTOCOL_BLOCK_PACKET_TYPE_CHANNEL)) shl 0) or
-                                                              (TRNLInt32(TRNLPeerUnreliableUnorderedChannelCommandType(RNL_PEER_UNRELIABLE_UNORDERED_CHANNEL_COMMAND_TYPE_SHORT_MESSAGE)) shl 4);
-      BlockPacket.fBlockPacket.Channel.ChannelNumber:=fChannelNumber;
-      BlockPacket.fBlockPacket.Channel.PayloadDataLength:=TRNLEndianness.HostToLittleEndian16(SizeOf(TRNLPeerUnreliableUnorderedChannelShortMessagePacketHeader)+Message.fDataLength);
-
-      BlockPacket.fBlockPacketDataLength:=SizeOf(TRNLPeerUnreliableUnorderedChannelShortMessagePacketHeader)+Message.fDataLength;
-
-      SetLength(BlockPacket.fBlockPacketData,BlockPacket.fBlockPacketDataLength);
-
-      Move(Message.fData^,
-           BlockPacket.fBlockPacketData[SizeOf(TRNLPeerUnreliableUnorderedChannelShortMessagePacketHeader)],
-           Message.fDataLength);
-
-     finally
-      fPeer.fOutgoingBlockPackets.Enqueue(BlockPacket);
-      inc(CountBlockPacketsSent);
-     end;
-
-    end else begin
-
-     MessagePosition:=0;
-     while MessagePosition<Message.fDataLength do begin
-
-      MessagePartLength:=Min(Max(TRNLInt64(Message.fDataLength-MessagePosition),TRNLInt64(1)),TRNLInt64(MaximumLongMessageBlockPacketSize));
-
-      BlockPacket:=TRNLPeerBlockPacket.Create(fPeer);
-      try
-
-       BlockPacket.fBlockPacket.Channel.Header.TypeAndSubtype:=(TRNLInt32(TRNLProtocolBlockPacketType(RNL_PROTOCOL_BLOCK_PACKET_TYPE_CHANNEL)) shl 0) or
-                                                               (TRNLInt32(TRNLPeerUnreliableUnorderedChannelCommandType(RNL_PEER_UNRELIABLE_UNORDERED_CHANNEL_COMMAND_TYPE_LONG_MESSAGE)) shl 4);
-       BlockPacket.fBlockPacket.Channel.ChannelNumber:=fChannelNumber;
-       BlockPacket.fBlockPacket.Channel.PayloadDataLength:=TRNLEndianness.HostToLittleEndian16(SizeOf(TRNLPeerUnreliableUnorderedChannelLongMessagePacketHeader)+MessagePartLength);
-
-       BlockPacket.fBlockPacketDataLength:=SizeOf(TRNLPeerUnreliableUnorderedChannelLongMessagePacketHeader)+MessagePartLength;
-
-       SetLength(BlockPacket.fBlockPacketData,BlockPacket.fBlockPacketDataLength);
-
-       LongMessagePacketHeader:=TRNLPointer(@BlockPacket.fBlockPacketData[0]);
-       LongMessagePacketHeader^.MessageNumber:=TRNLEndianness.HostToLittleEndian16(fOutgoingMessageNumber);
-       LongMessagePacketHeader^.Offset:=TRNLEndianness.HostToLittleEndian32(MessagePosition);
-       LongMessagePacketHeader^.Length:=TRNLEndianness.HostToLittleEndian32(Message.fDataLength);
-
-       Move(PRNLUInt8Array(TRNLPointer(Message.fData))^[MessagePosition],
-            BlockPacket.fBlockPacketData[SizeOf(TRNLPeerUnreliableUnorderedChannelLongMessagePacketHeader)],
-            MessagePartLength);
-
-      finally
-       fPeer.fOutgoingBlockPackets.Enqueue(BlockPacket);
-       inc(CountBlockPacketsSent);
-      end;
-
-      inc(MessagePosition,MessagePartLength);
-
-     end;
-
-     inc(fOutgoingMessageNumber);
-
-    end;
-
-   end;
-
-  finally
-   Message.DecRef;
-  end;
-
- end;
-end;
 
 procedure TRNLPeerUnreliableUnorderedChannel.DispatchIncomingBlockPacket(const aBlockPacket:TRNLPeerBlockPacket);
 var ChannelCommandType:TRNLPeerUnreliableUnorderedChannelCommandType;
