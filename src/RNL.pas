@@ -2281,11 +2281,25 @@ type PRNLVersion=^TRNLVersion;
       case boolean of
        false:(
         HostAddress:TRNLHostAddress;
+        // Zero for a bucket which stands for a whole address, which is what every direct sender gets.
+        // Behind a relay the port is what tells its clients apart, so there the bucket is per port.
+        Port:TRNLUInt16;
         RateLimiter:TRNLConnectionRequestRateLimiter;
        );
        true:(
        );
      end;
+
+     // One address declared as a relay, with the ceiling for everything arriving from it. A list and
+     // not a hash table on purpose: a deployment names one or two of these, so a scan is cheaper than
+     // a lookup and exact where a direct mapped table would share buckets on a collision.
+     PRNLHostRelayAddress=^TRNLHostRelayAddress;
+     TRNLHostRelayAddress=record
+      Host:TRNLHostAddress;
+      RateLimiter:TRNLConnectionRequestRateLimiter;
+     end;
+
+     TRNLHostRelayAddresses=array of TRNLHostRelayAddress;
 
      PRNLConnectionKnownCandidateHostAddressHashTable=^TRNLConnectionKnownCandidateHostAddressHashTable;
      TRNLConnectionKnownCandidateHostAddressHashTable=record
@@ -2299,7 +2313,10 @@ type PRNLVersion=^TRNLVersion;
        fEntries:TRNLConnectionKnownCandidateHostAddressHashTableEntries;
       public
        procedure Clear;
-       function Find(const aHostAddress:TRNLHostAddress;const aAddIfNotExist:boolean):PRNLConnectionKnownCandidateHostAddress;
+       // aPort zero means a bucket for the address as a whole. Trailing and defaulted, so that every
+       // caller which does not care about ports reads exactly as it did before.
+       function Find(const aHostAddress:TRNLHostAddress;const aAddIfNotExist:boolean;
+                     const aPort:TRNLUInt16=0):PRNLConnectionKnownCandidateHostAddress;
      end;
 
      PRNLConnectionCandidateState=^TRNLConnectionCandidateState;
@@ -4680,7 +4697,12 @@ type PRNLVersion=^TRNLVersion;
        // address and the family logic of the work mode, which is what every host did before.
        fLocalAddresses:array of TRNLAddress;
 
-       fRelayHostAddresses:TRNLHostAddresses;
+       fRelayHostAddresses:TRNLHostRelayAddresses;
+
+       // On, a client of a declared relay is told apart by its relayed port and gets a bucket of its
+       // own. Off, they all share the ceiling, which is what a deployment wants that does not care to
+       // rely on the relay assigning a port per allocation.
+       fRelayRateLimiterPerPort:boolean;
 
        fRateLimiterRelayAddressBurst:TRNLInt64;
 
@@ -4760,6 +4782,8 @@ type PRNLVersion=^TRNLVersion;
        fTotalRateLimitedConnectionRequests:TRNLUInt64;
 
        fTotalRelayedConnectionRequests:TRNLUInt64;
+
+       fTotalRelayCeilingRateLimitedConnectionRequests:TRNLUInt64;
 
        fTotalSimultaneousConnectsWon:TRNLUInt64;
 
@@ -4864,7 +4888,7 @@ type PRNLVersion=^TRNLVersion;
        // normal packet cannot be mistaken for one: without an outstanding query nothing is looked at
        // at all.
        function DispatchReceivedSTUNResponse(const aPacketData;const aPacketDataLength:TRNLSizeUInt):boolean;
-       function IsRelayHostAddress(const aHost:TRNLHostAddress):boolean;
+       function FindRelayHostAddress(const aHost:TRNLHostAddress):PRNLHostRelayAddress;
        function CanReachAddressFamily(const aAddress:TRNLAddress):boolean;
        function FindOwnPendingAttemptTowards(const aAddress:TRNLAddress):TRNLPeer;
        function GetCountSockets:TRNLSizeInt;
@@ -5076,9 +5100,16 @@ type PRNLVersion=^TRNLVersion;
        // and, because the rounds rotate through the list, what any single one of those addresses
        // gets to see. Zero switches the bound off and serves the whole list every round.
        property MaximumCandidatesPerHandshakeRound:TRNLSizeInt read fMaximumCandidatesPerHandshakeRound write fMaximumCandidatesPerHandshakeRound;
+       // Whether clients of a declared relay get a bucket each, told apart by their relayed port, or
+       // all share the ceiling below
+       property RelayRateLimiterPerPort:boolean read fRelayRateLimiterPerPort write fRelayRateLimiterPerPort;
+       // The ceiling for everything arriving from one declared relay address, whatever it is spread
+       // over. Each of its clients is then held to RateLimiterHostAddressBurst on top of that.
        property RateLimiterRelayAddressBurst:TRNLInt64 read fRateLimiterRelayAddressBurst write fRateLimiterRelayAddressBurst;
        property RateLimiterRelayAddressPeriod:TRNLUInt64 read fRateLimiterRelayAddressPeriod write fRateLimiterRelayAddressPeriod;
        property TotalRelayedConnectionRequests:TRNLUInt64 read fTotalRelayedConnectionRequests;
+       // Of those, how many were turned away by the ceiling rather than by their own bucket
+       property TotalRelayCeilingRateLimitedConnectionRequests:TRNLUInt64 read fTotalRelayCeilingRateLimitedConnectionRequests;
        // How long a binding request asked by BeginSTUNQuery waits before it goes out again, and how
        // often before it is given up on
        property STUNQueryTimeout:TRNLInt64 read fSTUNQueryTimeout write fSTUNQueryTimeout;
@@ -18143,10 +18174,12 @@ begin
  FillChar(self,SizeOf(TRNLConnectionKnownCandidateHostAddressHashTable),#0);
 end;
 
-function TRNLConnectionKnownCandidateHostAddressHashTable.Find(const aHostAddress:TRNLHostAddress;const aAddIfNotExist:boolean):PRNLConnectionKnownCandidateHostAddress;
+function TRNLConnectionKnownCandidateHostAddressHashTable.Find(const aHostAddress:TRNLHostAddress;const aAddIfNotExist:boolean;
+                                                               const aPort:TRNLUInt16=0):PRNLConnectionKnownCandidateHostAddress;
 type PToHash=^TToHash;
      TToHash=packed record
       HostAddress:TRNLHostAddress;
+      Port:TRNLUInt16;
      end;
 var ToHash:TToHash;
     Hash,Index:TRNLUInt32;
@@ -18154,10 +18187,12 @@ var ToHash:TToHash;
 begin
  result:=nil;
  ToHash.HostAddress:=aHostAddress;
+ ToHash.Port:=aPort;
  Hash:=TRNLHashUtils.Hash32(ToHash,SizeOf(TToHash));
  Index:=Hash and HashMask;
  Item:=@fEntries[Index];
- if TRNLMemory.SecureIsEqual(Item^.HostAddress,aHostAddress,SizeOf(TRNLHostAddress)) then begin
+ if TRNLMemory.SecureIsEqual(Item^.HostAddress,aHostAddress,SizeOf(TRNLHostAddress)) and
+    (Item^.Port=aPort) then begin
   result:=Item;
  end else if aAddIfNotExist then begin
   // The table is directly mapped with one entry per slot, so a second host address which hashes
@@ -18171,6 +18206,7 @@ begin
   // initialisation either: the whole table is zero filled, and a zero fLastTime lets the first
   // RateLimit call age the budget forward by itself.
   Item^.HostAddress:=aHostAddress;
+  Item^.Port:=aPort;
   result:=Item;
  end;
 end;
@@ -29650,6 +29686,8 @@ begin
 
  // Ten times what a single address gets, which is a guess and no more: how many clients sit
  // behind one relay is not something this host can know
+ fRelayRateLimiterPerPort:=true;
+
  fRateLimiterRelayAddressBurst:=200;
 
  fRateLimiterRelayAddressPeriod:=1000;
@@ -29699,6 +29737,8 @@ begin
  fTotalRateLimitedConnectionRequests:=0;
 
  fTotalRelayedConnectionRequests:=0;
+
+ fTotalRelayCeilingRateLimitedConnectionRequests:=0;
 
  fTotalSimultaneousConnectsWon:=0;
 
@@ -31023,21 +31063,24 @@ end;
 procedure TRNLHost.AddRelayHostAddress(const aHost:TRNLHostAddress);
 var Count:TRNLSizeInt;
 begin
- if IsRelayHostAddress(aHost) then begin
+ if assigned(FindRelayHostAddress(aHost)) then begin
   exit;
  end;
  Count:=length(fRelayHostAddresses);
  SetLength(fRelayHostAddresses,Count+1);
- fRelayHostAddresses[Count]:=aHost;
+ fRelayHostAddresses[Count].Host:=aHost;
+ // Zero filled, and a zero fLastTime lets the first RateLimit call age the budget forward by itself,
+ // exactly as an unused slot of the hash table does
+ FillChar(fRelayHostAddresses[Count].RateLimiter,SizeOf(TRNLConnectionRequestRateLimiter),#0);
 end;
 
-function TRNLHost.IsRelayHostAddress(const aHost:TRNLHostAddress):boolean;
+function TRNLHost.FindRelayHostAddress(const aHost:TRNLHostAddress):PRNLHostRelayAddress;
 var Index:TRNLSizeInt;
 begin
- result:=false;
+ result:=nil;
  for Index:=0 to length(fRelayHostAddresses)-1 do begin
-  if fRelayHostAddresses[Index].Equals(aHost) then begin
-   result:=true;
+  if fRelayHostAddresses[Index].Host.Equals(aHost) then begin
+   result:=@fRelayHostAddresses[Index];
    exit;
   end;
  end;
@@ -31325,8 +31368,7 @@ var ConnectionKnownCandidateHostAddress:PRNLConnectionKnownCandidateHostAddress;
     HostEvent:TRNLHostEvent;
     OwnAttempt:TRNLPeer;
     SimultaneousRemoteSalt:TRNLUInt64;
-    RateLimiterBurst:TRNLInt64;
-    RateLimiterPeriod:TRNLUInt64;
+    RelayHostAddress:PRNLHostRelayAddress;
 begin
 
 {$if defined(RNL_DEBUG) and defined(RNL_DEBUG_SECURITY)}
@@ -31397,26 +31439,61 @@ begin
 
  if not assigned(ConnectionCandidate) then begin
 
-  ConnectionKnownCandidateHostAddress:=fConnectionKnownCandidateHostAddressHashTable^.Find(fReceivedAddress.Host,
-                                                                                           true);
-  if assigned(ConnectionKnownCandidateHostAddress) then begin
-   // A relay is one address for many clients, so it gets the larger bucket. Everything else keeps
-   // the per address one it has always had.
-   if IsRelayHostAddress(fReceivedAddress.Host) then begin
-    inc(fTotalRelayedConnectionRequests);
-    RateLimiterBurst:=fRateLimiterRelayAddressBurst;
-    RateLimiterPeriod:=fRateLimiterRelayAddressPeriod;
-   end else begin
-    RateLimiterBurst:=fRateLimiterHostAddressBurst;
-    RateLimiterPeriod:=fRateLimiterHostAddressPeriod;
-   end;
-   if ConnectionKnownCandidateHostAddress^.RateLimiter.RateLimit(fInstance.Time,
-                                                                 RateLimiterBurst,
-                                                                 RateLimiterPeriod) then begin
+  // A relay is one address for many clients, so one bucket per address would let any one of them lock
+  // out all the others. Two levels instead:
+  //
+  //   One per client, keyed by the relayed port. A relay hands out one relayed address per
+  //   allocation, so the port is what tells its clients apart, and each of them then gets exactly
+  //   what a direct address gets. A single spammer empties its own bucket and nobody else's.
+  //
+  //   One for the relay as a whole, larger. That is the ceiling, and it is what makes the first level
+  //   safe to rely on: opening allocations in a circle would otherwise hand out a fresh bucket every
+  //   time, and a relay which does not assign ports per allocation would collapse the first level
+  //   altogether. Neither gets past the total.
+  //
+  // The ceiling comes first because it is a scan over a list of one or two declared addresses, while
+  // the per client bucket is a hash lookup which then does not have to happen at all.
+  RelayHostAddress:=FindRelayHostAddress(fReceivedAddress.Host);
+
+  if assigned(RelayHostAddress) then begin
+
+   inc(fTotalRelayedConnectionRequests);
+
+   if RelayHostAddress^.RateLimiter.RateLimit(fInstance.Time,
+                                              fRateLimiterRelayAddressBurst,
+                                              fRateLimiterRelayAddressPeriod) then begin
     inc(fTotalRateLimitedConnectionRequests);
+    inc(fTotalRelayCeilingRateLimitedConnectionRequests);
     exit;
    end;
+
+   if fRelayRateLimiterPerPort then begin
+    ConnectionKnownCandidateHostAddress:=fConnectionKnownCandidateHostAddressHashTable^.Find(fReceivedAddress.Host,
+                                                                                             true,
+                                                                                             fReceivedAddress.Port);
+   end else begin
+    // Switched off, so every client of that relay shares the one bucket the ceiling already is. For a
+    // deployment which does not want to rely on the relay assigning ports per allocation at all.
+    ConnectionKnownCandidateHostAddress:=nil;
+   end;
+
   end else begin
+
+   ConnectionKnownCandidateHostAddress:=fConnectionKnownCandidateHostAddressHashTable^.Find(fReceivedAddress.Host,
+                                                                                            true);
+
+  end;
+
+  if assigned(ConnectionKnownCandidateHostAddress) and
+     ConnectionKnownCandidateHostAddress^.RateLimiter.RateLimit(fInstance.Time,
+                                                                fRateLimiterHostAddressBurst,
+                                                                fRateLimiterHostAddressPeriod) then begin
+   inc(fTotalRateLimitedConnectionRequests);
+   exit;
+  end;
+
+  if not (assigned(ConnectionKnownCandidateHostAddress) or assigned(RelayHostAddress)) then begin
+   // No bucket at all, which only happens if the table could not be reached
    exit;
   end;
 

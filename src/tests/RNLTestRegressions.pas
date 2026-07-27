@@ -4067,6 +4067,261 @@ begin
 end;
 
 // ---------------------------------------------------------------------------------------
+// One bucket per client behind a relay, and a ceiling for the relay
+// ---------------------------------------------------------------------------------------
+
+// A bigger shared bucket, which is what a declared relay used to get, does not protect anybody: a
+// single client which floods still empties it and everybody else behind that relay is locked out along
+// with the attacker. The defence cannot tell them apart, and that was the whole complaint.
+//
+// It can tell them apart after all, though not by anything they say. A relay hands out one relayed
+// address per allocation, so the port is what separates its clients, and the port is assigned by the
+// relay rather than by the client. Hence one bucket per relayed port, each held to what a direct
+// address is held to.
+//
+// That alone would have a hole: open allocations in a circle and every one of them brings a fresh
+// bucket. So the port buckets sit under a ceiling for the relay address as a whole. Neither level is
+// sufficient on its own, which is what this test shows in three parts.
+procedure TestRelayClientsGetABucketEachUnderACeiling;
+const TURN_HOST='203.0.113.11';
+      TURN_PORT=3484;
+      RELAYED_HOST='198.51.100.50';
+      SERVER_HOST='127.0.0.1';
+      SERVER_PORT=18620;
+      FIRST_CLIENT_PORT=18621;
+      TURN_USERNAME='rnl';
+      TURN_PASSWORD='secret';
+      COUNT_CLIENTS=3;
+      // One request per client and per second, so a client which asks twice is over its own budget
+      PER_CLIENT_BURST=1;
+      // Room for the three clients but not for a fourth spread over fresh allocations
+      CEILING_BURST=3;
+var Watchdog:TRNLTestWatchdog;
+    Instance:TRNLInstance;
+    VirtualNetwork:TRNLVirtualNetwork;
+    TURNNetwork:TRNLTURNNetwork;
+    TURNServer:TRNLTestTURNServer;
+    Server:TRNLHost;
+    Clients:array[0..COUNT_CLIENTS-1] of TRNLHost;
+    Peers:array[0..COUNT_CLIENTS-1] of TRNLPeer;
+    ServerAddress,TURNAddress:TRNLAddress;
+    RelayedHost:TRNLHostAddress;
+    Event:TRNLHostEvent;
+    StartTime:TRNLTime;
+    Index,CountConnected:TRNLSizeInt;
+    SpammerSocket:TRNLSocket;
+    Spammer:TRNLHost;
+    LimitedAfterHonestClients,CeilingAfterHonestClients:TRNLUInt64;
+
+ function AddressOf(const aHost:TRNLRawByteString;const aPort:TRNLUInt16):TRNLAddress;
+ begin
+  FillChar(result,SizeOf(TRNLAddress),#0);
+  VirtualNetwork.AddressSetHost(result,aHost);
+  result.Port:=aPort;
+ end;
+
+ procedure Pump(const aMilliseconds:TRNLInt64);
+ var Until_:TRNLTime;
+     ClientIndex:TRNLSizeInt;
+ begin
+  Until_:=Instance.Time+aMilliseconds;
+  repeat
+   while Server.Service(Event,0)=RNL_HOST_SERVICE_STATUS_EVENT do begin
+    if Event.Type_=RNL_HOST_EVENT_TYPE_PEER_CONNECT then begin
+     inc(CountConnected);
+    end;
+    Event.Free;
+   end;
+   Event.Free;
+   for ClientIndex:=0 to COUNT_CLIENTS-1 do begin
+    if assigned(Clients[ClientIndex]) then begin
+     while Clients[ClientIndex].Service(Event,0)=RNL_HOST_SERVICE_STATUS_EVENT do begin
+      Event.Free;
+     end;
+     Event.Free;
+    end;
+   end;
+   if assigned(Spammer) then begin
+    while Spammer.Service(Event,0)=RNL_HOST_SERVICE_STATUS_EVENT do begin
+     Event.Free;
+    end;
+    Event.Free;
+   end;
+   Sleep(1);
+  until Instance.Time>=Until_;
+ end;
+
+begin
+
+ TestBegin('every client behind a relay gets a bucket of its own under a ceiling for the relay');
+ Watchdog:=TRNLTestWatchdog.Create('relay per client budget',180000);
+ try
+
+  CountConnected:=0;
+  Spammer:=nil;
+  SpammerSocket:=RNL_SOCKET_NULL;
+  for Index:=0 to COUNT_CLIENTS-1 do begin
+   Clients[Index]:=nil;
+   Peers[Index]:=nil;
+  end;
+
+  Instance:=TRNLInstance.Create;
+  try
+   VirtualNetwork:=TRNLVirtualNetwork.Create(Instance);
+   try
+
+    ServerAddress:=AddressOf(SERVER_HOST,SERVER_PORT);
+    TURNAddress:=AddressOf(TURN_HOST,TURN_PORT);
+    RelayedHost:=AddressOf(RELAYED_HOST,0).Host;
+
+    TURNServer:=TRNLTestTURNServer.Create(Instance,VirtualNetwork,TURN_PORT,
+                                          RNL_TEST_TURN_SERVER_CORRECT,
+                                          TURNAddress.Host,RelayedHost,
+                                          TURN_USERNAME,TURN_PASSWORD);
+    try
+
+     Server:=TRNLHost.Create(Instance,VirtualNetwork);
+     try
+
+      Server.Address.Host:=ServerAddress.Host;
+      Server.Address.Port:=SERVER_PORT;
+
+      // Periods far longer than the test, so that a budget once spent stays spent and nothing refills
+      // behind the assertions
+      Server.RateLimiterHostAddressBurst:=PER_CLIENT_BURST;
+      Server.RateLimiterHostAddressPeriod:=60000;
+      Server.AddRelayHostAddress(RelayedHost);
+      Server.RateLimiterRelayAddressBurst:=CEILING_BURST;
+      Server.RateLimiterRelayAddressPeriod:=60000;
+      Server.Start(RNL_HOST_ADDRESS_FAMILY_WORK_MODE_IPV4_ONLY);
+
+      TURNNetwork:=TRNLTURNNetwork.Create(Instance,VirtualNetwork,TURNAddress,
+                                          TURN_USERNAME,TURN_PASSWORD);
+      try
+
+       try
+
+        // Three honest clients behind one relay, each with its own allocation and therefore its own
+        // relayed port
+        for Index:=0 to COUNT_CLIENTS-1 do begin
+         Clients[Index]:=TRNLHost.Create(Instance,TURNNetwork);
+         Clients[Index].Address.Host:=AddressOf(SERVER_HOST,0).Host;
+         Clients[Index].Address.Port:=FIRST_CLIENT_PORT+Index;
+         Clients[Index].Start(RNL_HOST_ADDRESS_FAMILY_WORK_MODE_IPV4_ONLY);
+        end;
+
+        if not Check(TURNNetwork.TotalAllocations=COUNT_CLIENTS,
+                     'every client has to have got an allocation of its own') then begin
+         exit;
+        end;
+
+        for Index:=0 to COUNT_CLIENTS-1 do begin
+         Peers[Index]:=Clients[Index].Connect(ServerAddress);
+         if assigned(Peers[Index]) then begin
+          Peers[Index].IncRef;
+         end;
+        end;
+
+        StartTime:=Instance.Time;
+        Event.Initialize;
+        try
+         repeat
+          Pump(10);
+         until (CountConnected>=COUNT_CLIENTS) or
+               (TRNLTime.RelativeDifference(Instance.Time,StartTime)>=5000);
+        finally
+         Event.Free;
+        end;
+
+        LimitedAfterHonestClients:=Server.TotalRateLimitedConnectionRequests;
+        CeilingAfterHonestClients:=Server.TotalRelayCeilingRateLimitedConnectionRequests;
+
+        Info('three clients behind one relay: '+TRNLRawByteString(IntToStr(CountConnected))+
+             ' connected, '+TRNLRawByteString(IntToStr(LimitedAfterHonestClients))+
+             ' request(s) turned away, of those '+
+             TRNLRawByteString(IntToStr(CeilingAfterHonestClients))+' by the ceiling');
+        Info('relayed requests seen: '+
+             TRNLRawByteString(IntToStr(Server.TotalRelayedConnectionRequests)));
+
+        // Part one: a budget of one request each is enough for each of them, because each of them has
+        // one. With a single shared budget only the first would have got through.
+        CheckEqualsInt64(CountConnected,COUNT_CLIENTS,
+                         'a budget of one request each lets all three in, which one shared budget of '+
+                         'one could not');
+
+        CheckEqualsInt64(LimitedAfterHonestClients,0,
+                         'and none of them is turned away');
+
+        // Part two: a fourth client keeps opening a fresh allocation, so it keeps getting a fresh
+        // port and therefore a fresh bucket of its own. Only the ceiling stops that.
+        Spammer:=TRNLHost.Create(Instance,TURNNetwork);
+        Spammer.Address.Host:=AddressOf(SERVER_HOST,0).Host;
+        Spammer.Address.Port:=FIRST_CLIENT_PORT+COUNT_CLIENTS;
+        Spammer.Start(RNL_HOST_ADDRESS_FAMILY_WORK_MODE_IPV4_ONLY);
+
+        StartTime:=Instance.Time;
+        repeat
+         // A fresh connection attempt every round, each with a salt of its own, which is what a flood
+         // looks like from the outside
+         Spammer.Connect(ServerAddress);
+         Pump(20);
+        until (Server.TotalRelayCeilingRateLimitedConnectionRequests>CeilingAfterHonestClients) or
+              (TRNLTime.RelativeDifference(Instance.Time,StartTime)>=5000);
+
+        Info('after the spammer: '+
+             TRNLRawByteString(IntToStr(Server.TotalRateLimitedConnectionRequests))+
+             ' turned away in total, of those '+
+             TRNLRawByteString(IntToStr(Server.TotalRelayCeilingRateLimitedConnectionRequests))+
+             ' by the ceiling');
+
+        CheckAtLeastInt64(Server.TotalRelayCeilingRateLimitedConnectionRequests,1,
+                          'a client which keeps asking has to run into the ceiling, which is what '+
+                          'keeps the per port buckets from being a way around the limit');
+
+        // Part three, and the point of having two levels at all: the three which were already in stay
+        // in. Their connections are untouched by the ceiling having been reached.
+        CheckEqualsInt64(CountConnected,COUNT_CLIENTS,
+                         'while the three which were already connected are unaffected by it');
+
+       finally
+        for Index:=0 to COUNT_CLIENTS-1 do begin
+         if assigned(Peers[Index]) then begin
+          Peers[Index].DecRef;
+         end;
+        end;
+        for Index:=0 to COUNT_CLIENTS-1 do begin
+         FreeAndNil(Clients[Index]);
+        end;
+        FreeAndNil(Spammer);
+       end;
+
+      finally
+       FreeAndNil(TURNNetwork);
+      end;
+
+     finally
+      FreeAndNil(Server);
+     end;
+
+    finally
+     FreeAndNil(TURNServer);
+    end;
+
+   finally
+    FreeAndNil(VirtualNetwork);
+   end;
+  finally
+   FreeAndNil(Instance);
+  end;
+
+ finally
+  FreeAndNil(Watchdog);
+  TestEnd;
+ end;
+
+end;
+
+// ---------------------------------------------------------------------------------------
 // The flooding limit behind a relay
 // ---------------------------------------------------------------------------------------
 
@@ -7370,6 +7625,7 @@ begin
  TestConnectionOverATURNRelay;
  TestRelayReachedOverAStream;
  TestRelayAddressGetsItsOwnFloodingBudget;
+ TestRelayClientsGetABucketEachUnderACeiling;
  TestTURNChannelNumbersAreReleasedAndReused;
 
  // The NAT simulator, which every later punching test will rest on

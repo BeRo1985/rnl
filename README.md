@@ -68,6 +68,11 @@ are the typical case for egoshooters, racing games, and so forth. Or in other wo
        - Authentication tokens are transferred encrypted, after the private/public key exchange, shared secret key generation, etc. were successfully processed. Authentication tokens, in contrast to the connection token, are NOT a countermeasure against DDoS-category attacks, but rather authentication tokens are, as the name suggests, only for separate out-of-band communication channel authentication purposes, in other words, as additional protection against unauthorized connections, where you can check it in more detail on your master backend side of your infrastructure, before the "client" can connect to the real server, where all the real action happens.
    - Connection attempt rate limiter
        - Configurable with two constants, burst and period
+       - Relay aware: an address which was declared as a relay is limited on two levels at once, a
+         bucket per client behind it and a ceiling for the relay as a whole. Behind a relay every
+         client arrives under the same address, so a single bucket would let any one of them lock out
+         all the others; the clients are told apart by the relayed port, which the relay assigns per
+         allocation, and the ceiling is what keeps that from being a way around the limit
    - Configurable bandwidth rate limiter
    - Optional virtual network feature (for example for fast network-API-less local loopback solution for singleplayer game matches, which should be still server/client concept based)
    - Network interference simulator (for example for testcases and so on)
@@ -82,11 +87,73 @@ are the typical case for egoshooters, racing games, and so forth. Or in other wo
        - Deflate (a zlib bit-stream compatible LZ77 and canonical Huffman hybrid, only fixed-static-canonical-huffman in this implementation here on compressor side, but the decompressor side is full featured)
        - LZBRRC (a LZ77-style compressor together with an entropy range coder backend)
        - BRRC (a pure order 0 entropy range coder)
-   - CRC32C instead CRC32 (without C at the end)
+   - CRC32C instead CRC32 (without C at the end), and CRC32 (IEEE) as well, which STUN needs for its
+     FINGERPRINT attribute
+   - Optional handshake transcript binding
+       - The signatures of the mutual authentication cover the whole transcript of the handshake,
+         including the fields which travel in clear text, rather than only the two ephemeral keys
+       - Three modes, off, allowed and required. Off by default, so that existing code keeps behaving
+         exactly as it did, down to the same bytes on the wire and the same protocol version; only
+         required is fully safe, and allowed exists as a migration step and can be downgraded by an
+         attacker rewriting one clear text version field, which is why it says so here
+       - The long term public key the counter side proved possession of is available on every
+         connection and can be pinned
+   - NAT traversal
+       - Candidate gathering: one host candidate per local interface address and socket, one server
+         reflexive candidate per STUN server which answers, and a relayed one if a relay is in front
+         of the network. Priority and foundation as RFC 8445 computes them, plus serialisation, so
+         that the application can carry candidates over whatever signalling it already has
+       - STUN client (RFC 8489). FINGERPRINT is included and checked, which is what makes it possible
+         for STUN and RNL to share one socket. Usable during startup, and also while a host is being
+         serviced, in which case the host answers its own binding requests out of its receive path
+       - NAT behaviour discovery, split the way RFC 4787 splits it. The mapping behaviour comes from
+         two servers on different hosts, the filtering behaviour from RFC 5780 CHANGE-REQUEST where a
+         server offers it and stays unknown where none does. From the two of them plus the counter
+         side's, the viability of a direct connection can be predicted before it is attempted rather
+         than after a ten second timeout
+       - Hole punching. The handshake repetition fans out over every pairing of a local socket with a
+         remote candidate, bounded per round so that a candidate list from the counter side cannot
+         turn this host into a sender of padded datagrams at every address in it. A four byte punch
+         packet opens a mapping without starting a connection, for the side which is being called
+       - Two sides connecting to each other at the same time end up with one connection rather than
+         two, resolved by comparing the random salts both sides exchange anyway, without a protocol
+         field for it
+       - One socket per named local address instead of one per address family, for a host which wants
+         to decide which interfaces it is reachable on. A peer then keeps the socket its handshake ran
+         over, because an answer has to leave where the question came in
+   - TURN relay (RFC 8656) for the case a direct path cannot be had at all
+       - As a network decorator, so that host and peer never learn about it
+       - Allocate, Refresh, CreatePermission and ChannelBind, long term credentials with both
+         MESSAGE-INTEGRITY and MESSAGE-INTEGRITY-SHA256, realm and nonce handling including the
+         STALE_NONCE retry
+       - ChannelData once a channel is bound, which replaces the thirty six bytes of a Send indication
+         around every datagram with four. Channel numbers are let go of when they go quiet and come
+         back into circulation after the delay RFC 8656 requires
+       - IPv6 allocations through REQUESTED-ADDRESS-FAMILY, asked for only where it is needed, since
+         the attribute is comprehension required and a relay which does not know it would refuse
+       - UDP or TCP as the transport to the relay. TCP is there for the network which lets no UDP out
+         at all, which is exactly the case a relay exists for
+   - Hash primitives
+       - SHA-512 and BLAKE2B for the handshake, plus SHA-256, SHA-1 and MD5 for what STUN and TURN
+         need of them. SHA-1 and MD5 are only ever used for the credentials of a relay which speaks
+         the older revision, never for anything RNL itself protects, and can be switched off
+       - One HMAC implementation for all of them, over a descriptor of the hash rather than a generic
+         type parameter, so that it compiles on FreePascal and Delphi alike
+   - Cryptography self test callable at run time, so that a build can prove its own primitives against
+     the published test vectors instead of assuming them
    - And a lot of more stuff  . . .
 
 # Planned features (a.k.a Todo) in random order of priorities
 
+   - TLS as a transport to the TURN relay. Plain TCP is there, which already covers a network that
+     blocks UDP; TLS additionally covers one which only lets TLS out. It needs a TLS stack, which RNL
+     does not have and which is a good deal larger than everything around it, so the sensible shape is
+     an external library behind a callback interface rather than own code
+   - Single stage certificates for the mutual authentication, so that a client can carry one CA public
+     key instead of one pinned key per server. That is what pinning cannot do: key rotation and
+     several servers behind one name
+   - Adaptive congestion control. The measurements are already taken, they are simply not acted upon
+     yet, and a relayed path is where it would matter most
    - TODO
 
 # General guidelines for code contributors 
