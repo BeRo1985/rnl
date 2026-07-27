@@ -2908,12 +2908,409 @@ begin
 
 end;
 
+procedure TestBandwidthRateLimiterHonoursItsPeriodLength;
+const MAXIMUM_PER_PERIOD=100000;
+      PERIOD_LENGTH=1000;
+      CHUNK=1000;
+var RateLimiter:TRNLBandwidthRateLimiter;
+    Index,CountAllowedInFirstPeriod,CountAllowedAfterPeriodEnd:TRNLSizeInt;
+    Time:TRNLTime;
+begin
+
+ TestBegin('the bandwidth rate limiter honours its period length');
+ try
+
+  // The maximum per period and the length of a period must differ here. They are two entirely
+  // different quantities, an amount and a duration, and equal values would hide any confusion
+  // between the two, which is exactly what this test is about.
+  RateLimiter.Setup(MAXIMUM_PER_PERIOD,PERIOD_LENGTH);
+
+  // Any point in time will do, the limiter only ever looks at differences
+  Time:=1000000;
+  RateLimiter.Reset(Time);
+
+  CountAllowedInFirstPeriod:=0;
+  for Index:=1 to (MAXIMUM_PER_PERIOD div CHUNK)+1 do begin
+   if RateLimiter.CanProceed(CHUNK,Time) then begin
+    RateLimiter.AddAmount(CHUNK,Time);
+    inc(CountAllowedInFirstPeriod);
+   end;
+  end;
+
+  CheckEqualsInt64(CountAllowedInFirstPeriod,MAXIMUM_PER_PERIOD div CHUNK,
+                   'the budget of a single period has to be exactly the configured maximum, so '+
+                   'one attempt beyond it must be refused');
+
+  // One period length plus a millisecond later the whole budget has to be available again. This
+  // is the assertion that matters, because it is the only one which can tell a period measured
+  // in milliseconds apart from a period whose length was taken from the amount instead.
+  Time:=Time+(PERIOD_LENGTH+1);
+
+  CountAllowedAfterPeriodEnd:=0;
+  for Index:=1 to MAXIMUM_PER_PERIOD div CHUNK do begin
+   if RateLimiter.CanProceed(CHUNK,Time) then begin
+    RateLimiter.AddAmount(CHUNK,Time);
+    inc(CountAllowedAfterPeriodEnd);
+   end;
+  end;
+
+  Info('allowed in the first period: '+TRNLRawByteString(IntToStr(CountAllowedInFirstPeriod))+
+       ', allowed '+TRNLRawByteString(IntToStr(PERIOD_LENGTH+1))+' ms later: '+
+       TRNLRawByteString(IntToStr(CountAllowedAfterPeriodEnd)));
+
+  CheckEqualsInt64(CountAllowedAfterPeriodEnd,MAXIMUM_PER_PERIOD div CHUNK,
+                   'and once the period length has elapsed the full budget has to be available '+
+                   'again, otherwise the period lasts as long as there are units in it and the '+
+                   'effective rate becomes one unit per millisecond regardless of the limit');
+
+ finally
+  TestEnd;
+ end;
+
+end;
+
+procedure TestBandwidthLimitedHostKeepsSendingAfterTheFirstPeriod;
+const OUTGOING_BANDWIDTH_LIMIT_BITS=400000;      // 50000 bytes per second
+      MESSAGE_SIZE=1000;
+      COUNT_MESSAGES=600;
+      FIRST_STRETCH_MILLISECONDS=1200;
+      SECOND_STRETCH_MILLISECONDS=1500;
+      MINIMUM_BYTES_AFTER_FIRST_STRETCH=20000;
+var Instance:TRNLInstance;
+    Network:TRNLVirtualNetwork;
+    HostPair:TRNLTestHostPair;
+    Index:TRNLSizeInt;
+    BytesAfterFirstStretch,BytesAtEnd:TRNLUInt64;
+    Watchdog:TRNLTestWatchdog;
+begin
+
+ TestBegin('a bandwidth limited host keeps sending after its first period');
+ Watchdog:=TRNLTestWatchdog.Create('bandwidth limited sending',120000);
+ try
+
+  Instance:=TRNLInstance.Create;
+  try
+   Network:=TRNLVirtualNetwork.Create(Instance);
+   try
+    HostPair:=TRNLTestHostPair.Create(Instance,Network,18272,18273);
+    try
+
+     if not Check(HostPair.Connect,'the host pair has to connect') then begin
+      exit;
+     end;
+
+     // Deliberately set after the handshake, so that the handshake itself is never subject to
+     // the limit and only the payload transfer below is being measured
+     HostPair.Client.OutgoingBandwidthLimit:=OUTGOING_BANDWIDTH_LIMIT_BITS;
+
+     for Index:=1 to COUNT_MESSAGES do begin
+      HostPair.ClientPeer.Channels[RNL_TEST_HOST_PAIR_CHANNEL_RELIABLE_ORDERED].SendMessageRawByteString(TestMessageText(Index,MESSAGE_SIZE));
+     end;
+
+     // Measured at the socket, on purpose, and not in delivered messages. A limit this low
+     // makes the limiter drop the bulk of the datagrams, and on an ordered reliable channel the
+     // next message can only be handed to the application once the earliest missing fragment has
+     // been retransmitted. Delivered messages therefore say very little about whether the sender
+     // is still sending at all, which is the only thing this test is about.
+     if not Check(HostPair.Pump(FIRST_STRETCH_MILLISECONDS),
+                  'no host service error while the first budget is being spent') then begin
+      exit;
+     end;
+     BytesAfterFirstStretch:=HostPair.Server.TotalReceivedData;
+
+     if not Check(HostPair.Pump(SECOND_STRETCH_MILLISECONDS),
+                  'and none afterwards either') then begin
+      exit;
+     end;
+     BytesAtEnd:=HostPair.Server.TotalReceivedData;
+
+     Info('limit '+TRNLRawByteString(IntToStr(OUTGOING_BANDWIDTH_LIMIT_BITS))+' bit/s, bytes '+
+          'arrived after '+TRNLRawByteString(IntToStr(FIRST_STRETCH_MILLISECONDS))+' ms: '+
+          TRNLRawByteString(IntToStr(BytesAfterFirstStretch))+', after a further '+
+          TRNLRawByteString(IntToStr(SECOND_STRETCH_MILLISECONDS))+' ms: '+
+          TRNLRawByteString(IntToStr(BytesAtEnd)));
+
+     CheckAtLeastInt64(BytesAfterFirstStretch,1,
+                       'something has to arrive during the first budget at all, otherwise the '+
+                       'measurement below says nothing');
+
+     // The first budget is not the interesting part, a limiter with a far too long period spends
+     // that one just as quickly. What matters is whether the budget ever comes back. With a
+     // period whose length was taken from the amount instead of from the period length, sending
+     // stops dead once the first budget is spent and this difference stays at exactly zero.
+     CheckAtLeastInt64(TRNLInt64(BytesAtEnd-BytesAfterFirstStretch),MINIMUM_BYTES_AFTER_FIRST_STRETCH,
+                       'and sending has to carry on across period boundaries instead of stopping '+
+                       'once the first budget is spent');
+
+    finally
+     FreeAndNil(HostPair);
+    end;
+   finally
+    FreeAndNil(Network);
+   end;
+  finally
+   FreeAndNil(Instance);
+  end;
+
+ finally
+  FreeAndNil(Watchdog);
+  TestEnd;
+ end;
+
+end;
+
+procedure TestConnectionRequestBudgetSurvivesAHashCollision;
+const BURST=20;
+      PERIOD=1000;
+      SEARCH_LIMIT=1000000;
+var Table:PRNLConnectionKnownCandidateHostAddressHashTable;
+    AddressA,AddressB,Candidate:TRNLHostAddress;
+    Slots:array of TRNLUInt32;
+    Entry:PRNLConnectionKnownCandidateHostAddress;
+    Index,Slot,CountAllowedForA,CountAllowedForAAfterTakeOver:TRNLSizeInt;
+    Time:TRNLTime;
+    Found:boolean;
+begin
+
+ TestBegin('a connection request budget survives a hash collision');
+ try
+
+  Time:=1000000;
+  Found:=false;
+  FillChar(AddressA,SizeOf(TRNLHostAddress),#0);
+  FillChar(AddressB,SizeOf(TRNLHostAddress),#0);
+
+  // The table has one entry per slot, so two host addresses which land on the same slot are what
+  // the takeover path is about. Searching for such a pair at run time rather than hard coding one
+  // keeps the test independent of the hash function, and the search is deterministic because the
+  // hash is.
+  SetLength(Slots,TRNLConnectionKnownCandidateHostAddressHashTable.HashSize);
+  for Index:=0 to length(Slots)-1 do begin
+   Slots[Index]:=0;
+  end;
+
+  for Index:=1 to SEARCH_LIMIT do begin
+   Candidate:=TRNLHostAddress.CreateFromIPV4(TRNLUInt32(Index));
+   Slot:=TRNLHashUtils.Hash32(Candidate,SizeOf(TRNLHostAddress)) and
+         TRNLConnectionKnownCandidateHostAddressHashTable.HashMask;
+   if Slots[Slot]<>0 then begin
+    AddressA:=TRNLHostAddress.CreateFromIPV4(Slots[Slot]);
+    AddressB:=Candidate;
+    Found:=true;
+    break;
+   end;
+   Slots[Slot]:=TRNLUInt32(Index);
+  end;
+
+  if not Check(Found,'two host addresses which share a slot have to be findable') then begin
+   exit;
+  end;
+
+  GetMem(Table,SizeOf(TRNLConnectionKnownCandidateHostAddressHashTable));
+  try
+   Table^.Clear;
+
+   // Spend the whole burst of the first address. The point in time never moves, so nothing decays
+   // underneath the measurement.
+   CountAllowedForA:=0;
+   for Index:=1 to BURST+1 do begin
+    Entry:=Table^.Find(AddressA,true);
+    if assigned(Entry) and not Entry^.RateLimiter.RateLimit(Time,BURST,PERIOD) then begin
+     inc(CountAllowedForA);
+    end;
+   end;
+
+   CheckEqualsInt64(CountAllowedForA,BURST,
+                    'an address may send exactly its burst before it is limited');
+
+   // The colliding address takes the slot over, and then the first one takes it back
+   Entry:=Table^.Find(AddressB,true);
+   Check(assigned(Entry),'the colliding address gets the same slot');
+
+   Entry:=Table^.Find(AddressA,true);
+   if not Check(assigned(Entry),'and the first address can claim it back') then begin
+    exit;
+   end;
+
+   CountAllowedForAAfterTakeOver:=0;
+   for Index:=1 to BURST do begin
+    Entry:=Table^.Find(AddressA,true);
+    if assigned(Entry) and not Entry^.RateLimiter.RateLimit(Time,BURST,PERIOD) then begin
+     inc(CountAllowedForAAfterTakeOver);
+    end;
+   end;
+
+   Info('allowed before the takeover: '+TRNLRawByteString(IntToStr(CountAllowedForA))+
+        ', allowed after it: '+TRNLRawByteString(IntToStr(CountAllowedForAAfterTakeOver)));
+
+   // If the takeover starts the budget from scratch, then two addresses which collide clear each
+   // other's budget on every request and the limit never triggers at all. Two cooperating
+   // addresses would be enough for that, which would make it a complete bypass of the very
+   // mechanism this table exists for.
+   CheckEqualsInt64(CountAllowedForAAfterTakeOver,0,
+                    'and a takeover by a colliding address must not hand the budget back');
+
+  finally
+   FreeMem(Table);
+  end;
+
+ finally
+  TestEnd;
+ end;
+
+end;
+
+procedure TestConnectionAttemptHistoryStaysInsideItsRingBuffer;
+const SERVER_PORT=18274;
+      CLIENT_PORT=18275;
+      COUNT_ATTEMPTS=60;
+      DURATION_MILLISECONDS=2500;
+var Instance:TRNLInstance;
+    Network:TRNLVirtualNetwork;
+    Server,Client:TRNLHost;
+    ServerAddress:TRNLAddress;
+    Event:TRNLHostEvent;
+    Peers:array of TRNLPeer;
+    Index:TRNLSizeInt;
+    StartTime:TRNLTime;
+    Watchdog:TRNLTestWatchdog;
+    Survived:boolean;
+    FailureText:TRNLRawByteString;
+
+ procedure PumpBoth;
+ begin
+  Event.Initialize;
+  try
+   while Server.Service(Event,0)=RNL_HOST_SERVICE_STATUS_EVENT do begin
+    Event.Free;
+   end;
+   Event.Free;
+   while Client.Service(Event,0)=RNL_HOST_SERVICE_STATUS_EVENT do begin
+    Event.Free;
+   end;
+  finally
+   Event.Free;
+  end;
+ end;
+
+begin
+
+ TestBegin('the connection attempt history stays inside its ring buffer');
+ Watchdog:=TRNLTestWatchdog.Create('connection attempt history',120000);
+ try
+
+  Peers:=nil;
+  Survived:=true;
+  FailureText:='';
+
+  Instance:=TRNLInstance.Create;
+  try
+   Network:=TRNLVirtualNetwork.Create(Instance);
+   try
+    Server:=TRNLHost.Create(Instance,Network);
+    try
+     Server.Address.Host:=RNL_HOST_ANY;
+     Server.Address.Port:=SERVER_PORT;
+     Server.Start(RNL_HOST_ADDRESS_FAMILY_WORK_MODE_IPV4_ONLY);
+
+     Client:=TRNLHost.Create(Instance,Network);
+     try
+      Client.Address.Host:=RNL_HOST_ANY;
+      Client.Address.Port:=CLIENT_PORT;
+      Client.MaximumCountPeers:=COUNT_ATTEMPTS*2;
+      Client.Start(RNL_HOST_ADDRESS_FAMILY_WORK_MODE_IPV4_ONLY);
+
+      Network.AddressSetHost(ServerAddress,'127.0.0.1');
+      ServerAddress.Port:=SERVER_PORT;
+
+      SetLength(Peers,COUNT_ATTEMPTS);
+      try
+
+       // Many pending connection attempts from one address, each of which retransmits its
+       // request every fPendingConnectionSendTimeout. That is what drives the attempt history
+       // fast enough to wrap its ring buffer, and the run has to last past the one second after
+       // which the read side starts to age entries out, because only then can the read position
+       // end up ahead of the write position, which is the case that used to read past the end of
+       // the array.
+       for Index:=0 to COUNT_ATTEMPTS-1 do begin
+        Peers[Index]:=Client.Connect(ServerAddress,1,0);
+        if assigned(Peers[Index]) then begin
+         Peers[Index].IncRef;
+        end;
+        PumpBoth;
+        Sleep(1);
+       end;
+
+       StartTime:=Instance.Time;
+       try
+        repeat
+         PumpBoth;
+         Sleep(1);
+        until TRNLTime.RelativeDifference(Instance.Time,StartTime)>=DURATION_MILLISECONDS;
+       except
+        on e:Exception do begin
+         Survived:=false;
+         FailureText:=TRNLRawByteString(e.ClassName+': '+e.Message);
+        end;
+       end;
+
+       Info('connection attempts made: '+TRNLRawByteString(IntToStr(COUNT_ATTEMPTS))+
+            ', attempts per second seen by the server: '+
+            TRNLRawByteString(IntToStr(Server.ConnectionAttemptsPerSecond))+
+            ', challenge difficulty: '+
+            TRNLRawByteString(IntToStr(Server.ConnectionChallengeDifficultyLevel)));
+
+       // With range checking compiled in, reading one element past the end of the history array
+       // raises here rather than quietly mixing an absolute point in time into a sum of deltas
+       if not Survived then begin
+        Info('exception: '+FailureText);
+       end;
+       Check(Survived,'servicing must not raise while the attempt history wraps around');
+
+       CheckAtLeastInt64(Server.ConnectionAttemptsPerSecond,1,
+                         'and the measured attempt rate has to stay above zero, since the '+
+                         'adaptive challenge difficulty is derived from it');
+
+      finally
+       for Index:=0 to length(Peers)-1 do begin
+        if assigned(Peers[Index]) then begin
+         Peers[Index].DecRef;
+        end;
+       end;
+      end;
+
+     finally
+      FreeAndNil(Client);
+     end;
+
+    finally
+     FreeAndNil(Server);
+    end;
+
+   finally
+    FreeAndNil(Network);
+   end;
+  finally
+   FreeAndNil(Instance);
+  end;
+
+ finally
+  FreeAndNil(Watchdog);
+  TestEnd;
+ end;
+
+end;
+
 procedure RunRegressionTests;
 begin
 
  // Pure configuration invariants first, they are instant and their failure explains a lot of
  // what the behavioural tests below would otherwise report in a much noisier way
  TestRetransmissionTimeoutConfigurationIsConsistent;
+
+ // The rate limiters, on their own before anything drives them over a network
+ TestBandwidthRateLimiterHonoursItsPeriodLength;
+ TestConnectionRequestBudgetSurvivesAHashCollision;
 
  // Test tooling correctness, everything which follows relies on it
  TestOutgoingBitFlippingSimulationActuallyFlipsBits;
@@ -2931,6 +3328,7 @@ begin
 
  // Bandwidth limits
  TestBandwidthLimitsReachCounterSide;
+ TestBandwidthLimitedHostKeepsSendingAfterTheFirstPeriod;
 
  // MTU probing
  TestMTUProbingTerminatesAndReportsAMTU;
@@ -2947,8 +3345,9 @@ begin
  // Container behaviour
  TestQueueGrowthIsNotQuadratic;
 
- // Peer capacity
+ // Peer capacity and connection flooding protection
  TestHostAcceptsExactlyItsConfiguredPeerCapacity;
+ TestConnectionAttemptHistoryStaysInsideItsRingBuffer;
 
  // Address changes, disconnecting and exactly once delivery
  TestPeerFollowsAnAuthenticatedAddressChange;

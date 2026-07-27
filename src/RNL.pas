@@ -1787,7 +1787,7 @@ type PRNLVersion=^TRNLVersion;
        fEntries:TRNLConnectionKnownCandidateHostAddressHashTableEntries;
       public
        procedure Clear;
-       function Find(const aHostAddress:TRNLHostAddress;const aTime:TRNLTime;const aAddIfNotExist:boolean):PRNLConnectionKnownCandidateHostAddress;
+       function Find(const aHostAddress:TRNLHostAddress;const aAddIfNotExist:boolean):PRNLConnectionKnownCandidateHostAddress;
      end;
 
      PRNLConnectionCandidateState=^TRNLConnectionCandidateState;
@@ -4017,8 +4017,17 @@ type PRNLVersion=^TRNLVersion;
        // datagrams. The remainder simply stays queued for the next round, so nothing is lost by
        // it. Zero means no limit, which is the behaviour these channels had before.
        property MaximumUnreliableBlockPacketsPerDispatch:TRNLUInt32 read fMaximumUnreliableBlockPacketsPerDispatch write fMaximumUnreliableBlockPacketsPerDispatch;
+       // Careful with the meaning of these two: the budget refills by one request per period,
+       // not by a whole burst per period. With the defaults of 20 and 1000 ms an address may
+       // therefore send 20 requests back to back and one per second after that, which is not
+       // the same thing as twenty per second.
        property RateLimiterHostAddressBurst:TRNLInt64 read fRateLimiterHostAddressBurst write fRateLimiterHostAddressBurst;
        property RateLimiterHostAddressPeriod:TRNLUInt64 read fRateLimiterHostAddressPeriod write fRateLimiterHostAddressPeriod;
+       // Incoming connection attempts per second, averaged over the attempt history, and the
+       // challenge difficulty which is derived from it. Both are read only and exist so that
+       // the adaptive part of the flooding protection can be observed at all.
+       property ConnectionAttemptsPerSecond:TRNLUInt32 read fConnectionAttemptsPerSecond;
+       property ConnectionChallengeDifficultyLevel:TRNLUInt32 read fConnectionChallengeDifficultyLevel;
 {$if defined(RNL_LINEAR_PEER_LIST)}
        property Peers:TRNLHostPeerList read fPeerList;
 {$else}
@@ -15220,7 +15229,13 @@ procedure TRNLBandwidthRateLimiter.Reset(const aTime:TRNLTime);
 begin
  fUsedInPeriod:=0;
  fPeriodStart:=aTime;
- fPeriodEnd:=aTime+fMaximumPerPeriod;
+ // The end of the period is aTime plus the length of a period. It used to be aTime plus
+ // fMaximumPerPeriod, which is an amount and not a duration, so the period lasted as many
+ // milliseconds as there were units allowed in it. That made the effective rate one unit per
+ // millisecond no matter what limit had been configured: with the period length of 1000 ms
+ // which every caller passes, any limit above 1000 units per second was throttled down to
+ // exactly 1000. fPeriodLength was stored and never read, which is what gave it away.
+ fPeriodEnd:=aTime+fPeriodLength;
 end;
 
 function TRNLBandwidthRateLimiter.CanProceed(const aDesired:TRNLUInt32;const aTime:TRNLTime):boolean;
@@ -15360,7 +15375,7 @@ begin
  FillChar(self,SizeOf(TRNLConnectionKnownCandidateHostAddressHashTable),#0);
 end;
 
-function TRNLConnectionKnownCandidateHostAddressHashTable.Find(const aHostAddress:TRNLHostAddress;const aTime:TRNLTime;const aAddIfNotExist:boolean):PRNLConnectionKnownCandidateHostAddress;
+function TRNLConnectionKnownCandidateHostAddressHashTable.Find(const aHostAddress:TRNLHostAddress;const aAddIfNotExist:boolean):PRNLConnectionKnownCandidateHostAddress;
 type PToHash=^TToHash;
      TToHash=packed record
       HostAddress:TRNLHostAddress;
@@ -15377,8 +15392,17 @@ begin
  if TRNLMemory.SecureIsEqual(Item^.HostAddress,aHostAddress,SizeOf(TRNLHostAddress)) then begin
   result:=Item;
  end else if aAddIfNotExist then begin
+  // The table is directly mapped with one entry per slot, so a second host address which hashes
+  // to the same slot takes it over. What must not happen on that takeover is resetting the rate
+  // limiter, which is what used to happen here: two addresses which collide would then clear
+  // each other's budget on every single request, and the limit would never trigger at all.
+  // Two cooperating addresses are enough for that, so it was a complete bypass of exactly the
+  // mechanism this table exists for.
+  // Carrying the budget over instead means colliding addresses share one, which is the
+  // conservative direction for a defensive mechanism. A slot which is really unused needs no
+  // initialisation either: the whole table is zero filled, and a zero fLastTime lets the first
+  // RateLimit call age the budget forward by itself.
   Item^.HostAddress:=aHostAddress;
-  Item^.RateLimiter.Reset(aTime);
   result:=Item;
  end;
 end;
@@ -23299,8 +23323,14 @@ begin
 
       fReceivedNewHostBandwidthLimitsSequenceNumber:=IncomingBlockPacket.fBlockPacket.BandwidthLimitsAcknowledgement.SequenceNumber;
 
-      fRemoteIncomingBandwidthLimit:=TRNLEndianness.HostToLittleEndian32(IncomingBlockPacket.fBlockPacket.BandwidthLimits.IncomingBandwidthLimit);
-      fRemoteOutgoingBandwidthLimit:=TRNLEndianness.HostToLittleEndian32(IncomingBlockPacket.fBlockPacket.BandwidthLimits.OutgoingBandwidthLimit);
+      // Wire to host, not host to wire: these two values arrive from the counter side, where
+      // DispatchNewHostBandwidthLimits wrote them with HostToLittleEndian32. The
+      // conversion used to run in the sending direction here, which is a no-op on a little
+      // endian machine and therefore invisible on every platform RNL is usually built for, but
+      // byte swapped on a big endian one. The equivalent handshake path in
+      // DispatchReceivedHandshakePacketConnectionChallengeRequest already does it correctly.
+      fRemoteIncomingBandwidthLimit:=TRNLEndianness.LittleEndianToHost32(IncomingBlockPacket.fBlockPacket.BandwidthLimits.IncomingBandwidthLimit);
+      fRemoteOutgoingBandwidthLimit:=TRNLEndianness.LittleEndianToHost32(IncomingBlockPacket.fBlockPacket.BandwidthLimits.OutgoingBandwidthLimit);
 
       UpdateOutgoingBandwidthRateLimiter;
 
@@ -25161,7 +25191,14 @@ begin
   SumOfConnectionAttemptTimes:=SumOfConnectionAttemptTimes+fConnectionAttemptHistoryDeltaTimes[Index];
   inc(Count);
   inc(Index);
-  if Index>RNL_CONNECTION_ATTEMPT_SIZE then begin
+  // Wrapping at >= and not at >, as the two ring buffer positions above already do. With > the
+  // index RNL_CONNECTION_ATTEMPT_SIZE was still used to read, one element past the end of an
+  // array declared as 0..RNL_CONNECTION_ATTEMPT_SIZE-1. What lies there is the first entry of
+  // fConnectionAttemptHistoryTimePoints, so an absolute point in time was summed up as if it
+  // were a delta, the sum became enormous, and fConnectionAttemptsPerSecond came out as zero.
+  // The adaptive challenge difficulty below therefore never rose above its minimum of one,
+  // which is precisely the case it exists for.
+  if Index>=RNL_CONNECTION_ATTEMPT_SIZE then begin
    Index:=0;
   end;
  end;
@@ -25500,7 +25537,7 @@ begin
  end;
 
  if (aConnectionCandidate^.fData^.fNextChallengeTimeout.fValue=0) or
-    (fTime>=aConnectionCandidate^.fData^.fNextChallengeTimeout.fValue) then begin
+    (fTime>=aConnectionCandidate^.fData^.fNextChallengeTimeout) then begin
 
   aConnectionCandidate^.fData^.fNextChallengeTimeout:=fTime+fPendingConnectionChallengeTimeout;
 
@@ -25571,7 +25608,6 @@ begin
                                           65535);
 
  ConnectionKnownCandidateHostAddress:=fConnectionKnownCandidateHostAddressHashTable^.Find(fReceivedAddress.Host,
-                                                                                          fInstance.Time,
                                                                                           true);
  if assigned(ConnectionKnownCandidateHostAddress) then begin
   if ConnectionKnownCandidateHostAddress^.RateLimiter.RateLimit(fInstance.Time,

@@ -77,6 +77,22 @@ gone. Leaving the last part out would make the old address stay reachable, and a
 which never notices the change would then keep working by accident — which is exactly the
 situation a real network does not offer, and exactly why such a test would prove nothing.
 
+## Why some tests drive a data structure directly
+
+Most tests here run two hosts against each other, because that is where the interesting
+behaviour lives. Two of them do not: they drive `TRNLBandwidthRateLimiter` and the connection
+request rate limiter table directly, with no network at all.
+
+That is deliberate. A rate limiter is a small amount of arithmetic over time, and the effect of
+getting that arithmetic wrong is a plausible looking but wrong number rather than a visible
+failure. Driving it directly makes the assertion exact, instant and free of any timing, whereas
+observing the same defect through two hosts, a reliable channel and a retransmission timer takes
+seconds and can be blamed on half a dozen other things.
+
+The rule of thumb: assert on the smallest thing which can hold the defect. A test which drives
+the whole stack in order to check one comparison is slower, flakier and says less about what
+broke.
+
 ## The watchdog
 
 Several failure modes in a network library are not wrong results but endless loops inside the
