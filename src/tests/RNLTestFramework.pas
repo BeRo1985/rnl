@@ -64,6 +64,7 @@ var CountTests:TRNLSizeInt=0;
     CurrentTestName:TRNLRawByteString='';
     CurrentTestFailed:boolean=false;
     CurrentTestStartTime:TRNLTime;
+    CurrentTestChecks:TRNLSizeInt=0;
     FailedTestNames:TStringList=nil;
     TimeInstance:TRNLInstance=nil;
 
@@ -110,6 +111,7 @@ begin
  CurrentTestName:=aName;
  CurrentTestFailed:=false;
  CurrentTestStartTime:=TimeInstance.Time;
+ CurrentTestChecks:=0;
  inc(CountTests);
  writeln('[ RUN      ] ',aName);
  Flush(Output);
@@ -124,9 +126,9 @@ begin
   if assigned(FailedTestNames) then begin
    FailedTestNames.Add(String(CurrentTestName));
   end;
-  writeln('[   FAILED ] ',CurrentTestName,' (',ElapsedMilliseconds,' ms)');
+  writeln('[   FAILED ] ',CurrentTestName,' (',CurrentTestChecks,' checks, ',ElapsedMilliseconds,' ms)');
  end else begin
-  writeln('[       OK ] ',CurrentTestName,' (',ElapsedMilliseconds,' ms)');
+  writeln('[       OK ] ',CurrentTestName,' (',CurrentTestChecks,' checks, ',ElapsedMilliseconds,' ms)');
  end;
  writeln;
  Flush(Output);
@@ -137,6 +139,7 @@ function Check(const aCondition:boolean;const aDescription:TRNLRawByteString):bo
 begin
  result:=aCondition;
  inc(CountChecks);
+ inc(CurrentTestChecks);
  if not result then begin
   inc(CountFailedChecks);
   CurrentTestFailed:=true;

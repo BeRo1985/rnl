@@ -2,15 +2,36 @@
 #
 # Builds the RNL test runner with FreePascal.
 #
-# Usage: ./build.sh [additional fpc options]
+# Usage:
+#   ./build.sh [additional fpc options]     native build      -> ./RNLTests
+#   ./build.sh --win64 [fpc options]        cross build       -> ./RNLTests.exe
+#
+# The win64 cross build is worth running even on a non Windows machine, because the
+# Windows specific socket wait implementation, which emulates poll on top of
+# WSAEventSelect and WSAWaitForMultipleEvents, is a completely separate code path from
+# the poll and select ones used everywhere else. Under wine it can be executed:
+#
+#   ./build.sh --win64 && wine ./RNLTests.exe
 #
 set -e
 
 cd "$(dirname "$0")"
 
-mkdir -p units
+TARGET=""
+OUTPUT="RNLTests"
+UNITS="units"
 
-fpc -Mdelphi \
+if [ "$1" = "--win64" ]; then
+    shift
+    TARGET="-Twin64"
+    OUTPUT="RNLTests.exe"
+    UNITS="units-win64"
+fi
+
+mkdir -p "$UNITS"
+
+fpc $TARGET \
+    -Mdelphi \
     -Sc \
     -O1 \
     -g \
@@ -22,7 +43,7 @@ fpc -Mdelphi \
     -vewn \
     -Fu.. \
     -Fu. \
-    -FUunits \
-    -oRNLTests \
+    -FU"$UNITS" \
+    -o"$OUTPUT" \
     "$@" \
     RNLTests.dpr

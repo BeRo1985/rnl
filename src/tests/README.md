@@ -15,6 +15,22 @@ Exit codes: `0` all passed, `1` a test failed, `2` the watchdog had to kill a ha
 
 For Delphi, open `RNLTests.dpr` and build it as a console application.
 
+### Also run the Windows build
+
+```sh
+./build.sh --win64
+wine ./RNLTests.exe        # or run it on Windows
+```
+
+This is worth doing even from a non Windows machine. The Windows socket wait is a code path
+of its own: it emulates `poll` on top of `WSAEventSelect` and `WSAWaitForMultipleEvents`,
+while every other platform uses `poll` or `select` directly. Nothing shared covers it, and
+the two `interruptible host` tests are what exercise it.
+
+Both builds must produce the same number of tests and the same number of checks. A differing
+check count means some assertion sits inside a polling loop and is therefore counted a
+timing dependent number of times, which is a defect in the test, not a platform difference.
+
 ## What is in here
 
 | Unit | Purpose |

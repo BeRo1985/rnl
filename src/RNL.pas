@@ -937,7 +937,11 @@ type PRNLVersion=^TRNLVersion;
        class operator GreaterThanOrEqual(const a,b:TRNLTime):boolean;
        class operator LessThan(const a,b:TRNLTime):boolean;
        class operator LessThanOrEqual(const a,b:TRNLTime):boolean;
+       // Signed, so a-b, which is what is wanted whenever the direction carries meaning, for
+       // example when computing how much of a timeout is left
        class function RelativeDifference(const a,b:TRNLTime):TRNLInt64; static;
+       // Careful: this is an ABSOLUTE value, so it is symmetric in its arguments and never
+       // negative. Right for "how far apart are these two", wrong for "how much is left".
        class function Difference(const a,b:TRNLTime):TRNLInt64; static;
        class function Minimum(const a,b:TRNLTime):TRNLTime; static;
        class operator Inc(const a:TRNLTime):TRNLTime; inline;
@@ -985,7 +989,11 @@ type PRNLVersion=^TRNLVersion;
        class operator GreaterThanOrEqual(const a,b:TRNLSequenceNumber):boolean; inline;
        class operator LessThan(const a,b:TRNLSequenceNumber):boolean; inline;
        class operator LessThanOrEqual(const a,b:TRNLSequenceNumber):boolean; inline;
+       // Signed and wrap around aware, so the usual "is a newer than b" comparison
        class function RelativeDifference(const a,b:TRNLSequenceNumber):TRNLInt32; static; inline;
+       // Careful: this is an ABSOLUTE value, so it is symmetric in its arguments and never
+       // negative, which also means it can not tell a legitimate in flight count apart from a
+       // pair of sequence numbers which drifted the wrong way round
        class function Difference(const a,b:TRNLSequenceNumber):TRNLInt32; static; inline;
        class function Minimum(const a,b:TRNLSequenceNumber):TRNLSequenceNumber; static;
        class operator Inc(const a:TRNLSequenceNumber):TRNLSequenceNumber; inline;
@@ -1451,8 +1459,14 @@ type PRNLVersion=^TRNLVersion;
        function IsNotEmpty:boolean; inline;
        procedure EnqueueAtFront(const aItem:T);
        procedure Enqueue(const aItem:T);
+       // Both overloads finalize the vacated slot, so a T with managed fields, such as a dynamic
+       // array or a record containing one, is released correctly and the out parameter ends up
+       // holding the only remaining reference
        function Dequeue(out aItem:T):boolean; overload;
        function Dequeue:boolean; overload;
+       // Note that Peek followed by Dequeue is not one atomic operation. That is fine as long as
+       // only one single thread ever dequeues, which is how RNL uses these queues, but a second
+       // dequeueing thread would make the pair return one item and remove a different one
        function Peek(out aItem:T):boolean;
       published
        property Count:TRNLSizeInt read GetCount;
@@ -3092,6 +3106,10 @@ type PRNLVersion=^TRNLVersion;
 
        fSentOutgoingBlockPackets:TRNLPeerBlockPacketCircularDoublyLinkedListNode;
 
+       fOutgoingMessageBlockPacketSequenceNumber:TRNLSequenceNumber;
+
+       fOutgoingMessageNumber:TRNLSequenceNumber;
+
        function GetMaximumUnfragmentedMessageSize:TRNLSizeUInt; override;
 
        function GetMaximumFragmentedMessageSize:TRNLSizeUInt;
@@ -3102,7 +3120,12 @@ type PRNLVersion=^TRNLVersion;
 
        procedure DispatchOutgoingAcknowledgementBlockPackets;
 
-       procedure DispatchOutgoingMessageBlockPackets; virtual; abstract;
+       // The fragmentation of outgoing messages is identical for the ordered and the unordered
+       // reliable channel, so it lives here rather than being duplicated in both of them. The
+       // difference between the two is entirely on the receiving side, in
+       // DispatchIncomingMessageBlockPacket, and in the fOrdered flag which decides when a
+       // received block packet is handed on.
+       procedure DispatchOutgoingMessageBlockPackets;
 
        procedure DispatchOutgoingBlockPackets; override;
 
@@ -3131,10 +3154,6 @@ type PRNLVersion=^TRNLVersion;
      TRNLPeerReliableOrderedChannel=class(TRNLPeerReliableChannel)
       private
 
-       fOutgoingMessageBlockPacketSequenceNumber:TRNLSequenceNumber;
-
-       fOutgoingMessageNumber:TRNLSequenceNumber;
-
        fIncomingMessageNumber:TRNLSequenceNumber;
 
        fIncomingMessageLength:TRNLUInt32;
@@ -3142,8 +3161,6 @@ type PRNLVersion=^TRNLVersion;
        fIncomingReceivedMessageDataLength:TRNLUInt32;
 
        fIncomingMessageReceiveBufferData:TRNLPointer;
-
-       procedure DispatchOutgoingMessageBlockPackets; override;
 
        procedure DispatchIncomingMessageBlockPacket(const aBlockPacket:TRNLPeerBlockPacket); override;
 
@@ -3190,12 +3207,6 @@ type PRNLVersion=^TRNLVersion;
       private
 
        fIncomingLongMessages:TRNLPeerReliableUnorderedChannelLongMessageListNode;
-
-       fOutgoingMessageBlockPacketSequenceNumber:TRNLSequenceNumber;
-
-       fOutgoingMessageNumber:TRNLSequenceNumber;
-
-       procedure DispatchOutgoingMessageBlockPackets; override;
 
        procedure DispatchIncomingMessageBlockPacket(const aBlockPacket:TRNLPeerBlockPacket); override;
 
@@ -3468,8 +3479,6 @@ type PRNLVersion=^TRNLVersion;
 
        fOutgoingMTUProbeBlockPackets:TRNLPeerBlockPacketQueue;
 
-       fDeferredOutgoingBlockPackets:TRNLPeerBlockPacketQueue;
-
        fMTUProbeIndex:TRNLInt32;
 
        fMTUProbeSequenceNumber:TRNLSequenceNumber;
@@ -3520,7 +3529,7 @@ type PRNLVersion=^TRNLVersion;
 
        function SendPacket(const aData;const aDataLength:TRNLSizeUInt):TRNLNetworkSendResult;
 
-       procedure UpdatePatchLossStatistics;
+       procedure UpdatePacketLossStatistics;
 
        procedure DispatchIncomingMTUProbeBlockPacket(const aIncomingBlockPacket:TRNLPeerBlockPacket);
 
@@ -3710,6 +3719,8 @@ type PRNLVersion=^TRNLVersion;
        fMaximumRetransmissionTimeoutLimit:TRNLInt64;
 
        fMaximumReliableBlockPacketSendAttempts:TRNLUInt32;
+
+       fMaximumUnreliableBlockPacketsPerDispatch:TRNLUInt32;
 
        fRateLimiterHostAddressBurst:TRNLInt64;
 
@@ -3932,6 +3943,12 @@ type PRNLVersion=^TRNLVersion;
        // permanently stuck. With the default backoff ceiling the default of 64 attempts amounts
        // to several minutes, so this can not fire during any kind of normal operation.
        property MaximumReliableBlockPacketSendAttempts:TRNLUInt32 read fMaximumReliableBlockPacketSendAttempts write fMaximumReliableBlockPacketSendAttempts;
+       // How many block packets an unreliable channel may contribute to a single dispatching
+       // round. The unreliable channels have no send window of their own, so without this one
+       // round can turn an arbitrarily long outgoing message queue into an equally long burst of
+       // datagrams. The remainder simply stays queued for the next round, so nothing is lost by
+       // it. Zero means no limit, which is the behaviour these channels had before.
+       property MaximumUnreliableBlockPacketsPerDispatch:TRNLUInt32 read fMaximumUnreliableBlockPacketsPerDispatch write fMaximumUnreliableBlockPacketsPerDispatch;
        property RateLimiterHostAddressBurst:TRNLInt64 read fRateLimiterHostAddressBurst write fRateLimiterHostAddressBurst;
        property RateLimiterHostAddressPeriod:TRNLUInt64 read fRateLimiterHostAddressPeriod write fRateLimiterHostAddressPeriod;
 {$if defined(RNL_LINEAR_PEER_LIST)}
@@ -16286,7 +16303,7 @@ end;
 function TRNLRealNetwork.EmulatePoll(const aPollFDs:PRNLRealNetworkPollFDs;const aCount:TRNLSizeInt;const aTimeout:TRNLInt64;const AEvent:TRNLNetworkEvent=nil):TRNLInt32;
 var Timeout,Mask,CountEvents,LastResult:TRNLUInt32;
     Events:TRNLRealNetworkHandles;
-    Count,Index:TRNLSizeInt;
+    Count,Index,CloseEventIndex:TRNLSizeInt;
     PollFD:PRNLRealNetworkPollFD;
     ReadSet,WriteSet,ExceptSet:TRNLSocketSet;
     tv:{$if defined(Windows)}TTimeVal{$elseif defined(fpc)}TTimeVal{$else}TimeVal{$ifend};
@@ -16381,9 +16398,15 @@ begin
    Events[CountEvents]:=WSACreateEvent;
 
    if Events[CountEvents]=WSA_INVALID_EVENT then begin
-    while CountEvents>0 do begin
-     WSACloseEvent(Events[CountEvents]);
-     dec(CountEvents);
+    // Everything successfully created so far lives at 0..CountEvents-1. The one at CountEvents
+    // is not a handle at all, and index 0 has to be closed too, so the range is exactly that.
+    // CountEvents is unsigned, so the upper bound has to be computed as a signed value, since
+    // CountEvents can still be zero here, and it must not use the control variable of the
+    // enclosing loop either.
+    CloseEventIndex:=TRNLSizeInt(CountEvents)-1;
+    while CloseEventIndex>=0 do begin
+     WSACloseEvent(Events[CloseEventIndex]);
+     dec(CloseEventIndex);
     end;
     result:=-1;
     exit;
@@ -20802,6 +20825,10 @@ begin
 
  fSentOutgoingBlockPackets:=TRNLPeerBlockPacketCircularDoublyLinkedListNode.Create;
 
+ fOutgoingMessageBlockPacketSequenceNumber:=0;
+
+ fOutgoingMessageNumber:=0;
+
 end;
 
 destructor TRNLPeerReliableChannel.Destroy;
@@ -20940,32 +20967,9 @@ begin
                                           SizeOf(TRNLProtocolBlockPacketChannel)+
                                           SizeOf(TRNLPeerReliableChannelAcknowledgementPacketHeader))) shl 3;
 
-{while fOutgoingAcknowledgementQueue.Dequeue(BlockPacketSequenceNumber) do begin
-
-  BlockPacket:=TRNLPeerBlockPacket.Create(fPeer);
-  try
-
-   BlockPacket.fBlockPacket.Channel.Header.TypeAndSubtype:=(TRNLInt32(TRNLProtocolBlockPacketType(RNL_PROTOCOL_BLOCK_PACKET_TYPE_CHANNEL)) shl 0) or
-                                                           (TRNLInt32(TRNLPeerReliableChannelCommandType(RNL_PEER_RELIABLE_CHANNEL_COMMAND_TYPE_ACKNOWLEDGEMENT)) shl 4);
-   BlockPacket.fBlockPacket.Channel.ChannelNumber:=fChannelNumber;
-   BlockPacket.fBlockPacket.Channel.PayloadDataLength:=TRNLEndianness.HostToLittleEndian16(SizeOf(TRNLPeerReliableChannelAcknowledgementPacketHeader));
-
-   BlockPacket.fBlockPacketDataLength:=SizeOf(TRNLPeerReliableChannelAcknowledgementPacketHeader);
-
-   SetLength(BlockPacket.fBlockPacketData,BlockPacket.fBlockPacketDataLength);
-
-   AcknowledgementPacketHeader:=TRNLPointer(@BlockPacket.fBlockPacketData[0]);
-   AcknowledgementPacketHeader^.Header.SequenceNumber:=TRNLEndianness.HostToLittleEndian16(BlockPacketSequenceNumber);
-
-   BlockPacket.fPendingResendOutgoingBlockPacketsList:=nil; // No resend timeout
-
-  finally
-   fPeer.fOutgoingBlockPackets.Enqueue(BlockPacket);
-  end;
-
- end;
-
- exit;//}
+ // Note that one acknowledgement per block packet would also work here, and it used to be an
+ // alternative implementation of exactly that shape, but it costs one block packet per
+ // acknowledgement instead of one bit, which is why the bit field below exists.
 
  DoNeedSort:=false;
 
@@ -21069,6 +21073,190 @@ begin
 
     finally
      fPeer.fOutgoingBlockPackets.Enqueue(BlockPacket);
+    end;
+
+   end;
+
+  end;
+
+ end;
+
+end;
+
+procedure TRNLPeerReliableChannel.DispatchOutgoingMessageBlockPackets;
+var Message:TRNLMessage;
+    MaximumShortMessageBlockPacketSize,
+    MaximumLongMessageBlockPacketSize,
+    MessagePartLength,
+    MessagePosition:TRNLSizeUInt;
+    MaxPacketsToSend:TRNLSizeInt;
+    BlockPacket:TRNLPeerBlockPacket;
+    ShortMessagePacketHeader:PRNLPeerReliableChannelShortMessagePacketHeader;
+    LongMessagePacketHeader:PRNLPeerReliableChannelLongMessagePacketHeader;
+begin
+
+ // Dispatch outgoing enqueued messages to outgoing short and long message (fragment) block packets
+
+ if fOutgoingMessageQueue.IsEmpty then begin
+  exit;
+ end;
+
+ MaximumShortMessageBlockPacketSize:=fPeer.fMTU-(RNL_IP_HEADER_SIZE+
+                                                 RNL_UDP_HEADER_SIZE+
+                                                 SizeOf(TRNLProtocolNormalPacketHeader)+
+                                                 SizeOf(TRNLProtocolBlockPacketChannel)+
+                                                 SizeOf(TRNLPeerReliableChannelShortMessagePacketHeader));
+
+ MaximumLongMessageBlockPacketSize:=fPeer.fMTU-(RNL_IP_HEADER_SIZE+
+                                                RNL_UDP_HEADER_SIZE+
+                                                SizeOf(TRNLProtocolNormalPacketHeader)+
+                                                SizeOf(TRNLProtocolBlockPacketChannel)+
+                                                SizeOf(TRNLPeerReliableChannelLongMessagePacketHeader));
+
+ MaxPacketsToSend:=TRNLSizeInt(fHost.fReliableChannelBlockPacketWindowSize)-TRNLSequenceNumber.Difference(fOutgoingBlockPacketSequenceNumber,fIncomingAcknowledgementSequenceNumber);
+
+ while fOutgoingMessageQueue.Peek(Message) do begin
+
+  // A message needing more block packets than the send window has slots can never be sent,
+  // because all of its fragments are created in a single dispatching round. Without the
+  // window capacity check here such a message would sit at the head of this queue forever and
+  // would silently take every later message on this channel down with it, which looks exactly
+  // like a dead channel on an otherwise perfectly alive connection. It is dropped instead,
+  // like any other message which does not satisfy the size constraints of this channel.
+  if assigned(Message) and
+     (Message.fDataLength>0) and
+     (Message.fDataLength<=fHost.fMaximumMessageSize) and
+     (Message.fDataLength<=GetMaximumFragmentedMessageSize) then begin
+
+   if Message.fDataLength<=MaximumShortMessageBlockPacketSize then begin
+
+    if MaxPacketsToSend<1 then begin
+
+     break;
+
+    end else begin
+
+     try
+
+      fOutgoingMessageQueue.Dequeue;
+
+      BlockPacket:=TRNLPeerBlockPacket.Create(fPeer);
+      try
+
+       BlockPacket.fBlockPacket.Channel.Header.TypeAndSubtype:=(TRNLInt32(TRNLProtocolBlockPacketType(RNL_PROTOCOL_BLOCK_PACKET_TYPE_CHANNEL)) shl 0) or
+                                                               (TRNLInt32(TRNLPeerReliableChannelCommandType(RNL_PEER_RELIABLE_CHANNEL_COMMAND_TYPE_SHORT_MESSAGE)) shl 4);
+       BlockPacket.fBlockPacket.Channel.ChannelNumber:=fChannelNumber;
+       BlockPacket.fBlockPacket.Channel.PayloadDataLength:=TRNLEndianness.HostToLittleEndian16(SizeOf(TRNLPeerReliableChannelShortMessagePacketHeader)+Message.fDataLength);
+
+       BlockPacket.fBlockPacketDataLength:=SizeOf(TRNLPeerReliableChannelShortMessagePacketHeader)+Message.fDataLength;
+
+       SetLength(BlockPacket.fBlockPacketData,BlockPacket.fBlockPacketDataLength);
+
+       ShortMessagePacketHeader:=TRNLPointer(@BlockPacket.fBlockPacketData[0]);
+       ShortMessagePacketHeader^.Header.SequenceNumber:=TRNLEndianness.HostToLittleEndian16(fOutgoingMessageBlockPacketSequenceNumber);
+
+       Move(Message.fData^,
+            BlockPacket.fBlockPacketData[SizeOf(TRNLPeerReliableChannelShortMessagePacketHeader)],
+            Message.fDataLength);
+
+       BlockPacket.fSequenceNumber:=fOutgoingMessageBlockPacketSequenceNumber;
+
+       inc(fOutgoingMessageBlockPacketSequenceNumber);
+
+
+       // Without this the whole outgoing message queue would be converted in one go,
+       // regardless of the window, so that the message block packet sequence number could
+       // run arbitrarily far ahead of the one of the send window
+       dec(MaxPacketsToSend);
+
+      finally
+       fOutgoingBlockPacketQueue.Enqueue(BlockPacket);
+      end;
+
+     finally
+      Message.DecRef;
+     end;
+
+    end;
+
+   end else begin
+
+    if MaxPacketsToSend<((Message.fDataLength+(MaximumLongMessageBlockPacketSize-1)) div MaximumLongMessageBlockPacketSize) then begin
+
+     break;
+
+    end else begin
+
+     try
+
+      fOutgoingMessageQueue.Dequeue;
+
+      MessagePosition:=0;
+      while MessagePosition<Message.fDataLength do begin
+
+       MessagePartLength:=Min(Max(TRNLInt64(Message.fDataLength-MessagePosition),TRNLInt64(1)),TRNLInt64(MaximumLongMessageBlockPacketSize));
+
+       BlockPacket:=TRNLPeerBlockPacket.Create(fPeer);
+       try
+
+        BlockPacket.fBlockPacket.Channel.Header.TypeAndSubtype:=(TRNLInt32(TRNLProtocolBlockPacketType(RNL_PROTOCOL_BLOCK_PACKET_TYPE_CHANNEL)) shl 0) or
+                                                                (TRNLInt32(TRNLPeerReliableChannelCommandType(RNL_PEER_RELIABLE_CHANNEL_COMMAND_TYPE_LONG_MESSAGE)) shl 4);
+        BlockPacket.fBlockPacket.Channel.ChannelNumber:=fChannelNumber;
+        BlockPacket.fBlockPacket.Channel.PayloadDataLength:=TRNLEndianness.HostToLittleEndian16(SizeOf(TRNLPeerReliableChannelLongMessagePacketHeader)+MessagePartLength);
+
+        BlockPacket.fBlockPacketDataLength:=SizeOf(TRNLPeerReliableChannelLongMessagePacketHeader)+MessagePartLength;
+
+        SetLength(BlockPacket.fBlockPacketData,BlockPacket.fBlockPacketDataLength);
+
+        LongMessagePacketHeader:=TRNLPointer(@BlockPacket.fBlockPacketData[0]);
+        LongMessagePacketHeader^.Header.SequenceNumber:=TRNLEndianness.HostToLittleEndian16(fOutgoingMessageBlockPacketSequenceNumber);
+        LongMessagePacketHeader^.MessageNumber:=TRNLEndianness.HostToLittleEndian16(fOutgoingMessageNumber);
+        LongMessagePacketHeader^.Offset:=TRNLEndianness.HostToLittleEndian32(MessagePosition);
+        LongMessagePacketHeader^.Length:=TRNLEndianness.HostToLittleEndian32(Message.fDataLength);
+
+        Move(PRNLUInt8Array(TRNLPointer(Message.fData))^[MessagePosition],
+             BlockPacket.fBlockPacketData[SizeOf(TRNLPeerReliableChannelLongMessagePacketHeader)],
+             MessagePartLength);
+
+        BlockPacket.fSequenceNumber:=fOutgoingMessageBlockPacketSequenceNumber;
+
+        inc(fOutgoingMessageBlockPacketSequenceNumber);
+
+
+        // One window slot per fragment, so that the check above stays meaningful for the
+        // next message of this same dispatching round
+        dec(MaxPacketsToSend);
+
+       finally
+        fOutgoingBlockPacketQueue.Enqueue(BlockPacket);
+       end;
+
+       inc(MessagePosition,MessagePartLength);
+
+      end;
+
+      inc(fOutgoingMessageNumber);
+
+     finally
+      Message.DecRef;
+     end;
+
+    end;
+
+   end;
+
+  end else begin
+
+   try
+
+    fOutgoingMessageQueue.Dequeue;
+
+    inc(fHost.fTotalDroppedOutgoingMessages);
+
+   finally
+
+    if assigned(Message) then begin
+     Message.DecRef;
     end;
 
    end;
@@ -21324,10 +21512,6 @@ begin
 
  fOrdered:=true;
 
- fOutgoingMessageBlockPacketSequenceNumber:=0;
-
- fOutgoingMessageNumber:=0;
-
  fIncomingMessageNumber:=$ffff;
 
  fIncomingMessageLength:=0;
@@ -21345,189 +21529,6 @@ begin
 
 end;
 
-procedure TRNLPeerReliableOrderedChannel.DispatchOutgoingMessageBlockPackets;
-var Message:TRNLMessage;
-    MaximumShortMessageBlockPacketSize,
-    MaximumLongMessageBlockPacketSize,
-    MessagePartLength,
-    MessagePosition:TRNLSizeUInt;
-    MaxPacketsToSend:TRNLSizeInt;
-    BlockPacket:TRNLPeerBlockPacket;
-    ShortMessagePacketHeader:PRNLPeerReliableChannelShortMessagePacketHeader;
-    LongMessagePacketHeader:PRNLPeerReliableChannelLongMessagePacketHeader;
-begin
-
- // Dispatch outgoing enqueued messages to outgoing short and long message (fragment) block packets
-
- if fOutgoingMessageQueue.IsEmpty then begin
-  exit;
- end;
-
- MaximumShortMessageBlockPacketSize:=fPeer.fMTU-(RNL_IP_HEADER_SIZE+
-                                                 RNL_UDP_HEADER_SIZE+
-                                                 SizeOf(TRNLProtocolNormalPacketHeader)+
-                                                 SizeOf(TRNLProtocolBlockPacketChannel)+
-                                                 SizeOf(TRNLPeerReliableChannelShortMessagePacketHeader));
-
- MaximumLongMessageBlockPacketSize:=fPeer.fMTU-(RNL_IP_HEADER_SIZE+
-                                                RNL_UDP_HEADER_SIZE+
-                                                SizeOf(TRNLProtocolNormalPacketHeader)+
-                                                SizeOf(TRNLProtocolBlockPacketChannel)+
-                                                SizeOf(TRNLPeerReliableChannelLongMessagePacketHeader));
-
- MaxPacketsToSend:=TRNLSizeInt(fHost.fReliableChannelBlockPacketWindowSize)-TRNLSequenceNumber.Difference(fOutgoingBlockPacketSequenceNumber,fIncomingAcknowledgementSequenceNumber);
-
- while fOutgoingMessageQueue.Peek(Message) do begin
-
-  // A message needing more block packets than the send window has slots can never be sent,
-  // because all of its fragments are created in a single dispatching round. Without the
-  // window capacity check here such a message would sit at the head of this queue forever and
-  // would silently take every later message on this channel down with it, which looks exactly
-  // like a dead channel on an otherwise perfectly alive connection. It is dropped instead,
-  // like any other message which does not satisfy the size constraints of this channel.
-  if assigned(Message) and
-     (Message.fDataLength>0) and
-     (Message.fDataLength<=fHost.fMaximumMessageSize) and
-     (Message.fDataLength<=GetMaximumFragmentedMessageSize) then begin
-
-   if Message.fDataLength<=MaximumShortMessageBlockPacketSize then begin
-
-    if MaxPacketsToSend<1 then begin
-
-     break;
-
-    end else begin
-
-     try
-
-      fOutgoingMessageQueue.Dequeue;
-
-      BlockPacket:=TRNLPeerBlockPacket.Create(fPeer);
-      try
-
-       BlockPacket.fBlockPacket.Channel.Header.TypeAndSubtype:=(TRNLInt32(TRNLProtocolBlockPacketType(RNL_PROTOCOL_BLOCK_PACKET_TYPE_CHANNEL)) shl 0) or
-                                                               (TRNLInt32(TRNLPeerReliableChannelCommandType(RNL_PEER_RELIABLE_CHANNEL_COMMAND_TYPE_SHORT_MESSAGE)) shl 4);
-       BlockPacket.fBlockPacket.Channel.ChannelNumber:=fChannelNumber;
-       BlockPacket.fBlockPacket.Channel.PayloadDataLength:=TRNLEndianness.HostToLittleEndian16(SizeOf(TRNLPeerReliableChannelShortMessagePacketHeader)+Message.fDataLength);
-
-       BlockPacket.fBlockPacketDataLength:=SizeOf(TRNLPeerReliableChannelShortMessagePacketHeader)+Message.fDataLength;
-
-       SetLength(BlockPacket.fBlockPacketData,BlockPacket.fBlockPacketDataLength);
-
-       ShortMessagePacketHeader:=TRNLPointer(@BlockPacket.fBlockPacketData[0]);
-       ShortMessagePacketHeader^.Header.SequenceNumber:=TRNLEndianness.HostToLittleEndian16(fOutgoingMessageBlockPacketSequenceNumber);
-
-       Move(Message.fData^,
-            BlockPacket.fBlockPacketData[SizeOf(TRNLPeerReliableChannelShortMessagePacketHeader)],
-            Message.fDataLength);
-
-       BlockPacket.fSequenceNumber:=fOutgoingMessageBlockPacketSequenceNumber;
-
-       inc(fOutgoingMessageBlockPacketSequenceNumber);
-
-
-       // Without this the whole outgoing message queue would be converted in one go,
-       // regardless of the window, so that the message block packet sequence number could
-       // run arbitrarily far ahead of the one of the send window
-       dec(MaxPacketsToSend);
-
-      finally
-       fOutgoingBlockPacketQueue.Enqueue(BlockPacket);
-      end;
-
-     finally
-      Message.DecRef;
-     end;
-
-    end;
-
-   end else begin
-
-    if MaxPacketsToSend<((Message.fDataLength+(MaximumLongMessageBlockPacketSize-1)) div MaximumLongMessageBlockPacketSize) then begin
-
-     break;
-
-    end else begin
-
-     try
-
-      fOutgoingMessageQueue.Dequeue;
-
-      MessagePosition:=0;
-      while MessagePosition<Message.fDataLength do begin
-
-       MessagePartLength:=Min(Max(TRNLInt64(Message.fDataLength-MessagePosition),TRNLInt64(1)),TRNLInt64(MaximumLongMessageBlockPacketSize));
-
-       BlockPacket:=TRNLPeerBlockPacket.Create(fPeer);
-       try
-
-        BlockPacket.fBlockPacket.Channel.Header.TypeAndSubtype:=(TRNLInt32(TRNLProtocolBlockPacketType(RNL_PROTOCOL_BLOCK_PACKET_TYPE_CHANNEL)) shl 0) or
-                                                                (TRNLInt32(TRNLPeerReliableChannelCommandType(RNL_PEER_RELIABLE_CHANNEL_COMMAND_TYPE_LONG_MESSAGE)) shl 4);
-        BlockPacket.fBlockPacket.Channel.ChannelNumber:=fChannelNumber;
-        BlockPacket.fBlockPacket.Channel.PayloadDataLength:=TRNLEndianness.HostToLittleEndian16(SizeOf(TRNLPeerReliableChannelLongMessagePacketHeader)+MessagePartLength);
-
-        BlockPacket.fBlockPacketDataLength:=SizeOf(TRNLPeerReliableChannelLongMessagePacketHeader)+MessagePartLength;
-
-        SetLength(BlockPacket.fBlockPacketData,BlockPacket.fBlockPacketDataLength);
-
-        LongMessagePacketHeader:=TRNLPointer(@BlockPacket.fBlockPacketData[0]);
-        LongMessagePacketHeader^.Header.SequenceNumber:=TRNLEndianness.HostToLittleEndian16(fOutgoingMessageBlockPacketSequenceNumber);
-        LongMessagePacketHeader^.MessageNumber:=TRNLEndianness.HostToLittleEndian16(fOutgoingMessageNumber);
-        LongMessagePacketHeader^.Offset:=TRNLEndianness.HostToLittleEndian32(MessagePosition);
-        LongMessagePacketHeader^.Length:=TRNLEndianness.HostToLittleEndian32(Message.fDataLength);
-
-        Move(PRNLUInt8Array(TRNLPointer(Message.fData))^[MessagePosition],
-             BlockPacket.fBlockPacketData[SizeOf(TRNLPeerReliableChannelLongMessagePacketHeader)],
-             MessagePartLength);
-
-        BlockPacket.fSequenceNumber:=fOutgoingMessageBlockPacketSequenceNumber;
-
-        inc(fOutgoingMessageBlockPacketSequenceNumber);
-
-
-        // One window slot per fragment, so that the check above stays meaningful for the
-        // next message of this same dispatching round
-        dec(MaxPacketsToSend);
-
-       finally
-        fOutgoingBlockPacketQueue.Enqueue(BlockPacket);
-       end;
-
-       inc(MessagePosition,MessagePartLength);
-
-      end;
-
-      inc(fOutgoingMessageNumber);
-
-     finally
-      Message.DecRef;
-     end;
-
-    end;
-
-   end;
-
-  end else begin
-
-   try
-
-    fOutgoingMessageQueue.Dequeue;
-
-    inc(fHost.fTotalDroppedOutgoingMessages);
-
-   finally
-
-    if assigned(Message) then begin
-     Message.DecRef;
-    end;
-
-   end;
-
-  end;
-
- end;
-
-end;
 
 procedure TRNLPeerReliableOrderedChannel.DispatchIncomingMessageBlockPacket(const aBlockPacket:TRNLPeerBlockPacket);
 var ChannelCommandType:TRNLPeerReliableChannelCommandType;
@@ -21775,10 +21776,6 @@ begin
  fIncomingLongMessages:=TRNLPeerReliableUnorderedChannelLongMessageListNode.Create;
  fIncomingLongMessages.fValue:=nil;
 
- fOutgoingMessageBlockPacketSequenceNumber:=0;
-
- fOutgoingMessageNumber:=0;
-
 end;
 
 destructor TRNLPeerReliableUnorderedChannel.Destroy;
@@ -21794,189 +21791,6 @@ begin
 
 end;
 
-procedure TRNLPeerReliableUnorderedChannel.DispatchOutgoingMessageBlockPackets;
-var Message:TRNLMessage;
-    MaximumShortMessageBlockPacketSize,
-    MaximumLongMessageBlockPacketSize,
-    MessagePartLength,
-    MessagePosition:TRNLSizeUInt;
-    MaxPacketsToSend:TRNLSizeInt;
-    BlockPacket:TRNLPeerBlockPacket;
-    ShortMessagePacketHeader:PRNLPeerReliableChannelShortMessagePacketHeader;
-    LongMessagePacketHeader:PRNLPeerReliableChannelLongMessagePacketHeader;
-begin
-
- // Dispatch outgoing enqueued messages to outgoing short and long message (fragment) block packets
-
- if fOutgoingMessageQueue.IsEmpty then begin
-  exit;
- end;
-
- MaximumShortMessageBlockPacketSize:=fPeer.fMTU-(RNL_IP_HEADER_SIZE+
-                                                 RNL_UDP_HEADER_SIZE+
-                                                 SizeOf(TRNLProtocolNormalPacketHeader)+
-                                                 SizeOf(TRNLProtocolBlockPacketChannel)+
-                                                 SizeOf(TRNLPeerReliableChannelShortMessagePacketHeader));
-
- MaximumLongMessageBlockPacketSize:=fPeer.fMTU-(RNL_IP_HEADER_SIZE+
-                                                RNL_UDP_HEADER_SIZE+
-                                                SizeOf(TRNLProtocolNormalPacketHeader)+
-                                                SizeOf(TRNLProtocolBlockPacketChannel)+
-                                                SizeOf(TRNLPeerReliableChannelLongMessagePacketHeader));
-
- MaxPacketsToSend:=TRNLSizeInt(fHost.fReliableChannelBlockPacketWindowSize)-TRNLSequenceNumber.Difference(fOutgoingBlockPacketSequenceNumber,fIncomingAcknowledgementSequenceNumber);
-
- while fOutgoingMessageQueue.Peek(Message) do begin
-
-  // A message needing more block packets than the send window has slots can never be sent,
-  // because all of its fragments are created in a single dispatching round. Without the
-  // window capacity check here such a message would sit at the head of this queue forever and
-  // would silently take every later message on this channel down with it, which looks exactly
-  // like a dead channel on an otherwise perfectly alive connection. It is dropped instead,
-  // like any other message which does not satisfy the size constraints of this channel.
-  if assigned(Message) and
-     (Message.fDataLength>0) and
-     (Message.fDataLength<=fHost.fMaximumMessageSize) and
-     (Message.fDataLength<=GetMaximumFragmentedMessageSize) then begin
-
-   if Message.fDataLength<=MaximumShortMessageBlockPacketSize then begin
-
-    if MaxPacketsToSend<1 then begin
-
-     break;
-
-    end else begin
-
-     try
-
-      fOutgoingMessageQueue.Dequeue;
-
-      BlockPacket:=TRNLPeerBlockPacket.Create(fPeer);
-      try
-
-       BlockPacket.fBlockPacket.Channel.Header.TypeAndSubtype:=(TRNLInt32(TRNLProtocolBlockPacketType(RNL_PROTOCOL_BLOCK_PACKET_TYPE_CHANNEL)) shl 0) or
-                                                               (TRNLInt32(TRNLPeerReliableChannelCommandType(RNL_PEER_RELIABLE_CHANNEL_COMMAND_TYPE_SHORT_MESSAGE)) shl 4);
-       BlockPacket.fBlockPacket.Channel.ChannelNumber:=fChannelNumber;
-       BlockPacket.fBlockPacket.Channel.PayloadDataLength:=TRNLEndianness.HostToLittleEndian16(SizeOf(TRNLPeerReliableChannelShortMessagePacketHeader)+Message.fDataLength);
-
-       BlockPacket.fBlockPacketDataLength:=SizeOf(TRNLPeerReliableChannelShortMessagePacketHeader)+Message.fDataLength;
-
-       SetLength(BlockPacket.fBlockPacketData,BlockPacket.fBlockPacketDataLength);
-
-       ShortMessagePacketHeader:=TRNLPointer(@BlockPacket.fBlockPacketData[0]);
-       ShortMessagePacketHeader^.Header.SequenceNumber:=TRNLEndianness.HostToLittleEndian16(fOutgoingMessageBlockPacketSequenceNumber);
-
-       Move(Message.fData^,
-            BlockPacket.fBlockPacketData[SizeOf(TRNLPeerReliableChannelShortMessagePacketHeader)],
-            Message.fDataLength);
-
-       BlockPacket.fSequenceNumber:=fOutgoingMessageBlockPacketSequenceNumber;
-
-       inc(fOutgoingMessageBlockPacketSequenceNumber);
-
-
-       // Without this the whole outgoing message queue would be converted in one go,
-       // regardless of the window, so that the message block packet sequence number could
-       // run arbitrarily far ahead of the one of the send window
-       dec(MaxPacketsToSend);
-
-      finally
-       fOutgoingBlockPacketQueue.Enqueue(BlockPacket);
-      end;
-
-     finally
-      Message.DecRef;
-     end;
-
-    end;
-
-   end else begin
-
-    if MaxPacketsToSend<((Message.fDataLength+(MaximumLongMessageBlockPacketSize-1)) div MaximumLongMessageBlockPacketSize) then begin
-
-     break;
-
-    end else begin
-
-     try
-
-      fOutgoingMessageQueue.Dequeue;
-
-      MessagePosition:=0;
-      while MessagePosition<Message.fDataLength do begin
-
-       MessagePartLength:=Min(Max(TRNLInt64(Message.fDataLength-MessagePosition),TRNLInt64(1)),TRNLInt64(MaximumLongMessageBlockPacketSize));
-
-       BlockPacket:=TRNLPeerBlockPacket.Create(fPeer);
-       try
-
-        BlockPacket.fBlockPacket.Channel.Header.TypeAndSubtype:=(TRNLInt32(TRNLProtocolBlockPacketType(RNL_PROTOCOL_BLOCK_PACKET_TYPE_CHANNEL)) shl 0) or
-                                                                (TRNLInt32(TRNLPeerReliableChannelCommandType(RNL_PEER_RELIABLE_CHANNEL_COMMAND_TYPE_LONG_MESSAGE)) shl 4);
-        BlockPacket.fBlockPacket.Channel.ChannelNumber:=fChannelNumber;
-        BlockPacket.fBlockPacket.Channel.PayloadDataLength:=TRNLEndianness.HostToLittleEndian16(SizeOf(TRNLPeerReliableChannelLongMessagePacketHeader)+MessagePartLength);
-
-        BlockPacket.fBlockPacketDataLength:=SizeOf(TRNLPeerReliableChannelLongMessagePacketHeader)+MessagePartLength;
-
-        SetLength(BlockPacket.fBlockPacketData,BlockPacket.fBlockPacketDataLength);
-
-        LongMessagePacketHeader:=TRNLPointer(@BlockPacket.fBlockPacketData[0]);
-        LongMessagePacketHeader^.Header.SequenceNumber:=TRNLEndianness.HostToLittleEndian16(fOutgoingMessageBlockPacketSequenceNumber);
-        LongMessagePacketHeader^.MessageNumber:=TRNLEndianness.HostToLittleEndian16(fOutgoingMessageNumber);
-        LongMessagePacketHeader^.Offset:=TRNLEndianness.HostToLittleEndian32(MessagePosition);
-        LongMessagePacketHeader^.Length:=TRNLEndianness.HostToLittleEndian32(Message.fDataLength);
-
-        Move(PRNLUInt8Array(TRNLPointer(Message.fData))^[MessagePosition],
-             BlockPacket.fBlockPacketData[SizeOf(TRNLPeerReliableChannelLongMessagePacketHeader)],
-             MessagePartLength);
-
-        BlockPacket.fSequenceNumber:=fOutgoingMessageBlockPacketSequenceNumber;
-
-        inc(fOutgoingMessageBlockPacketSequenceNumber);
-
-
-        // One window slot per fragment, so that the check above stays meaningful for the
-        // next message of this same dispatching round
-        dec(MaxPacketsToSend);
-
-       finally
-        fOutgoingBlockPacketQueue.Enqueue(BlockPacket);
-       end;
-
-       inc(MessagePosition,MessagePartLength);
-
-      end;
-
-      inc(fOutgoingMessageNumber);
-
-     finally
-      Message.DecRef;
-     end;
-
-    end;
-
-   end;
-
-  end else begin
-
-   try
-
-    fOutgoingMessageQueue.Dequeue;
-
-    inc(fHost.fTotalDroppedOutgoingMessages);
-
-   finally
-
-    if assigned(Message) then begin
-     Message.DecRef;
-    end;
-
-   end;
-
-  end;
-
- end;
-
-end;
 
 procedure TRNLPeerReliableUnorderedChannel.DispatchIncomingMessageBlockPacket(const aBlockPacket:TRNLPeerBlockPacket);
 var ChannelCommandType:TRNLPeerReliableChannelCommandType;
@@ -22109,10 +21923,13 @@ var Message:TRNLMessage;
     MaximumLongMessageBlockPacketSize,
     MessagePartLength,
     MessagePosition:TRNLSizeUInt;
+    MaxBlockPacketsToSend,CountBlockPacketsSent:TRNLSizeUInt;
     BlockPacket:TRNLPeerBlockPacket;
     ShortMessagePacketHeader:PRNLPeerUnreliableOrderedChannelShortMessagePacketHeader;
     LongMessagePacketHeader:PRNLPeerUnreliableOrderedChannelLongMessagePacketHeader;
 begin
+
+ CountBlockPacketsSent:=0;
 
  if fOutgoingMessageQueue.IsEmpty then begin
   exit;
@@ -22130,7 +21947,15 @@ begin
                                                 SizeOf(TRNLProtocolBlockPacketChannel)+
                                                 SizeOf(TRNLPeerUnreliableOrderedChannelLongMessagePacketHeader));
 
- while fOutgoingMessageQueue.Dequeue(Message) do begin
+ // Bounded on purpose. Whatever is left over stays in the queue and goes out in the next round,
+ // which costs a little latency under an extreme burst and in exchange keeps one round from
+ // turning an arbitrarily long message queue into an equally long burst of datagrams.
+ MaxBlockPacketsToSend:=fHost.fMaximumUnreliableBlockPacketsPerDispatch;
+
+ while ((MaxBlockPacketsToSend=0) or (CountBlockPacketsSent<MaxBlockPacketsToSend)) and
+       fOutgoingMessageQueue.Peek(Message) do begin
+
+  fOutgoingMessageQueue.Dequeue;
 
   try
 
@@ -22160,6 +21985,7 @@ begin
 
      finally
       fPeer.fOutgoingBlockPackets.Enqueue(BlockPacket);
+      inc(CountBlockPacketsSent);
      end;
 
     end else begin
@@ -22194,6 +22020,7 @@ begin
 
       finally
        fPeer.fOutgoingBlockPackets.Enqueue(BlockPacket);
+       inc(CountBlockPacketsSent);
       end;
 
       inc(MessagePosition,MessagePartLength);
@@ -22455,9 +22282,12 @@ var Message:TRNLMessage;
     MaximumLongMessageBlockPacketSize,
     MessagePartLength,
     MessagePosition:TRNLSizeUInt;
+    MaxBlockPacketsToSend,CountBlockPacketsSent:TRNLSizeUInt;
     BlockPacket:TRNLPeerBlockPacket;
     LongMessagePacketHeader:PRNLPeerUnreliableUnorderedChannelLongMessagePacketHeader;
 begin
+
+ CountBlockPacketsSent:=0;
 
  if fOutgoingMessageQueue.IsEmpty then begin
   exit;
@@ -22475,7 +22305,15 @@ begin
                                                 SizeOf(TRNLProtocolBlockPacketChannel)+
                                                 SizeOf(TRNLPeerUnreliableUnorderedChannelLongMessagePacketHeader));
 
- while fOutgoingMessageQueue.Dequeue(Message) do begin
+ // Bounded on purpose. Whatever is left over stays in the queue and goes out in the next round,
+ // which costs a little latency under an extreme burst and in exchange keeps one round from
+ // turning an arbitrarily long message queue into an equally long burst of datagrams.
+ MaxBlockPacketsToSend:=fHost.fMaximumUnreliableBlockPacketsPerDispatch;
+
+ while ((MaxBlockPacketsToSend=0) or (CountBlockPacketsSent<MaxBlockPacketsToSend)) and
+       fOutgoingMessageQueue.Peek(Message) do begin
+
+  fOutgoingMessageQueue.Dequeue;
 
   try
 
@@ -22501,6 +22339,7 @@ begin
 
      finally
       fPeer.fOutgoingBlockPackets.Enqueue(BlockPacket);
+      inc(CountBlockPacketsSent);
      end;
 
     end else begin
@@ -22533,6 +22372,7 @@ begin
 
       finally
        fPeer.fOutgoingBlockPackets.Enqueue(BlockPacket);
+       inc(CountBlockPacketsSent);
       end;
 
       inc(MessagePosition,MessagePartLength);
@@ -22605,7 +22445,12 @@ begin
     exit;
    end;
 
-   if fIncomingMessageNumber<>LongMessagePacketHeader^.MessageNumber then begin
+   // Whether a reassembly is in progress at all is what the buffer says, so it has to be part of
+   // this decision. Going by the message number alone made the initial value of that field act
+   // as a sentinel, and a message which legitimately carries exactly that number then looked
+   // like a continuation of something which was never started and was dropped.
+   if (not assigned(fIncomingMessageReceiveBufferData)) or
+      (fIncomingMessageNumber<>LongMessagePacketHeader^.MessageNumber) then begin
 
     fIncomingMessageNumber:=LongMessagePacketHeader^.MessageNumber;
 
@@ -22631,8 +22476,10 @@ begin
 
    end else begin
 
-    if (fIncomingMessageNumber<>LongMessagePacketHeader^.MessageNumber) or
-       (not assigned(fIncomingMessageReceiveBufferData)) or
+    // The message numbers are equal here by construction, so this only has to check that there
+    // really is a reassembly in progress for it and that it is about the same total length
+    if (not (assigned(fIncomingMessageReceiveBufferData) and
+             assigned(fIncomingMessageReceiveBufferFlagData))) or
        (fIncomingMessageLength<>LongMessagePacketHeader^.Length) then begin
      // Reject, it is anyway on an unreliable channel
      fIncomingMessageLength:=0;
@@ -22863,8 +22710,6 @@ begin
 
  fOutgoingMTUProbeBlockPackets:=TRNLPeerBlockPacketQueue.Create;
 
- fDeferredOutgoingBlockPackets:=TRNLPeerBlockPacketQueue.Create;
-
  fState:=RNL_PEER_STATE_DISCONNECTED;
 
  fRemoteIncomingBandwidthLimit:=0;
@@ -22932,11 +22777,6 @@ begin
   end;
 
   fIncomingEncryptedPacketSequenceBuffer:=nil;
-
-  while fDeferredOutgoingBlockPackets.Dequeue(BlockPacket) do begin
-   BlockPacket.DecRef;
-  end;
-  FreeAndNil(fDeferredOutgoingBlockPackets);
 
   while fOutgoingMTUProbeBlockPackets.Dequeue(BlockPacket) do begin
    BlockPacket.DecRef;
@@ -23067,7 +22907,7 @@ begin
  fRetransmissionTimeout:=fRoundTripTime+(fRoundTripTimeVariance shl 2);
 end;
 
-procedure TRNLPeer.UpdatePatchLossStatistics;
+procedure TRNLPeer.UpdatePacketLossStatistics;
 var Value64Bit:TRNLInt64;
 begin
 
@@ -23282,11 +23122,6 @@ begin
     end;
 
     RNL_PROTOCOL_BLOCK_PACKET_TYPE_PONG:begin
-
-     if IncomingBlockPacket.fBlockPacket.Pong.SequenceNumber=1 then begin
-      if IncomingBlockPacket.fBlockPacket.Pong.SequenceNumber=1 then begin
-      end;
-     end;
 
      KeepAliveWindowItem:=@fKeepAliveWindowItems[IncomingBlockPacket.fBlockPacket.Pong.SequenceNumber and fHost.fKeepAliveWindowMask];
 
@@ -24644,7 +24479,7 @@ begin
 
  DispatchIncomingChannelMessages;
 
- UpdatePatchLossStatistics;
+ UpdatePacketLossStatistics;
 
  DispatchStateActions;
 
@@ -24854,6 +24689,10 @@ begin
  fMaximumRetransmissionTimeoutLimit:=320;
 
  fMaximumReliableBlockPacketSendAttempts:=64;
+
+ // Generous enough that ordinary usage never touches it, small enough that a single round can
+ // not produce a multi megabyte burst
+ fMaximumUnreliableBlockPacketsPerDispatch:=256;
 
  fRateLimiterHostAddressBurst:=20;
 

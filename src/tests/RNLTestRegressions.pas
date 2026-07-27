@@ -1990,6 +1990,7 @@ var Instance:TRNLInstance;
     HostPair:TRNLTestHostPair;
     StartTime:TRNLTime;
     ElapsedMilliseconds,TimeBudgetMilliseconds:TRNLInt64;
+    HostServiceLoopAlive:boolean;
     Watchdog:TRNLTestWatchdog;
 begin
 
@@ -2038,15 +2039,24 @@ begin
 
       StartTime:=Instance.Time;
 
+      // The assertion deliberately sits outside of this loop, so that the number of checks of
+      // this test does not depend on how many iterations the loop happened to need
+      HostServiceLoopAlive:=true;
+
       repeat
-       if not Check(HostPair.Pump(100),'the host service loop must stay alive') then begin
-        exit;
+       if not HostPair.Pump(100) then begin
+        HostServiceLoopAlive:=false;
+        break;
        end;
        ElapsedMilliseconds:=TRNLTime.RelativeDifference(Instance.Time,StartTime);
       until (HostPair.CountClientDisconnectEvents>0) or
             (ElapsedMilliseconds>=CONNECTION_TIMEOUT);
 
       Info('the delayed disconnect completed after '+TRNLRawByteString(IntToStr(ElapsedMilliseconds))+' ms');
+
+      if not Check(HostServiceLoopAlive,'the host service loop must stay alive') then begin
+       exit;
+      end;
 
       if not CheckAtLeastInt64(HostPair.CountClientDisconnectEvents,1,
                                'the delayed disconnect must complete at all') then begin
@@ -2093,6 +2103,7 @@ var Instance:TRNLInstance;
     HostPair:TRNLTestHostPair;
     StartTime:TRNLTime;
     ElapsedMilliseconds:TRNLInt64;
+    HostServiceLoopAlive:boolean;
     Watchdog:TRNLTestWatchdog;
 begin
 
@@ -2131,15 +2142,24 @@ begin
 
       StartTime:=Instance.Time;
 
+      // The assertion deliberately sits outside of this loop, so that the number of checks of
+      // this test does not depend on how many iterations the loop happened to need
+      HostServiceLoopAlive:=true;
+
       repeat
-       if not Check(HostPair.Pump(100),'the host service loop must stay alive') then begin
-        exit;
+       if not HostPair.Pump(100) then begin
+        HostServiceLoopAlive:=false;
+        break;
        end;
        ElapsedMilliseconds:=TRNLTime.RelativeDifference(Instance.Time,StartTime);
       until (HostPair.Client.TotalPeersGivenUpOn>0) or
             (ElapsedMilliseconds>=40000);
 
       Info('gave up after '+TRNLRawByteString(IntToStr(ElapsedMilliseconds))+' ms');
+
+      if not Check(HostServiceLoopAlive,'the host service loop must stay alive') then begin
+       exit;
+      end;
       Info('peers given up on: '+TRNLRawByteString(IntToStr(HostPair.Client.TotalPeersGivenUpOn)));
 
       CheckAtLeastInt64(HostPair.Client.TotalPeersGivenUpOn,1,
