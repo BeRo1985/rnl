@@ -171,10 +171,15 @@ are the typical case for egoshooters, racing games, and so forth. Or in other wo
      in time rather than by throwing datagrams away. Measured against a simulated bottleneck in four
      shapes - deep and shallow buffer, each with and without a competing flow - it keeps the standing
      queue between 8 and 65 ms where the buffer allows up to 1500 ms, without losing a connection.
+     A queue which has already built up is drained by sending as much below the capacity as the
+     length of that queue calls for, so that a shallow one is not charged the price of a deep one.
      The measurements behind it are readable on their own as well: baseline round trip time, queueing
      delay above it, delivery rate, and loss per flight
    - Delayed rather than dropped enforcement of an outgoing bandwidth limit, and an optional age
      bound after which unreliable data is discarded on the way out instead of delivered stale
+   - The outgoing bandwidth limit of a host is divided among its peers by a per peer weight instead
+     of being a single budget which whoever is dispatched first empties. The order in which peers are
+     dispatched rotates as well, since a share nobody can reach is not a share
    - And a lot of more stuff  . . .
 
 # Planned features (a.k.a Todo) in random order of priorities
@@ -183,9 +188,6 @@ are the typical case for egoshooters, racing games, and so forth. Or in other wo
      blocks UDP; TLS additionally covers one which only lets TLS out. It needs a TLS stack, which RNL
      does not have and which is a good deal larger than everything around it, so the sensible shape is
      an external library behind a callback interface rather than own code
-   - Fair sharing of the uplink of a host between several peers. The congestion controller regulates
-     each peer against the path it sees; the host wide limiter brakes all of them together and
-     whoever asks first sends first. A weighted division is a separate piece of work
    - TODO
 
 # General guidelines for code contributors 
