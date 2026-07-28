@@ -7914,6 +7914,13 @@ begin
    Shares[Index]:=0;
   end;
 
+  // For the same reason, and this one bit: a host event is a record with a peer and a message
+  // reference in it, and Free releases both. Handing an uninitialised one to Service and then freeing
+  // it works on a stack which happens to be zeroed and dereferences whatever was there otherwise -
+  // green on Linux, an access violation under wine
+  Event.Initialize;
+  try
+
   Instance:=TRNLInstance.Create;
   try
    Network:=TRNLVirtualNetwork.Create(Instance);
@@ -8040,6 +8047,10 @@ begin
    end;
   finally
    FreeAndNil(Instance);
+  end;
+
+  finally
+   Event.Finalize;
   end;
 
  finally
