@@ -744,6 +744,80 @@ const RNL_PROTOCOL_VERSION_MAJOR=1;
 
       RNL_PEER_PACKET_LOSS_INTERVAL=10000;
 
+      // The baseline of the round trip time is kept as a sliding window of per interval minima. A
+      // sliding window and not an all time minimum, because a path which really did get slower has
+      // to be accepted as the new baseline eventually, or everything measured against it stays
+      // wrong forever. Ten intervals of a second is long enough to survive a burst of queueing and
+      // short enough to follow a genuine change within a few seconds
+      RNL_PEER_MINIMUM_ROUND_TRIP_TIME_INTERVALS=10;
+
+      RNL_PEER_MINIMUM_ROUND_TRIP_TIME_INTERVAL=1000;
+
+      // Marks an interval which has not seen a single measurement yet. Zero would not do, since a
+      // round trip time of zero milliseconds is what a loopback or a virtual network produces
+      RNL_PEER_ROUND_TRIP_TIME_UNKNOWN=TRNLInt64(-1);
+
+      // The capacity of a path is the LARGEST delivery rate seen recently, not the current one. The
+      // current one only measures the capacity while the path is being saturated; the moment a
+      // controller throttles, it measures the throttle instead. Taking it for the capacity therefore
+      // ratchets a controller downwards: every reduction lowers the estimate, which justifies the
+      // next reduction. Same window and same reasoning as the minimum round trip time above, mirrored
+      RNL_PEER_MAXIMUM_DELIVERY_RATE_INTERVALS=10;
+
+      RNL_PEER_MAXIMUM_DELIVERY_RATE_INTERVAL=1000;
+
+      // Loss is accounted per flight, which is one round trip time worth of sending, and not over
+      // the ten second reporting interval: a controller which learns about loss once every ten
+      // seconds is not a controller. The floor keeps a very short round trip time from turning the
+      // accounting into noise, since a flight of two milliseconds holds one or two packets and its
+      // loss ratio is therefore either zero or fifty percent
+      RNL_PEER_MINIMUM_FLIGHT_INTERVAL=20;
+
+      // Pacing keeps its departure schedule in microseconds although TRNLTime counts milliseconds:
+      // at eight megabits per second a datagram occupies the link for well under a millisecond, and
+      // rounded to milliseconds every such rate would come out as either unlimited or as one
+      // datagram per millisecond
+      RNL_BANDWIDTH_MICROSECONDS_PER_MILLISECOND=TRNLInt64(1000);
+
+      RNL_BANDWIDTH_MICROSECONDS_PER_SECOND=TRNLInt64(1000000);
+
+      // Above this much queueing delay the controller gives way. Deliberately low for a library which
+      // carries game traffic: a hundred milliseconds of standing queue is already the difference
+      // between a responsive and a sluggish connection, and giving up some throughput for it is the
+      // trade this library wants. A bulk transfer library would choose a far higher number here
+      RNL_PEER_CONGESTION_CONTROL_HIGH_DELAY=50;
+
+      // And below this much it takes more. The gap between the two is what keeps the rate from
+      // oscillating around a single threshold
+      RNL_PEER_CONGESTION_CONTROL_LOW_DELAY=15;
+
+      // A flight in which this fraction or more of the packets had to be retransmitted counts as
+      // loss, expressed in percent. Below it, single retransmissions are treated as the noise they
+      // usually are on a wireless path
+      RNL_PEER_CONGESTION_CONTROL_LOSS_PERCENT=10;
+
+      // The floor. Low enough to be out of the way of any real path, high enough that acknowledgements,
+      // pings and a trickle of payload always fit through - a controller which can throttle a
+      // connection into silence would be worse than none at all. In bits per second
+      RNL_PEER_CONGESTION_CONTROL_MINIMUM_RATE=64000;
+
+      // Where a connection starts when nothing is known about the path yet, in bits per second. The
+      // controller finds its way from here within a few round trips in either direction
+      RNL_PEER_CONGESTION_CONTROL_INITIAL_RATE=1000000;
+
+      // The rate is never raised beyond this multiple of what the path demonstrably delivers, as a
+      // percentage. Sending more than arrives does not move data, it only lengthens the queue
+      RNL_PEER_CONGESTION_CONTROL_DELIVERY_HEADROOM_PERCENT=125;
+
+      // This many times past the delay threshold is not "slightly too fast" any more but an outright
+      // wrong rate, and the controller stops easing off and goes straight to the measured capacity
+      RNL_PEER_CONGESTION_CONTROL_PANIC_FACTOR=4;
+
+      // How far the rate has to have moved since it was last reported before the application is told
+      // again, in percent. The rate is adjusted on every flight, so an event per adjustment would be
+      // an event per round trip - noise which every application would end up filtering for itself
+      RNL_PEER_CONGESTION_CONTROL_REPORT_PERCENT=25;
+
       RNL_BROADCAST_IPV4='255.255.255.255';
 
       RNL_MULTICAST_GROUP_IPV4='224.0.0.1';
@@ -2164,6 +2238,10 @@ type PRNLVersion=^TRNLVersion;
        fUsedInPeriod:TRNLUInt64;
        fPeriodStart:TRNLTime;
        fPeriodEnd:TRNLTime;
+       // The departure schedule of the pacing. Advanced by the service time of everything which
+       // actually went out, so the rate is turned into an even SPACING instead of a budget which may
+       // be spent in one burst at the start of every period
+       fNextDepartureMicroseconds:TRNLInt64;
       public
        constructor Create(const aMaximumPerPeriod,aPeriodLength:TRNLUInt64;const aTime:TRNLTime);
        procedure Setup(const aMaximumPerPeriod,aPeriodLength:TRNLUInt64);
@@ -3898,6 +3976,14 @@ type PRNLVersion=^TRNLVersion;
        fBlockPacketData:TRNLPeerBlockPacketData;
        fBlockPacketDataLength:TRNLSizeUInt;
        fReferenceCounter:TRNLUInt32;
+       // The point in time after which this block packet is not worth sending any more. Zero means
+       // never, which is what everything reliable and every control block uses. Only the unreliable
+       // channels set it, because only there is stale data worse than no data
+       fDiscardableAfter:TRNLTime;
+       // Acknowledged while still waiting in the outgoing queue of its peer, which a paced or rate
+       // limited connection makes perfectly possible. Sending it now would be a duplicate of
+       // something the counter side has already confirmed, so it is dropped on the way out instead
+       fCancelled:boolean;
        fPendingResendOutgoingBlockPacketsList:TRNLPeerBlockPacketCircularDoublyLinkedListNode;
        function GetPointerToBlockPacket:PRNLProtocolBlockPacket; inline;
        function GetSize:TRNLSizeUInt;
@@ -4462,6 +4548,45 @@ type PRNLVersion=^TRNLVersion;
 
        fRoundTripTime:TRNLInt64;
 
+       // The sliding window of per interval minima and the baseline derived from it. fRoundTripTime
+       // is smoothed and therefore climbs along with a filling queue, which makes it useless as the
+       // reference the queueing delay is measured against - that is what this is for
+       fMinimumRoundTripTimeIntervals:array[0..RNL_PEER_MINIMUM_ROUND_TRIP_TIME_INTERVALS-1] of TRNLInt64;
+       fMinimumRoundTripTimeIntervalIndex:TRNLSizeInt;
+       fMinimumRoundTripTimeIntervalTime:TRNLTime;
+       fMinimumRoundTripTime:TRNLInt64;
+
+       // One flight is one round trip time worth of sending. Counted while it runs, closed and
+       // published when it is over
+       fFlightStartTime:TRNLTime;
+       fCountFlightSentPackets:TRNLUInt32;
+       fCountFlightLostPackets:TRNLUInt32;
+       fCountLastFlightSentPackets:TRNLUInt32;
+       fCountLastFlightLostPackets:TRNLUInt32;
+
+       // Bytes which the counter side actually acknowledged, per second. What was put on the wire
+       // is already tracked by fOutgoingBandwidthRateTracker, and the difference between the two is
+       // the whole point: the first says what was attempted, this one says what got through
+       fDeliveryRateTracker:TRNLBandwidthRateTracker;
+
+       // The rate the controller has settled on, in bits per second, and zero while it is switched
+       // off. Pushed into the outgoing rate limiter of this peer, which turns it into a spacing
+       // The sliding window of per interval maxima of the delivery rate, and the capacity estimate
+       // derived from it, in bytes per second
+       fMaximumDeliveryRateIntervals:array[0..RNL_PEER_MAXIMUM_DELIVERY_RATE_INTERVALS-1] of TRNLInt64;
+       fMaximumDeliveryRateIntervalIndex:TRNLSizeInt;
+       fMaximumDeliveryRateIntervalTime:TRNLTime;
+       fMaximumDeliveryRate:TRNLInt64;
+
+       fCongestionControlRate:TRNLUInt32;
+
+       // The queueing delay as it was at the previous adjustment, so that a delay which is already
+       // falling can be told apart from one which is still climbing
+       fPreviousQueueingDelay:TRNLUInt32;
+
+       // The rate as the application last heard it, so that only a change worth hearing about is sent
+       fReportedCongestionControlRate:TRNLUInt32;
+
        fRoundTripTimeVariance:TRNLInt64;
 
        fRetransmissionTimeout:TRNLInt64;
@@ -4471,6 +4596,12 @@ type PRNLVersion=^TRNLVersion;
        fPacketLossVariance:TRNLInt64;
 
        fCountPacketLoss:TRNLUInt32;
+
+       // Pings which had to be sent again because no pong came back in time. Kept apart from
+       // fCountPacketLoss on purpose: the keep alive has its own timer, three times as patient as
+       // the smallest retransmission timeout, so this counter is far less prone to going up merely
+       // because the machine was busy for a moment
+       fCountKeepAlivePingResends:TRNLUInt32;
 
        fCountSentPackets:TRNLUInt32;
 
@@ -4568,6 +4699,28 @@ type PRNLVersion=^TRNLVersion;
 
        procedure UpdateRoundTripTime(const aRoundTripTime:TRNLInt64);
 
+       // Feeds one measurement into the sliding window of minima and rederives the baseline
+       procedure UpdateMinimumRoundTripTime(const aRoundTripTime:TRNLInt64);
+
+       // Closes the running flight once a round trip time has passed and publishes its counts
+       // Feeds the current delivery rate into the sliding window of maxima
+       procedure UpdateMaximumDeliveryRate;
+
+       procedure UpdateFlightStatistics;
+
+       // Once per flight: takes the three measurements and derives a rate from them
+       procedure UpdateCongestionControl;
+
+       // Hands the application the same event it already gets when the counter side changes its
+       // limits, since from the point of view of an application both mean the very same thing: what
+       // this peer may send has changed
+       procedure RaiseBandwidthLimitsEvent;
+
+       function GetMinimumRoundTripTime:TRNLUInt32;
+       function GetQueueingDelay:TRNLUInt32;
+       function GetDeliveryRate:TRNLUInt32;
+       function GetMaximumDeliveryRate:TRNLUInt32;
+
        // Whether a datagram may be built for this peer at all right now, asked before anything is
        // built, and if not, when the answer would turn into a yes
        function MayBuildOutgoingDatagram(out aNextOpportunityTime:TRNLTime):boolean;
@@ -4661,12 +4814,40 @@ type PRNLVersion=^TRNLVersion;
        property RemoteOutgoingBandwidthLimit:TRNLUInt32 read fRemoteOutgoingBandwidthLimit;
        property IncomingBandwidthRate:TRNLUInt32 read GetIncomingBandwidthRate;
        property OutgoingBandwidthRate:TRNLUInt32 read GetOutgoingBandwidthRate;
+       // The smallest round trip time seen within the last ten seconds, in milliseconds. This is the
+       // path without a queue in front of it, which is what everything else has to be measured
+       // against. Zero for as long as nothing has been measured at all
+       property MinimumRoundTripTime:TRNLUInt32 read GetMinimumRoundTripTime;
+       // The smoothed round trip time minus that baseline, in milliseconds: how much of the current
+       // delay is a queue somewhere on the way rather than the path itself. The signal a delay based
+       // controller works with
+       property QueueingDelay:TRNLUInt32 read GetQueueingDelay;
+       // Acknowledged bytes per second. Not what was put on the wire but what arrived, which is the
+       // difference between the capacity of the path and the rate this side is attempting
+       property DeliveryRate:TRNLUInt32 read GetDeliveryRate;
+       // The largest delivery rate of the last ten seconds, in bytes per second: the capacity of the
+       // path as far as it has been demonstrated. This and not DeliveryRate is what a rate may be
+       // compared against, since DeliveryRate drops along with every throttling of this side
+       property MaximumDeliveryRate:TRNLUInt32 read GetMaximumDeliveryRate;
+       // The two counts of the last completed flight, a flight being one round trip time worth of
+       // sending. Loss over a flight rather than over the ten second reporting interval, because a
+       // controller has to learn about loss while it can still do something about it
+       property CountLastFlightSentPackets:TRNLUInt32 read fCountLastFlightSentPackets;
+       property CountLastFlightLostPackets:TRNLUInt32 read fCountLastFlightLostPackets;
+       // The rate the congestion controller has settled on, in bits per second, or zero while it is
+       // switched off. What is actually enforced is the smaller of this and whatever the counter side
+       // and the application allow
+       property CongestionControlRate:TRNLUInt32 read fCongestionControlRate;
        // How many reliable block packets of this peer had to be retransmitted during the packet loss
        // measurement interval which is currently running, so it is reset every
        // RNL_PEER_PACKET_LOSS_INTERVAL milliseconds and not a lifetime total. Zero means that
        // everything which was put on the wire was acknowledged in time, which is worth being able to
        // tell apart from a connection which merely looks slow because it is being paced
        property CountPacketLoss:TRNLUInt32 read fCountPacketLoss;
+       // How often a ping had to be repeated because its pong did not come back in time. Zero on a
+       // path which answers, and the sharpest available sign that the keep alive is being held up
+       // behind other traffic rather than being answered late
+       property CountKeepAlivePingResends:TRNLUInt32 read fCountKeepAlivePingResends;
      end;
 
      PRNLHostAddressFamilyWorkMode=^TRNLHostAddressFamilyWorkMode;
@@ -4801,6 +4982,18 @@ type PRNLVersion=^TRNLVersion;
 
        fMaximumReliableBlockPacketSendAttempts:TRNLUInt32;
 
+       // How long an unreliable block packet may wait on the way out before it is thrown away
+       // instead of sent, in milliseconds. Zero switches it off, which is the default: dropping data
+       // which an application has handed over is a change of behaviour, so it is asked for and not
+       // assumed. Expressed in time and not in bytes, because for game state it is the age which
+       // makes it worthless, and a byte bound would be an arbitrary number
+       fMaximumOutgoingUnreliableMessageAge:TRNLUInt32;
+
+       // Whether the peers of this host regulate their own outgoing rate. Off by default: an
+       // application which already knows its rate does not need it, a LAN application has nothing to
+       // regulate against, and a controller which nobody asked for is a controller nobody expects
+       fCongestionControl:boolean;
+
        fMaximumUnreliableBlockPacketsPerDispatch:TRNLUInt32;
 
        fTranscriptBindingMode:TRNLProtocolTranscriptBindingMode;
@@ -4906,6 +5099,10 @@ type PRNLVersion=^TRNLVersion;
 
        fTime:TRNLTime;
 
+       // The fTime of the previous dispatching round, so that "how long was this side away" is
+       // answerable. A stalled service loop and a lossy path look identical from a timeout alone
+       fPreviousTime:TRNLTime;
+
        fNextPeerEventTime:TRNLTime;
 
        fReceiveBuffer:TRNLPacketBuffer;
@@ -4939,6 +5136,10 @@ type PRNLVersion=^TRNLVersion;
        fTotalPeersGivenUpOn:TRNLUInt64;
 
        fTotalOutgoingBandwidthDeferredDispatches:TRNLUInt64;
+
+       fTotalStalledRetransmissions:TRNLUInt64;
+
+       fTotalDiscardedStaleOutgoingBlockPackets:TRNLUInt64;
 
        fTotalRejectedRemoteLongTermPublicKeys:TRNLUInt64;
 
@@ -5266,6 +5467,8 @@ type PRNLVersion=^TRNLVersion;
        // permanently stuck. With the default backoff ceiling the default of 64 attempts amounts
        // to several minutes, so this can not fire during any kind of normal operation.
        property MaximumReliableBlockPacketSendAttempts:TRNLUInt32 read fMaximumReliableBlockPacketSendAttempts write fMaximumReliableBlockPacketSendAttempts;
+       property MaximumOutgoingUnreliableMessageAge:TRNLUInt32 read fMaximumOutgoingUnreliableMessageAge write fMaximumOutgoingUnreliableMessageAge;
+       property CongestionControl:boolean read fCongestionControl write fCongestionControl;
        // How many block packets an unreliable channel may contribute to a single dispatching
        // round. The unreliable channels have no send window of their own, so without this one
        // round can turn an arbitrarily long outgoing message queue into an equally long burst of
@@ -5355,6 +5558,15 @@ type PRNLVersion=^TRNLVersion;
        // answered with no, which scales with how often the application services the host and not
        // with how much data was held back
        property TotalOutgoingBandwidthDeferredDispatches:TRNLUInt64 read fTotalOutgoingBandwidthDeferredDispatches;
+       // Retransmissions which were sent because this side did not run for longer than the timeout
+       // itself, so that the timeout would have expired no matter what the path did. They are still
+       // retransmitted, but they are not counted as loss, because there is no evidence that anything
+       // was lost. Nonzero here means the application is not servicing its host often enough, or the
+       // machine is loaded, and it explains packet loss figures which the network cannot account for
+       property TotalStalledRetransmissions:TRNLUInt64 read fTotalStalledRetransmissions;
+       // Unreliable block packets which were thrown away on the way out because they had grown older
+       // than MaximumOutgoingUnreliableMessageAge while waiting for their turn
+       property TotalDiscardedStaleOutgoingBlockPackets:TRNLUInt64 read fTotalDiscardedStaleOutgoingBlockPackets;
        // How often a handshake was broken off because the counter side held a different long
        // term public key than the one Connect was told to expect
        property TotalRejectedRemoteLongTermPublicKeys:TRNLUInt64 read fTotalRejectedRemoteLongTermPublicKeys;
@@ -18249,6 +18461,7 @@ end;
 procedure TRNLBandwidthRateLimiter.Reset(const aTime:TRNLTime);
 begin
  fUsedInPeriod:=0;
+ fNextDepartureMicroseconds:=TRNLInt64(aTime.Value)*RNL_BANDWIDTH_MICROSECONDS_PER_MILLISECOND;
  fPeriodStart:=aTime;
  // The end of the period is aTime plus the length of a period. It used to be aTime plus
  // fMaximumPerPeriod, which is an amount and not a duration, so the period lasted as many
@@ -18267,32 +18480,43 @@ begin
 end;
 
 function TRNLBandwidthRateLimiter.Admits(const aDesired:TRNLUInt32;const aTime:TRNLTime;out aNextOpportunityTime:TRNLTime):boolean;
-var Desired:TRNLUInt32;
+var Now:TRNLInt64;
 begin
+
  aNextOpportunityTime:=aTime;
+
  if fMaximumPerPeriod=0 then begin
   result:=true;
   exit;
  end;
- // Clamped to a whole period, because a limit which cannot even express a single datagram would
- // otherwise be refused forever, and a peer which goes silent is worse than a peer which sends
- // one datagram per period. The cast is safe precisely in the branch which needs it, since
- // fMaximumPerPeriod is below aDesired there and aDesired is a 32 bit value
- if aDesired>fMaximumPerPeriod then begin
-  Desired:=TRNLUInt32(fMaximumPerPeriod);
- end else begin
-  Desired:=aDesired;
+
+ Now:=TRNLInt64(aTime.Value)*RNL_BANDWIDTH_MICROSECONDS_PER_MILLISECOND;
+
+ // A schedule which has fallen behind is caught up to the present rather than being allowed to build
+ // up credit. Otherwise a connection which was idle for a minute would be entitled to a minute worth
+ // of data in one burst, which is exactly the behaviour pacing exists to remove
+ if fNextDepartureMicroseconds<Now then begin
+  fNextDepartureMicroseconds:=Now;
  end;
- result:=CanProceed(Desired,aTime);
+
+ // Anything scheduled within the millisecond which is currently running is let out now. That is not
+ // laxity but the resolution of the clock: the service loop can only be woken on a millisecond
+ // boundary, so insisting on a departure time inside a millisecond would cap every connection at one
+ // datagram per millisecond no matter how fast the path is. The schedule itself still advances by the
+ // true service time in AddAmount, so the average rate stays right and only the burst is one
+ // millisecond worth of data
+ result:=fNextDepartureMicroseconds<(Now+RNL_BANDWIDTH_MICROSECONDS_PER_MILLISECOND);
+
  if not result then begin
-  // A fixed window counter, so the whole budget is replenished in one step, and the end of the
-  // current period is therefore exactly the point in time at which this answer turns into a yes.
-  // One millisecond past it, because CanProceed compares the period end strictly
-  aNextOpportunityTime:=fPeriodEnd+1;
+  // Rounded up, so that the wait does not end a hair before the departure is actually due
+  aNextOpportunityTime:=(fNextDepartureMicroseconds+(RNL_BANDWIDTH_MICROSECONDS_PER_MILLISECOND-1)) div
+                        RNL_BANDWIDTH_MICROSECONDS_PER_MILLISECOND;
  end;
+
 end;
 
 procedure TRNLBandwidthRateLimiter.AddAmount(const aUsed:TRNLUInt32;const aTime:TRNLTime);
+var Now,BitsPerSecond:TRNLInt64;
 begin
  if fPeriodEnd<aTime then begin
   Reset(aTime);
@@ -18301,6 +18525,20 @@ begin
   fUsedInPeriod:=0;
  end else begin
   inc(fUsedInPeriod,aUsed);
+  // And the departure schedule moves on by the time this amount occupies the link. Computed from the
+  // configured amount per period rather than kept as a separate rate, so that there is exactly one
+  // place which says how fast this connection may go
+  if fPeriodLength>0 then begin
+   BitsPerSecond:=(TRNLInt64(fMaximumPerPeriod)*1000) div TRNLInt64(fPeriodLength);
+   if BitsPerSecond>0 then begin
+    Now:=TRNLInt64(aTime.Value)*RNL_BANDWIDTH_MICROSECONDS_PER_MILLISECOND;
+    if fNextDepartureMicroseconds<Now then begin
+     fNextDepartureMicroseconds:=Now;
+    end;
+    inc(fNextDepartureMicroseconds,
+        (TRNLInt64(aUsed)*RNL_BANDWIDTH_MICROSECONDS_PER_SECOND) div BitsPerSecond);
+   end;
+  end;
  end;
 end;
 
@@ -25834,6 +26072,8 @@ begin
  fBlockPacketData:=nil;
  fBlockPacketDataLength:=0;
  fReferenceCounter:=1;
+ fCancelled:=false;
+ fDiscardableAfter:=0;
  fPendingResendOutgoingBlockPacketsList:=nil;
 end;
 
@@ -26202,7 +26442,18 @@ begin
     break;
    end;
 
-   inc(fPeer.fCountPacketLoss);
+   // Counted as loss only when this side was actually watching. If the gap since the previous
+   // dispatching round is as long as the timeout itself, then the timeout would have expired no
+   // matter what the counter side did, and calling that packet loss is the same mistake as calling
+   // a datagram which the own rate limiter held back packet loss: an own delay dressed up as a
+   // property of the network. It is still retransmitted, and the timeout is still backed off, since
+   // both of those err on the safe side - only the statistics must not be told a story
+   if TRNLTime.RelativeDifference(fHost.fTime,fHost.fPreviousTime)<BlockPacket.fRoundTripTimeout then begin
+    inc(fPeer.fCountPacketLoss);
+    inc(fPeer.fCountFlightLostPackets);
+   end else begin
+    inc(fHost.fTotalStalledRetransmissions);
+   end;
 
    inc(BlockPacket.fRoundTripTimeout,BlockPacket.fRoundTripTimeout);
 
@@ -26213,6 +26464,10 @@ begin
    BlockPacket.Remove;
 
    BlockPacket.fPendingResendOutgoingBlockPacketsList:=fSentOutgoingBlockPackets;
+
+   // A reference for the queue, exactly as on the first hand over. The window slot keeps holding
+   // this packet, and the acknowledgement of the earlier attempt can arrive at any moment
+   BlockPacket.IncRef;
 
    fPeer.fOutgoingBlockPackets.EnqueueAtFront(BlockPacket);
 
@@ -26589,6 +26844,10 @@ begin
      // Insert into the global queue
      IndirectBlockPacket^:=BlockPacket;
      BlockPacket.fPendingResendOutgoingBlockPacketsList:=fSentOutgoingBlockPackets;
+     // The window slot above keeps the reference it already holds, so the queue needs one of
+     // its own. Without it the queue holds a bare pointer, and an acknowledgement arriving
+     // while the packet still waits in the queue frees it underneath
+     BlockPacket.IncRef;
      fPeer.fOutgoingBlockPackets.Enqueue(BlockPacket);
 
     finally
@@ -26629,7 +26888,15 @@ begin
     try
      fIncomingAcknowledgements[aBlockPacketSequenceNumber.fValue and fHost.fReliableChannelBlockPacketWindowMask]:=aBlockPacketSequenceNumber.fValue;
      fPeer.UpdateRoundTripTime(abs(TRNLInt16(TRNLUInt16(aBlockPacketReceivedTime.fValue-IndirectBlockPacket^.fSentTime.fValue))));
+     // Acknowledged, so these bytes demonstrably got through, which is what the delivery rate is
+     // made of. Counted here and not where the datagram was sent, because being sent is exactly
+     // what does not prove anything about the capacity of the path
+     fPeer.fDeliveryRateTracker.AddUnits(IndirectBlockPacket^.Size);
      IndirectBlockPacket^.Remove;
+     // It may still be waiting in the outgoing queue of the peer, queued for a retransmission which
+     // the rate limiter has not let out yet. Sending it now would put a duplicate of an already
+     // acknowledged packet on the wire, so it is marked and skipped on the way out
+     IndirectBlockPacket^.fCancelled:=true;
     finally
      IndirectBlockPacket^.DecRef;
      IndirectBlockPacket^:=nil;
@@ -27251,6 +27518,11 @@ begin
            Message.fDataLength);
 
      finally
+      // Unreliable, so it is worth exactly as long as it is fresh. Under pacing this packet can
+      // wait in the queue, and stale game state is worse than no game state
+      if fHost.fMaximumOutgoingUnreliableMessageAge>0 then begin
+       BlockPacket.fDiscardableAfter:=fHost.fTime+fHost.fMaximumOutgoingUnreliableMessageAge;
+      end;
       fPeer.fOutgoingBlockPackets.Enqueue(BlockPacket);
       inc(CountBlockPacketsSent);
      end;
@@ -27284,6 +27556,10 @@ begin
             MessagePartLength);
 
       finally
+       // Same reason as for the short message above
+       if fHost.fMaximumOutgoingUnreliableMessageAge>0 then begin
+        BlockPacket.fDiscardableAfter:=fHost.fTime+fHost.fMaximumOutgoingUnreliableMessageAge;
+       end;
        fPeer.fOutgoingBlockPackets.Enqueue(BlockPacket);
        inc(CountBlockPacketsSent);
       end;
@@ -27827,6 +28103,7 @@ begin
 end;
 
 constructor TRNLPeer.Create(const aHost:TRNLHost);
+var MinimumRoundTripTimeIntervalIndex:TRNLSizeInt;
 begin
  inherited Create;
 
@@ -27928,6 +28205,34 @@ begin
 
  fRoundTripTime:=TRNLUInt64(aHost.fDefaultRoundTripTime) shl 32;
 
+ for MinimumRoundTripTimeIntervalIndex:=0 to RNL_PEER_MINIMUM_ROUND_TRIP_TIME_INTERVALS-1 do begin
+  fMinimumRoundTripTimeIntervals[MinimumRoundTripTimeIntervalIndex]:=RNL_PEER_ROUND_TRIP_TIME_UNKNOWN;
+ end;
+ fMinimumRoundTripTimeIntervalIndex:=0;
+ fMinimumRoundTripTimeIntervalTime:=0;
+ fMinimumRoundTripTime:=RNL_PEER_ROUND_TRIP_TIME_UNKNOWN;
+
+ fFlightStartTime:=0;
+ fCountFlightSentPackets:=0;
+ fCountFlightLostPackets:=0;
+ fCountLastFlightSentPackets:=0;
+ fCountLastFlightLostPackets:=0;
+
+ fDeliveryRateTracker.Reset;
+
+ for MinimumRoundTripTimeIntervalIndex:=0 to RNL_PEER_MAXIMUM_DELIVERY_RATE_INTERVALS-1 do begin
+  fMaximumDeliveryRateIntervals[MinimumRoundTripTimeIntervalIndex]:=-1;
+ end;
+ fMaximumDeliveryRateIntervalIndex:=0;
+ fMaximumDeliveryRateIntervalTime:=0;
+ fMaximumDeliveryRate:=-1;
+
+ fCongestionControlRate:=0;
+
+ fPreviousQueueingDelay:=0;
+
+ fReportedCongestionControlRate:=0;
+
  fRoundTripTimeVariance:=0;
 
  fRetransmissionTimeout:=TRNLUInt64(aHost.fDefaultRoundTripTime) shl 32;
@@ -27937,6 +28242,8 @@ begin
  fPacketLossVariance:=0;
 
  fCountPacketLoss:=0;
+
+ fCountKeepAlivePingResends:=0;
 
  fCountSentPackets:=0;
 
@@ -28039,20 +28346,14 @@ begin
   end;
   FreeAndNil(fOutgoingMTUProbeBlockPackets);
 
-  // A reliable block packet sitting in this queue is borrowed, not owned: the owning reference
-  // belongs to the send window of its channel, which is why DispatchOutgoingBlockPackets moves such
-  // a packet on without releasing it and only releases the ones which carry no pending resend list.
-  // Releasing it here as well would free it before FreeAndNil(fChannels) below, and the channel
-  // destructor would then decrement a reference counter inside memory which is already gone.
-  //
-  // Unreachable for as long as this queue was emptied completely in every dispatching round, which
-  // is what happened before the outgoing bandwidth rate limiter began postponing a round instead of
-  // building datagrams and refusing them afterwards. The two belong together: without the guard, a
-  // peer which is destroyed while paced data is still queued crashes on teardown
+  // Unconditionally, because this queue holds a reference of its own for every packet in it. That
+  // was not always so: a reliable block packet used to be handed over as a bare pointer while the
+  // send window of its channel stayed the only owner, which worked for exactly as long as the queue
+  // was emptied completely in every dispatching round. Once the rate limiter began postponing
+  // rounds, a packet could sit here long enough to be acknowledged and freed underneath, and a peer
+  // destroyed with data still queued released the same counter twice
   while fOutgoingBlockPackets.Dequeue(BlockPacket) do begin
-   if not assigned(BlockPacket.fPendingResendOutgoingBlockPacketsList) then begin
-    BlockPacket.DecRef;
-   end;
+   BlockPacket.DecRef;
   end;
   FreeAndNil(fOutgoingBlockPackets);
 
@@ -28111,8 +28412,20 @@ begin
 end;
 
 procedure TRNLPeer.UpdateOutgoingBandwidthRateLimiter;
+var Rate:TRNLUInt32;
 begin
- fOutgoingBandwidthRateLimiter.Setup(fRemoteIncomingBandwidthLimit,1000);
+ // The one place which decides what this peer is actually allowed to send, so that everything which
+ // can change it goes through here. It used to set the limiter from the counter side alone, and every
+ // one of its four callers therefore threw away whatever the congestion controller had settled on
+ // until the next flight put it back
+ Rate:=fRemoteIncomingBandwidthLimit;
+ if (fCongestionControlRate>0) and
+    ((Rate=0) or (fCongestionControlRate<Rate)) then begin
+  // Zero means unlimited on both sides, so the smaller of the two is only the smaller of those which
+  // actually say something
+  Rate:=fCongestionControlRate;
+ end;
+ fOutgoingBandwidthRateLimiter.Setup(Rate,1000);
 end;
 
 function TRNLPeer.GetIncomingBandwidthRate:TRNLUInt32;
@@ -28160,9 +28473,311 @@ begin
  end;
 end;
 
+procedure TRNLPeer.UpdateMinimumRoundTripTime(const aRoundTripTime:TRNLInt64);
+var Index,Steps:TRNLSizeInt;
+    Minimum:TRNLInt64;
+begin
+
+ if fMinimumRoundTripTimeIntervalTime.Value=0 then begin
+  fMinimumRoundTripTimeIntervalTime:=fHost.fTime;
+ end;
+
+ // How many intervals have gone by since the current one was opened. Computed rather than counted,
+ // so that a peer which was silent for a while does not carry stale minima forward
+ Steps:=TRNLTime.RelativeDifference(fHost.fTime,fMinimumRoundTripTimeIntervalTime) div
+        RNL_PEER_MINIMUM_ROUND_TRIP_TIME_INTERVAL;
+
+ if Steps>0 then begin
+  if Steps>=RNL_PEER_MINIMUM_ROUND_TRIP_TIME_INTERVALS then begin
+   // The whole window has gone by, so nothing in it can still be relevant
+   for Index:=0 to RNL_PEER_MINIMUM_ROUND_TRIP_TIME_INTERVALS-1 do begin
+    fMinimumRoundTripTimeIntervals[Index]:=RNL_PEER_ROUND_TRIP_TIME_UNKNOWN;
+   end;
+   fMinimumRoundTripTimeIntervalIndex:=0;
+  end else begin
+   for Index:=1 to Steps do begin
+    fMinimumRoundTripTimeIntervalIndex:=(fMinimumRoundTripTimeIntervalIndex+1) mod RNL_PEER_MINIMUM_ROUND_TRIP_TIME_INTERVALS;
+    fMinimumRoundTripTimeIntervals[fMinimumRoundTripTimeIntervalIndex]:=RNL_PEER_ROUND_TRIP_TIME_UNKNOWN;
+   end;
+  end;
+  inc(fMinimumRoundTripTimeIntervalTime.fValue,TRNLUInt64(Steps)*TRNLUInt64(RNL_PEER_MINIMUM_ROUND_TRIP_TIME_INTERVAL));
+ end;
+
+ if (fMinimumRoundTripTimeIntervals[fMinimumRoundTripTimeIntervalIndex]=RNL_PEER_ROUND_TRIP_TIME_UNKNOWN) or
+    (aRoundTripTime<fMinimumRoundTripTimeIntervals[fMinimumRoundTripTimeIntervalIndex]) then begin
+  fMinimumRoundTripTimeIntervals[fMinimumRoundTripTimeIntervalIndex]:=aRoundTripTime;
+ end;
+
+ Minimum:=RNL_PEER_ROUND_TRIP_TIME_UNKNOWN;
+ for Index:=0 to RNL_PEER_MINIMUM_ROUND_TRIP_TIME_INTERVALS-1 do begin
+  if fMinimumRoundTripTimeIntervals[Index]<>RNL_PEER_ROUND_TRIP_TIME_UNKNOWN then begin
+   if (Minimum=RNL_PEER_ROUND_TRIP_TIME_UNKNOWN) or (fMinimumRoundTripTimeIntervals[Index]<Minimum) then begin
+    Minimum:=fMinimumRoundTripTimeIntervals[Index];
+   end;
+  end;
+ end;
+
+ fMinimumRoundTripTime:=Minimum;
+
+end;
+
+procedure TRNLPeer.RaiseBandwidthLimitsEvent;
+var HostEvent:TRNLHostEvent;
+begin
+ if assigned(fHost.fOnPeerBandwidthLimits) then begin
+  fHost.fOnPeerBandwidthLimits(fHost,self);
+ end else begin
+  HostEvent.Initialize;
+  try
+   HostEvent.Type_:=RNL_HOST_EVENT_TYPE_PEER_BANDWIDTH_LIMITS;
+   HostEvent.Peer:=self;
+   HostEvent.Peer.IncRef;
+   HostEvent.Message:=nil;
+  finally
+   fHost.fEventQueue.Enqueue(HostEvent);
+  end;
+ end;
+end;
+
+procedure TRNLPeer.UpdateCongestionControl;
+var Rate,Ceiling,DeliveryCeiling,Delay:TRNLInt64;
+    LossPercent:TRNLInt64;
+begin
+
+ if not fHost.fCongestionControl then begin
+  // Switched off, and switched off means the limiter is left exactly as the application and the
+  // counter side configured it
+  if fCongestionControlRate<>0 then begin
+   fCongestionControlRate:=0;
+   UpdateOutgoingBandwidthRateLimiter;
+  end;
+  exit;
+ end;
+
+ if fCongestionControlRate=0 then begin
+  fCongestionControlRate:=RNL_PEER_CONGESTION_CONTROL_INITIAL_RATE;
+ end;
+
+ Rate:=fCongestionControlRate;
+
+ Delay:=GetQueueingDelay;
+
+ if fCountLastFlightSentPackets>0 then begin
+  LossPercent:=(TRNLInt64(fCountLastFlightLostPackets)*100) div TRNLInt64(fCountLastFlightSentPackets);
+ end else begin
+  LossPercent:=0;
+ end;
+
+ // What the path demonstrably delivers, in bits per second, or zero while nothing has come back yet
+ if GetMaximumDeliveryRate>0 then begin
+  DeliveryCeiling:=(TRNLInt64(GetMaximumDeliveryRate)*8*RNL_PEER_CONGESTION_CONTROL_DELIVERY_HEADROOM_PERCENT) div 100;
+ end else begin
+  DeliveryCeiling:=0;
+ end;
+
+ // Delay first, because it is the earlier signal of the two: a queue which is filling up says so
+ // before it overflows. A controller which waits for loss on a path with a deep buffer has already
+ // driven the latency into the hundreds of milliseconds by the time it reacts
+ if (Delay>=(RNL_PEER_CONGESTION_CONTROL_HIGH_DELAY*RNL_PEER_CONGESTION_CONTROL_PANIC_FACTOR)) and
+    (Delay>=fPreviousQueueingDelay) and
+    (DeliveryCeiling>0) then begin
+  // Far past the threshold, which means the rate is not slightly too high but wildly so - a fresh
+  // connection guessing its initial rate on a slow path lands here immediately. Backing off by an
+  // eighth per round trip would take twenty round trips to arrive, and by then the queue has been
+  // full the whole time. So the rate is put where the path says the capacity is, in one step.
+  //
+  // Below the measured capacity and not at it, and least of all at the ceiling with its headroom: a
+  // queue which has already built up only drains while less goes in than comes out. Landing on the
+  // capacity would freeze the queue at its current length, and landing on the ceiling is what left a
+  // deep buffer standing at half a second while the rate sat a quarter above what the path could
+  // carry.
+  //
+  // Half of it, because the depth of the queue decides how long draining takes and a gentle brake is
+  // no brake at all here. At an eighth below the capacity, one and a half seconds of queue need seven
+  // seconds to clear - the connection would spend that whole time at the latency the controller
+  // exists to prevent. At half the capacity the same queue is gone in three
+  Rate:=TRNLInt64(GetMaximumDeliveryRate)*8;
+  Rate:=Rate div 2;
+ end else if Delay>=RNL_PEER_CONGESTION_CONTROL_HIGH_DELAY then begin
+  dec(Rate,Rate div 8);
+ end else if LossPercent>=RNL_PEER_CONGESTION_CONTROL_LOSS_PERCENT then begin
+  // The second, independent reason. A path can be lossy without any queue in front of it, and a
+  // purely delay based controller would never notice
+  dec(Rate,Rate div 4);
+ end else if Delay<=RNL_PEER_CONGESTION_CONTROL_LOW_DELAY then begin
+  inc(Rate,Rate div 8);
+  // Raising the rate beyond what the path delivers only lengthens the queue, so the ceiling bounds
+  // the increase. It bounds ONLY the increase, on purpose: applied unconditionally it would drag the
+  // rate down whenever the delivery rate happens to be low, which lowers the rate further, which
+  // lowers the delivery rate again. That spiral is what pinned this controller to its floor in three
+  // out of four bottlenecks on the first attempt
+  if (DeliveryCeiling>0) and (Rate>DeliveryCeiling) then begin
+   Rate:=DeliveryCeiling;
+  end;
+ end;
+
+ // The counter side said what it is willing to receive, and the application said what this side may
+ // send. Neither is the controller's business to exceed
+ Ceiling:=0;
+ if fRemoteIncomingBandwidthLimit>0 then begin
+  Ceiling:=fRemoteIncomingBandwidthLimit;
+ end;
+ if (fHost.fOutgoingBandwidthLimit>0) and
+    ((Ceiling=0) or (TRNLInt64(fHost.fOutgoingBandwidthLimit)<Ceiling)) then begin
+  Ceiling:=fHost.fOutgoingBandwidthLimit;
+ end;
+ if (Ceiling>0) and (Rate>Ceiling) then begin
+  Rate:=Ceiling;
+ end;
+
+ if Rate<RNL_PEER_CONGESTION_CONTROL_MINIMUM_RATE then begin
+  Rate:=RNL_PEER_CONGESTION_CONTROL_MINIMUM_RATE;
+ end;
+
+ if Rate>TRNLInt64(High(TRNLUInt32)) then begin
+  Rate:=TRNLInt64(High(TRNLUInt32));
+ end;
+
+ // Remembered before the rate is applied, so that the next round can tell a queue which is draining
+ // from one which is still growing. Braking again while the previous brake is still working is what
+ // cost this controller two thirds of the available rate behind a deep buffer with a competitor
+ fPreviousQueueingDelay:=Delay;
+
+ if TRNLUInt32(Rate)<>fCongestionControlRate then begin
+  fCongestionControlRate:=TRNLUInt32(Rate);
+  // Which uses Setup and not Reset, so that the departure schedule of the pacing carries on instead
+  // of starting over. Restarting it on every adjustment would let a burst out at every change of rate
+  UpdateOutgoingBandwidthRateLimiter;
+ end;
+
+ // Stufe 5: told to the application, but only when it is worth telling. The rate moves a little on
+ // every single flight, and an event per round trip would be noise which every application would end
+ // up filtering itself - so the filter lives here, once, and the threshold is named
+ if (fReportedCongestionControlRate=0) or
+    (Abs(TRNLInt64(fCongestionControlRate)-TRNLInt64(fReportedCongestionControlRate))>=
+     ((TRNLInt64(fReportedCongestionControlRate)*RNL_PEER_CONGESTION_CONTROL_REPORT_PERCENT) div 100)) then begin
+  fReportedCongestionControlRate:=fCongestionControlRate;
+  RaiseBandwidthLimitsEvent;
+ end;
+
+end;
+
+procedure TRNLPeer.UpdateFlightStatistics;
+var FlightInterval:TRNLInt64;
+begin
+
+ if fFlightStartTime.Value=0 then begin
+  fFlightStartTime:=fHost.fTime;
+  exit;
+ end;
+
+ // One flight is one smoothed round trip time, floored so that a path with no measurable delay does
+ // not close a flight on every single dispatching round
+ FlightInterval:=Max(fRetransmissionTimeout shr 32,RNL_PEER_MINIMUM_FLIGHT_INTERVAL);
+
+ if TRNLTime.RelativeDifference(fHost.fTime,fFlightStartTime)>=FlightInterval then begin
+  // A flight which carried nothing says nothing about loss, so it is not published as a flight with
+  // zero loss - that would drown a real signal in silence
+  if fCountFlightSentPackets>0 then begin
+   fCountLastFlightSentPackets:=fCountFlightSentPackets;
+   fCountLastFlightLostPackets:=fCountFlightLostPackets;
+  end;
+  fCountFlightSentPackets:=0;
+  fCountFlightLostPackets:=0;
+  fFlightStartTime:=fHost.fTime;
+  // Once per flight, which is once per round trip time: the fastest cadence at which the effect of
+  // the previous adjustment can possibly have come back
+  UpdateCongestionControl;
+ end;
+
+end;
+
+function TRNLPeer.GetMinimumRoundTripTime:TRNLUInt32;
+begin
+ if fMinimumRoundTripTime=RNL_PEER_ROUND_TRIP_TIME_UNKNOWN then begin
+  result:=0;
+ end else begin
+  result:=TRNLUInt32(fMinimumRoundTripTime);
+ end;
+end;
+
+function TRNLPeer.GetQueueingDelay:TRNLUInt32;
+var Smoothed:TRNLInt64;
+begin
+ if fMinimumRoundTripTime=RNL_PEER_ROUND_TRIP_TIME_UNKNOWN then begin
+  result:=0;
+ end else begin
+  Smoothed:=fRoundTripTime shr 32;
+  if Smoothed>fMinimumRoundTripTime then begin
+   result:=TRNLUInt32(Smoothed-fMinimumRoundTripTime);
+  end else begin
+   result:=0;
+  end;
+ end;
+end;
+
+function TRNLPeer.GetDeliveryRate:TRNLUInt32;
+begin
+ result:=fDeliveryRateTracker.UnitsPerSecond;
+end;
+
+function TRNLPeer.GetMaximumDeliveryRate:TRNLUInt32;
+begin
+ if fMaximumDeliveryRate<0 then begin
+  result:=0;
+ end else begin
+  result:=TRNLUInt32(fMaximumDeliveryRate);
+ end;
+end;
+
+procedure TRNLPeer.UpdateMaximumDeliveryRate;
+var Index,Steps:TRNLSizeInt;
+    Maximum,Current:TRNLInt64;
+begin
+
+ Current:=fDeliveryRateTracker.UnitsPerSecond;
+
+ if fMaximumDeliveryRateIntervalTime.Value=0 then begin
+  fMaximumDeliveryRateIntervalTime:=fHost.fTime;
+ end;
+
+ Steps:=TRNLTime.RelativeDifference(fHost.fTime,fMaximumDeliveryRateIntervalTime) div
+        RNL_PEER_MAXIMUM_DELIVERY_RATE_INTERVAL;
+
+ if Steps>0 then begin
+  if Steps>=RNL_PEER_MAXIMUM_DELIVERY_RATE_INTERVALS then begin
+   for Index:=0 to RNL_PEER_MAXIMUM_DELIVERY_RATE_INTERVALS-1 do begin
+    fMaximumDeliveryRateIntervals[Index]:=-1;
+   end;
+   fMaximumDeliveryRateIntervalIndex:=0;
+  end else begin
+   for Index:=1 to Steps do begin
+    fMaximumDeliveryRateIntervalIndex:=(fMaximumDeliveryRateIntervalIndex+1) mod RNL_PEER_MAXIMUM_DELIVERY_RATE_INTERVALS;
+    fMaximumDeliveryRateIntervals[fMaximumDeliveryRateIntervalIndex]:=-1;
+   end;
+  end;
+  inc(fMaximumDeliveryRateIntervalTime.fValue,TRNLUInt64(Steps)*TRNLUInt64(RNL_PEER_MAXIMUM_DELIVERY_RATE_INTERVAL));
+ end;
+
+ if Current>fMaximumDeliveryRateIntervals[fMaximumDeliveryRateIntervalIndex] then begin
+  fMaximumDeliveryRateIntervals[fMaximumDeliveryRateIntervalIndex]:=Current;
+ end;
+
+ Maximum:=-1;
+ for Index:=0 to RNL_PEER_MAXIMUM_DELIVERY_RATE_INTERVALS-1 do begin
+  if fMaximumDeliveryRateIntervals[Index]>Maximum then begin
+   Maximum:=fMaximumDeliveryRateIntervals[Index];
+  end;
+ end;
+
+ fMaximumDeliveryRate:=Maximum;
+
+end;
+
 procedure TRNLPeer.UpdateRoundTripTime(const aRoundTripTime:TRNLInt64);
 var ValueError:TRNLInt64;
 begin
+ UpdateMinimumRoundTripTime(aRoundTripTime);
  if fRoundTripTimeFirst then begin
   fRoundTripTimeFirst:=false;
   fRoundTripTime:=aRoundTripTime shl 32;
@@ -28482,19 +29097,7 @@ begin
 
       UpdateOutgoingBandwidthRateLimiter;
 
-      if assigned(fHost.fOnPeerBandwidthLimits) then begin
-       fHost.fOnPeerBandwidthLimits(fHost,self);
-      end else begin
-       HostEvent.Initialize;
-       try
-        HostEvent.Type_:=RNL_HOST_EVENT_TYPE_PEER_BANDWIDTH_LIMITS;
-        HostEvent.Peer:=self;
-        HostEvent.Peer.IncRef;
-        HostEvent.Message:=nil;
-       finally
-        fHost.fEventQueue.Enqueue(HostEvent);
-       end;
-      end;
+      RaiseBandwidthLimitsEvent;
 
      end;
 
@@ -28870,6 +29473,23 @@ begin
  // loop, so that a block packet can never block this queue indefinitely
  while fOutgoingBlockPackets.Peek(OutgoingBlockPacket) do begin
 
+  // Acknowledged while it was waiting here, so there is nothing left to send, or grown too old to
+  // be worth sending. Either way it is taken off the queue and released without touching the
+  // packet buffer at all. The age bound is what keeps this library from turning into the buffer
+  // whose latency it is trying to avoid
+  if OutgoingBlockPacket.fCancelled or
+     ((OutgoingBlockPacket.fDiscardableAfter.Value<>0) and
+      (fHost.fTime>=OutgoingBlockPacket.fDiscardableAfter)) then begin
+   if not fOutgoingBlockPackets.Dequeue then begin
+    break;
+   end;
+   if not OutgoingBlockPacket.fCancelled then begin
+    inc(fHost.fTotalDiscardedStaleOutgoingBlockPackets);
+   end;
+   OutgoingBlockPacket.DecRef;
+   continue;
+  end;
+
   IsOversized:=false;
 
   if not aOutgoingPacketBuffer.HasSpaceFor(OutgoingBlockPacket.Size) then begin
@@ -28923,6 +29543,13 @@ begin
 
     inc(OutgoingBlockPacket.fCountSendAttempts);
 
+    // Only the first attempt, because a flight is what was put on the wire once. Counting the
+    // retransmissions in here as well would make the denominator grow along with the numerator and
+    // the loss ratio would flatten out just when it matters
+    if OutgoingBlockPacket.fCountSendAttempts=1 then begin
+     inc(fCountFlightSentPackets);
+    end;
+
     if OutgoingBlockPacket.fRoundTripTimeout=0 then begin
      // fRoundTripTimeout is the initial retransmission timeout, derived from the smoothed
      // round trip time (fRetransmissionTimeout is a 32.32 bit fixed point value, so shr 32
@@ -28931,8 +29558,29 @@ begin
      // into the ...TimeoutLimit range and the latter into the ...Timeout range, and not the
      // other way around, because otherwise the ceiling would always end up far below the
      // initial value, which would both delay the very first retransmission by seconds and
-     // defeat the backoff entirely, since every doubling would immediately be clamped back
-     OutgoingBlockPacket.fRoundTripTimeout:=Min(Max(fRetransmissionTimeout shr 32,fHost.fMinimumRetransmissionTimeoutLimit),fHost.fMaximumRetransmissionTimeoutLimit);
+     // defeat the backoff entirely, since every doubling would immediately be clamped back.
+     //
+     // The ceiling of the initial timeout must not cut below what the path actually measures. With a
+     // smoothed round trip time of 400 ms against a ceiling of 320 ms, every first transmission runs
+     // into its timeout and goes out a second time on a path which lost nothing whatsoever - which
+     // halves the useful throughput and hands a controller a loss signal made of nothing. Bounding
+     // how long the first retransmission waits only makes sense above the round trip time, so the
+     // ceiling is raised to the measurement wherever the measurement is the larger of the two.
+     //
+     // And the measurement it is raised to is the BASELINE, the windowed minimum, not the smoothed
+     // round trip time. The ceiling follows the PATH, and the baseline is what says how slow the path
+     // is; the smoothed value carries whatever queue happens to stand in front of it as well.
+     //
+     // That is a decision and not an oversight, and it was measured both ways. Letting the ceiling
+     // follow the smoothed value removes the spurious retransmissions of a connection whose queue is
+     // full - worth about a factor of two in useful throughput there - but it also stretches the first
+     // retransmission on a lossy path, where a recovery of 242 ms became 1503 ms. A queue is transient
+     // and belongs to the congestion controller to remove; a slow path is permanent and is the only
+     // thing an initial timeout has to accommodate. So the timeout accommodates the path, and the
+     // controller of Stufe 4 of ratelimitplan.md deals with the queue - which it demonstrably does,
+     // at 70 percent of the capacity of a link whose buffer is a second and a half deep
+     OutgoingBlockPacket.fRoundTripTimeout:=Min(Max(fRetransmissionTimeout shr 32,fHost.fMinimumRetransmissionTimeoutLimit),
+                                                Max(GetMinimumRoundTripTime,fHost.fMaximumRetransmissionTimeoutLimit));
      OutgoingBlockPacket.fRoundTripTimeoutLimit:=Min(Max(fRetransmissionTimeout shr 30,fHost.fMinimumRetransmissionTimeout),fHost.fMaximumRetransmissionTimeout);
     end;
 
@@ -28942,6 +29590,11 @@ begin
     end;
 
     OutgoingBlockPacket.fPendingResendOutgoingBlockPacketsList.Add(OutgoingBlockPacket);
+
+    // The reference which the queue held. What is left is the one of the window slot of the
+    // channel, which is the owner of a reliable block packet from the moment it is created until
+    // it is acknowledged. The resend list is a borrow just like the queue was
+    OutgoingBlockPacket.DecRef;
 
     result:=false;
 
@@ -29140,7 +29793,11 @@ begin
 
    KeepAliveWindowItem^.State:=RNL_PEER_KEEP_ALIVE_WINDOW_ITEM_STATE_SENT;
    KeepAliveWindowItem^.SequenceNumber:=fOutgoingPingSequenceNumber;
-   KeepAliveWindowItem^.Time:=fHost.fTime;
+   // Zero, not the current time: the ping has only been queued, it has not gone anywhere yet. The
+   // clock is started where the ping actually reaches a datagram, and until then the resend timer
+   // below leaves it alone. Starting the clock here is what made a rate limited connection repeat a
+   // ping every hundred milliseconds while the first one was still waiting in the queue
+   KeepAliveWindowItem^.Time:=0;
    KeepAliveWindowItem^.ResendTimeout:=fHost.fPingResendTimeout;
 
 {$if defined(RNL_DEBUG) and defined(RNL_DEBUG_PING)}
@@ -29170,9 +29827,15 @@ begin
 
   if KeepAliveWindowItem^.State=RNL_PEER_KEEP_ALIVE_WINDOW_ITEM_STATE_SENT then begin
 
-   if fHost.fTime>=(KeepAliveWindowItem^.Time+KeepAliveWindowItem^.ResendTimeout) then begin
+   // A clock of zero means the ping is still queued and has not been on the wire even once, so
+   // there is nothing whose answer could be overdue. Repeating it would only put a second copy
+   // behind the first one in the very same queue
+   if (KeepAliveWindowItem^.Time.Value<>0) and
+      (fHost.fTime>=(KeepAliveWindowItem^.Time+KeepAliveWindowItem^.ResendTimeout)) then begin
 
     inc(fCountPacketLoss);
+
+    inc(fCountKeepAlivePingResends);
 
     OutgoingBlockPacket:=TRNLPeerBlockPacket.Create(self);
     try
@@ -29183,7 +29846,8 @@ begin
      fOutgoingBlockPackets.EnqueueAtFront(OutgoingBlockPacket);
     end;
 
-    KeepAliveWindowItem^.Time:=fHost.fTime;
+    // Queued again, so the clock is stopped again until this copy actually goes out
+    KeepAliveWindowItem^.Time:=0;
 
     KeepAliveWindowItem^.ResendTimeout:=TRNLTime.Minimum(KeepAliveWindowItem^.ResendTimeout+KeepAliveWindowItem^.ResendTimeout,
                                                          fHost.fPingInterval);
@@ -29797,6 +30461,13 @@ begin
  fOutgoingBandwidthRateTracker.SetTime(fHost.fTime);
  fOutgoingBandwidthRateTracker.Update;
 
+ fDeliveryRateTracker.SetTime(fHost.fTime);
+ fDeliveryRateTracker.Update;
+
+ UpdateMaximumDeliveryRate;
+
+ UpdateFlightStatistics;
+
  DispatchNewHostBandwidthLimits;
 
  DispatchMTUProbe;
@@ -29961,6 +30632,8 @@ begin
 
  fTime:=0;
 
+ fPreviousTime:=0;
+
  fNextPeerEventTime.fValue:=TRNLUInt64(High(TRNLUInt64));
 
  fEventQueue:=TRNLHostEventQueue.Create;
@@ -30060,6 +30733,10 @@ begin
 
  fMaximumReliableBlockPacketSendAttempts:=64;
 
+ fMaximumOutgoingUnreliableMessageAge:=0;
+
+ fCongestionControl:=false;
+
  // Off by default, so that an existing application which knows nothing about this behaves exactly
  // as it did before: same bytes on the wire, same protocol version 1.0.0, no fallback delay and no
  // new way for a connection to be refused. Whoever wants the protection turns it on deliberately,
@@ -30154,6 +30831,10 @@ begin
  fTotalPeersGivenUpOn:=0;
 
  fTotalOutgoingBandwidthDeferredDispatches:=0;
+
+ fTotalStalledRetransmissions:=0;
+
+ fTotalDiscardedStaleOutgoingBlockPackets:=0;
 
  fTotalRejectedRemoteLongTermPublicKeys:=0;
 
@@ -30776,6 +31457,8 @@ begin
  end;
 
  fTime:=fInstance.Time;
+
+ fPreviousTime:=fTime;
 
  fIncomingBandwidthRateTracker.Reset;
 
@@ -33616,6 +34299,10 @@ begin
     result:=RNL_HOST_SERVICE_STATUS_TIMEOUT;
     exit;
    end;
+
+   // Remembered before it is overwritten, so that everything downstream can tell how long this side
+   // was away. A timeout which expired while nothing here was running says nothing about the path
+   fPreviousTime:=fTime;
 
    fTime:=fInstance.Time;
 

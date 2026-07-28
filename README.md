@@ -165,6 +165,16 @@ are the typical case for egoshooters, racing games, and so forth. Or in other wo
          type parameter, so that it compiles on FreePascal and Delphi alike
    - Cryptography self test callable at run time, so that a build can prove its own primitives against
      the published test vectors instead of assuming them
+   - Adaptive congestion control, off by default. Regulates on queueing delay as the primary signal
+     with loss as an independent second one, takes the capacity of the path from a windowed maximum
+     of the rate the counter side actually acknowledges, and enforces the result by spreading it out
+     in time rather than by throwing datagrams away. Measured against a simulated bottleneck in four
+     shapes - deep and shallow buffer, each with and without a competing flow - it keeps the standing
+     queue between 8 and 65 ms where the buffer allows up to 1500 ms, without losing a connection.
+     The measurements behind it are readable on their own as well: baseline round trip time, queueing
+     delay above it, delivery rate, and loss per flight
+   - Delayed rather than dropped enforcement of an outgoing bandwidth limit, and an optional age
+     bound after which unreliable data is discarded on the way out instead of delivered stale
    - And a lot of more stuff  . . .
 
 # Planned features (a.k.a Todo) in random order of priorities
@@ -173,8 +183,9 @@ are the typical case for egoshooters, racing games, and so forth. Or in other wo
      blocks UDP; TLS additionally covers one which only lets TLS out. It needs a TLS stack, which RNL
      does not have and which is a good deal larger than everything around it, so the sensible shape is
      an external library behind a callback interface rather than own code
-   - Adaptive congestion control. The measurements are already taken, they are simply not acted upon
-     yet, and a relayed path is where it would matter most
+   - Fair sharing of the uplink of a host between several peers. The congestion controller regulates
+     each peer against the path it sees; the host wide limiter brakes all of them together and
+     whoever asks first sends first. A weighted division is a separate piece of work
    - TODO
 
 # General guidelines for code contributors 
