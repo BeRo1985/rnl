@@ -3523,16 +3523,6 @@ type PRNLVersion=^TRNLVersion;
        class function Deserialize(const aBytes:TBytes;out aCandidates:TRNLCandidates):boolean; static;
      end;
 
-     // How the NAT in front of this host chooses the external address it presents a socket under.
-     // RFC 4787 calls this the mapping behaviour, and it is the half that decides whether a server
-     // reflexive candidate is worth anything: only a NAT which keeps one mapping per socket, no
-     // matter who the socket writes to, presents a peer the same address a STUN server saw.
-     //
-     // The other half, the filtering behaviour, decides whether the counter side has to punch
-     // first. It cannot be told from binding requests alone, because it takes a party willing to
-     // answer from an address this host never wrote to, so it is deliberately not guessed at here.
-     //
-     // The order is the order of decreasing usefulness for punching, so comparisons mean something.
      // The twelve bytes which identify one STUN transaction, and the mask its obfuscated addresses are
      // built with. Declared here rather than next to TRNLSTUNMessage because everything from a
      // pending query on a host to the message itself needs them.
@@ -3544,6 +3534,16 @@ type PRNLVersion=^TRNLVersion;
      PRNLSTUNXORMask=^TRNLSTUNXORMask;
      TRNLSTUNXORMask=array[0..15] of TRNLUInt8;
 
+     // How the NAT in front of this host chooses the external address it presents a socket under.
+     // RFC 4787 calls this the mapping behaviour, and it is the half that decides whether a server
+     // reflexive candidate is worth anything: only a NAT which keeps one mapping per socket, no
+     // matter who the socket writes to, presents a peer the same address a STUN server saw.
+     //
+     // The other half, the filtering behaviour, decides whether the counter side has to punch
+     // first. It cannot be told from binding requests alone, because it takes a party willing to
+     // answer from an address this host never wrote to, so it is deliberately not guessed at here.
+     //
+     // The order is the order of decreasing usefulness for punching, so comparisons mean something.
      PRNLNATMappingBehaviour=^TRNLNATMappingBehaviour;
      TRNLNATMappingBehaviour=
       (
@@ -5516,10 +5516,6 @@ type PRNLVersion=^TRNLVersion;
        // How long an initiator in ALLOWED offers the newer protocol version before it falls back to
        // the older one. Unused in the other two modes.
        property PendingConnectionProtocolFallbackTimeout:TRNLUInt64 read fPendingConnectionProtocolFallbackTimeout write fPendingConnectionProtocolFallbackTimeout;
-       // Careful with the meaning of these two: the budget refills by one request per period,
-       // not by a whole burst per period. With the defaults of 20 and 1000 ms an address may
-       // therefore send 20 requests back to back and one per second after that, which is not
-       // the same thing as twenty per second.
        // An attempt fanned out over candidates sends a full handshake packet, which is padded to
        // 508 bytes against amplification, to every one of them in every repetition round. The
        // candidate list comes from the counter side, so its length is not this host's to choose,
@@ -5545,6 +5541,10 @@ type PRNLVersion=^TRNLVersion;
        property TotalSTUNQueries:TRNLUInt64 read fTotalSTUNQueries;
        property TotalAnsweredSTUNQueries:TRNLUInt64 read fTotalAnsweredSTUNQueries;
        property TotalTimedOutSTUNQueries:TRNLUInt64 read fTotalTimedOutSTUNQueries;
+       // Careful with the meaning of these two: the budget refills by one request per period,
+       // not by a whole burst per period. With the defaults of 20 and 1000 ms an address may
+       // therefore send 20 requests back to back and one per second after that, which is not
+       // the same thing as twenty per second.
        property RateLimiterHostAddressBurst:TRNLInt64 read fRateLimiterHostAddressBurst write fRateLimiterHostAddressBurst;
        property RateLimiterHostAddressPeriod:TRNLUInt64 read fRateLimiterHostAddressPeriod write fRateLimiterHostAddressPeriod;
        // Incoming connection attempts per second, averaged over the attempt history, and the
@@ -5557,13 +5557,13 @@ type PRNLVersion=^TRNLVersion;
 {$else}
        property Peers:TRNLPeerListNode read fPeerList;
 {$ifend}
+       // Every address this host might be reachable at, highest priority first. Empty until
+       // GatherCandidates has run.
+       property LocalCandidates:TRNLCandidates read GetLocalCandidates;
        // How many sockets this host actually brought up. There used to be exactly one slot per
        // address family; now it depends on the work mode and, later, on how many local interfaces
        // are being offered. Read only, and mostly here so that the socket model is observable at
        // all from the outside.
-       // Every address this host might be reachable at, highest priority first. Empty until
-       // GatherCandidates has run.
-       property LocalCandidates:TRNLCandidates read GetLocalCandidates;
        property CountSockets:TRNLSizeInt read GetCountSockets;
        property CountPeers:TRNLUInt32 read fCountPeers;
        property TotalReceivedData:TRNLUInt64 read fTotalReceivedData;
@@ -6102,12 +6102,12 @@ type PRNLVersion=^TRNLVersion;
        // Whether to bind channels at all. Off, every datagram carries a 36 byte Send indication;
        // on, the first few do and everything after them a 4 byte header.
        property UseChannels:boolean read fUseChannels write fUseChannels;
-       // Ask for MESSAGE-INTEGRITY-SHA256 where the server offers a choice. Off by default, because
-       // the older method is what every deployed relay understands.
        // How the relay itself is talked to. Has to be set before the host binds, since that is when
        // the allocation is made. UDP by default, because that is what a relay is normally reached
        // over; TCP for the network which lets no UDP out at all.
        property Transport:TRNLTURNTransportKind read fTransport write fTransport;
+       // Ask for MESSAGE-INTEGRITY-SHA256 where the server offers a choice. Off by default, because
+       // the older method is what every deployed relay understands.
        property PreferSHA256:boolean read fPreferSHA256 write fPreferSHA256;
        // Which family the allocation is asked for. See TRNLTURNAddressFamilyPolicy for why the
        // default keeps quiet about IPv4.
