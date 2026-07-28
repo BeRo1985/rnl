@@ -5630,7 +5630,11 @@ var Watchdog:TRNLTestWatchdog;
                      const aClientClockMinutes:TRNLUInt32;
                      const aRequireCertificate:boolean;
                      const aExpectConnected:boolean;
-                     const aExpectedVerdict:TRNLCertificateVerdict);
+                     const aExpectedVerdict:TRNLCertificateVerdict;
+                     // How often the refusal is expected to happen. One for a verdict which is final,
+                     // because then the attempt is over; more than one where the attempt stays alive and
+                     // keeps being refused, which is only the case for a window that has not opened yet.
+                     const aExpectedRejections:TRNLInt64=1);
  var Connected:boolean;
      Verdict:TRNLCertificateVerdict;
      Accepted,Rejected:TRNLUInt64;
@@ -5647,6 +5651,18 @@ var Watchdog:TRNLTestWatchdog;
   Check(Verdict=aExpectedVerdict,
         aWhat+': and the verdict has to be '+TRNLRawByteString(IntToStr(TRNLInt32(aExpectedVerdict)))+
         ' rather than '+TRNLRawByteString(IntToStr(TRNLInt32(Verdict))));
+  if aExpectConnected then begin
+   CheckEqualsInt64(Rejected,0,aWhat+': and nothing may have been refused along the way');
+  end else if aExpectedRejections=1 then begin
+   // The point of giving up on a final verdict: refused once and done, rather than refused again every
+   // hundred milliseconds until the pending connection timeout expires
+   CheckEqualsInt64(Rejected,1,
+                    aWhat+': and a final verdict has to end the attempt after one refusal rather '+
+                    'than being arrived at again until the timeout');
+  end else begin
+   CheckAtLeastInt64(Rejected,aExpectedRejections,
+                     aWhat+': and a verdict which may still change has to leave the attempt alive');
+  end;
  end;
 
 begin
@@ -5691,7 +5707,7 @@ begin
 
   CheckCase('a certificate whose window has not started',
             true,NOW_MINUTES+500,NOW_MINUTES+1000,false,nil,@ServerSubject,NOW_MINUTES,false,
-            false,RNL_CERTIFICATE_VERDICT_NOT_YET_VALID);
+            false,RNL_CERTIFICATE_VERDICT_NOT_YET_VALID,2);
 
   // The same certificate, inside its window
   CheckCase('a certificate inside its window',
@@ -7577,11 +7593,11 @@ begin
       HostPair.ClientPeer.Channels[RNL_TEST_HOST_PAIR_CHANNEL_RELIABLE_ORDERED].SendMessageRawByteString(TestMessageText(Index,MESSAGE_SIZE));
      end;
 
-     // Measured at the socket, on purpose, and not in delivered messages. A limit this low
-     // makes the limiter drop the bulk of the datagrams, and on an ordered reliable channel the
-     // next message can only be handed to the application once the earliest missing fragment has
-     // been retransmitted. Delivered messages therefore say very little about whether the sender
-     // is still sending at all, which is the only thing this test is about.
+     // Measured at the socket, on purpose, and not in delivered messages. A limit this low holds
+     // the bulk of the datagrams back, and on an ordered reliable channel the next message can
+     // only be handed to the application once the earliest missing one has arrived. Delivered
+     // messages therefore say very little about whether the sender is still sending at all, which
+     // is the only thing this test is about.
      if not Check(HostPair.Pump(FIRST_STRETCH_MILLISECONDS),
                   'no host service error while the first budget is being spent') then begin
       exit;
@@ -7611,6 +7627,95 @@ begin
      CheckAtLeastInt64(TRNLInt64(BytesAtEnd-BytesAfterFirstStretch),MINIMUM_BYTES_AFTER_FIRST_STRETCH,
                        'and sending has to carry on across period boundaries instead of stopping '+
                        'once the first budget is spent');
+
+    finally
+     FreeAndNil(HostPair);
+    end;
+   finally
+    FreeAndNil(Network);
+   end;
+  finally
+   FreeAndNil(Instance);
+  end;
+
+ finally
+  FreeAndNil(Watchdog);
+  TestEnd;
+ end;
+
+end;
+
+procedure TestTightBandwidthLimitDelaysInsteadOfCountingLoss;
+const OUTGOING_BANDWIDTH_LIMIT_BITS=200000;      // 25000 bytes per second
+      MESSAGE_SIZE=800;
+      COUNT_MESSAGES=60;                         // about two seconds worth of that budget
+      TIMEOUT_MILLISECONDS=20000;
+var Instance:TRNLInstance;
+    Network:TRNLVirtualNetwork;
+    HostPair:TRNLTestHostPair;
+    Index:TRNLSizeInt;
+    Elapsed:TRNLInt64;
+    Arrived:boolean;
+    Watchdog:TRNLTestWatchdog;
+begin
+
+ TestBegin('a tight bandwidth limit delays traffic instead of counting it as loss');
+ Watchdog:=TRNLTestWatchdog.Create('tight bandwidth limit',120000);
+ try
+
+  Instance:=TRNLInstance.Create;
+  try
+   Network:=TRNLVirtualNetwork.Create(Instance);
+   try
+    HostPair:=TRNLTestHostPair.Create(Instance,Network,18286,18287);
+    try
+
+     if not Check(HostPair.Connect,'the host pair has to connect') then begin
+      exit;
+     end;
+
+     // After the handshake, so that only the payload transfer below is subject to the limit
+     HostPair.Client.OutgoingBandwidthLimit:=OUTGOING_BANDWIDTH_LIMIT_BITS;
+
+     for Index:=1 to COUNT_MESSAGES do begin
+      HostPair.ClientPeer.Channels[RNL_TEST_HOST_PAIR_CHANNEL_RELIABLE_ORDERED].SendMessageRawByteString(TestMessageText(Index,MESSAGE_SIZE));
+     end;
+
+     Arrived:=HostPair.PumpUntilServerReceived(COUNT_MESSAGES,TIMEOUT_MILLISECONDS,Elapsed);
+
+     Info('limit '+TRNLRawByteString(IntToStr(OUTGOING_BANDWIDTH_LIMIT_BITS))+' bit/s, '+
+          TRNLRawByteString(IntToStr(HostPair.ServerReceivedMessages.Count))+' of '+
+          TRNLRawByteString(IntToStr(COUNT_MESSAGES))+' messages arrived after '+
+          TRNLRawByteString(IntToStr(Elapsed))+' ms');
+     Info('dispatches postponed by the limiter: '+
+          TRNLRawByteString(IntToStr(HostPair.Client.TotalOutgoingBandwidthDeferredDispatches))+
+          ', retransmissions counted: '+
+          TRNLRawByteString(IntToStr(HostPair.ClientPeer.CountPacketLoss))+
+          ', peers given up on: '+
+          TRNLRawByteString(IntToStr(HostPair.Client.TotalPeersGivenUpOn)));
+
+     if not Check(Arrived,'every message has to arrive, since a limit is a reason to send later '+
+                          'and never a reason to lose reliable data') then begin
+      exit;
+     end;
+
+     // The point of the test. Without it the measurement below would pass for the trivial reason
+     // that the limiter never had to hold anything back at all
+     CheckAtLeastInt64(HostPair.Client.TotalOutgoingBandwidthDeferredDispatches,1,
+                       'the limiter has to have held something back, otherwise this test measures '+
+                       'an unlimited connection');
+
+     // The defect: the datagram used to be built first and refused afterwards. Building it stamps
+     // the send time and counts a send attempt, so the refusal turned into a retransmission, into a
+     // doubled retransmission timeout and into a packet loss count - for a path which was never
+     // asked. The virtual network here loses nothing, so anything above zero is invented
+     CheckEqualsInt64(HostPair.ClientPeer.CountPacketLoss,0,
+                      'and nothing may be counted as a retransmission on a network which lost '+
+                     'nothing');
+
+     CheckEqualsInt64(HostPair.Client.TotalPeersGivenUpOn,0,
+                      'and no peer may be given up on, since a send attempt which never left the '+
+                     'host must not consume one of the attempts either');
 
     finally
      FreeAndNil(HostPair);
@@ -7936,6 +8041,7 @@ begin
  // Bandwidth limits
  TestBandwidthLimitsReachCounterSide;
  TestBandwidthLimitedHostKeepsSendingAfterTheFirstPeriod;
+ TestTightBandwidthLimitDelaysInsteadOfCountingLoss;
 
  // MTU probing
  TestMTUProbingTerminatesAndReportsAMTU;

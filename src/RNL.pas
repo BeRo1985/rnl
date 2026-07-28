@@ -1080,6 +1080,7 @@ type PRNLVersion=^TRNLVersion;
        // negative. Right for "how far apart are these two", wrong for "how much is left".
        class function Difference(const a,b:TRNLTime):TRNLInt64; static;
        class function Minimum(const a,b:TRNLTime):TRNLTime; static;
+       class function Maximum(const a,b:TRNLTime):TRNLTime; static;
        class operator Inc(const a:TRNLTime):TRNLTime; inline;
        class operator Dec(const a:TRNLTime):TRNLTime; inline;
        class operator LogicalNot(const a:TRNLTime):TRNLTime; inline;
@@ -2168,6 +2169,7 @@ type PRNLVersion=^TRNLVersion;
        procedure Setup(const aMaximumPerPeriod,aPeriodLength:TRNLUInt64);
        procedure Reset(const aTime:TRNLTime);
        function CanProceed(const aDesired:TRNLUInt32;const aTime:TRNLTime):boolean;
+       function Admits(const aDesired:TRNLUInt32;const aTime:TRNLTime;out aNextOpportunityTime:TRNLTime):boolean;
        procedure AddAmount(const aUsed:TRNLUInt32;const aTime:TRNLTime);
        property MaximumPerPeriod:TRNLUInt64 read fMaximumPerPeriod;
        property UsedInPeriod:TRNLUInt64 read fUsedInPeriod;
@@ -4566,14 +4568,25 @@ type PRNLVersion=^TRNLVersion;
 
        procedure UpdateRoundTripTime(const aRoundTripTime:TRNLInt64);
 
-       function SendPacketToAddress(const aAddress:TRNLAddress;const aData;const aDataLength:TRNLSizeUInt):TRNLNetworkSendResult;
+       // Whether a datagram may be built for this peer at all right now, asked before anything is
+       // built, and if not, when the answer would turn into a yes
+       function MayBuildOutgoingDatagram(out aNextOpportunityTime:TRNLTime):boolean;
+
+       // aRateLimiterAlreadyPassed says that the rate decision for this datagram has already been
+       // taken by MayBuildOutgoingDatagram, so that it is not taken a second time here. Taking it
+       // twice is not merely redundant, it is wrong: the second question is asked with the true
+       // size of the datagram while the first one could only be asked with an upper bound, so the
+       // two can disagree, and a no at this point would discard a datagram which has already been
+       // stamped as sent and counted as an attempt
+       function SendPacketToAddress(const aAddress:TRNLAddress;const aData;const aDataLength:TRNLSizeUInt;const aRateLimiterAlreadyPassed:boolean=false):TRNLNetworkSendResult;
        // Over one named socket rather than over this peer's own. Only the candidate fan out needs
        // it: that is where the socket is part of what is being tried rather than already decided.
        function SendPacketToAddressOnSocket(const aSocketIndex:TRNLSizeInt;
                                             const aAddress:TRNLAddress;
                                             const aData;
-                                            const aDataLength:TRNLSizeUInt):TRNLNetworkSendResult;
-       function SendPacket(const aData;const aDataLength:TRNLSizeUInt):TRNLNetworkSendResult;
+                                            const aDataLength:TRNLSizeUInt;
+                                            const aRateLimiterAlreadyPassed:boolean=false):TRNLNetworkSendResult;
+       function SendPacket(const aData;const aDataLength:TRNLSizeUInt;const aRateLimiterAlreadyPassed:boolean=false):TRNLNetworkSendResult;
 
        procedure UpdatePacketLossStatistics;
 
@@ -4648,6 +4661,12 @@ type PRNLVersion=^TRNLVersion;
        property RemoteOutgoingBandwidthLimit:TRNLUInt32 read fRemoteOutgoingBandwidthLimit;
        property IncomingBandwidthRate:TRNLUInt32 read GetIncomingBandwidthRate;
        property OutgoingBandwidthRate:TRNLUInt32 read GetOutgoingBandwidthRate;
+       // How many reliable block packets of this peer had to be retransmitted during the packet loss
+       // measurement interval which is currently running, so it is reset every
+       // RNL_PEER_PACKET_LOSS_INTERVAL milliseconds and not a lifetime total. Zero means that
+       // everything which was put on the wire was acknowledged in time, which is worth being able to
+       // tell apart from a connection which merely looks slow because it is being paced
+       property CountPacketLoss:TRNLUInt32 read fCountPacketLoss;
      end;
 
      PRNLHostAddressFamilyWorkMode=^TRNLHostAddressFamilyWorkMode;
@@ -4919,6 +4938,8 @@ type PRNLVersion=^TRNLVersion;
 
        fTotalPeersGivenUpOn:TRNLUInt64;
 
+       fTotalOutgoingBandwidthDeferredDispatches:TRNLUInt64;
+
        fTotalRejectedRemoteLongTermPublicKeys:TRNLUInt64;
 
        fTotalRateLimitedConnectionRequests:TRNLUInt64;
@@ -5013,7 +5034,8 @@ type PRNLVersion=^TRNLVersion;
        function SendPacketOnSocket(const aSocketIndex:TRNLSizeInt;
                                    const aAddress:TRNLAddress;
                                    const aData;
-                                   const aDataLength:TRNLSizeUInt):TRNLNetworkSendResult;
+                                   const aDataLength:TRNLSizeUInt;
+                                   const aRateLimiterAlreadyPassed:boolean=false):TRNLNetworkSendResult;
 
        procedure ResetConnectionAttemptHistory;
 
@@ -5324,6 +5346,11 @@ type PRNLVersion=^TRNLVersion;
        // Number of peers which were given up on because a reliable block packet of theirs
        // exceeded MaximumReliableBlockPacketSendAttempts
        property TotalPeersGivenUpOn:TRNLUInt64 read fTotalPeersGivenUpOn;
+       // How often the dispatching of outgoing packets of a peer was postponed because one of the
+       // two outgoing bandwidth rate limiters, the one of the peer or the one of the host, had no
+       // budget left for a datagram right now. Postponed, not dropped: nothing is built, so nothing
+       // is counted as a send attempt and nothing is counted as packet loss either
+       property TotalOutgoingBandwidthDeferredDispatches:TRNLUInt64 read fTotalOutgoingBandwidthDeferredDispatches;
        // How often a handshake was broken off because the counter side held a different long
        // term public key than the one Connect was told to expect
        property TotalRejectedRemoteLongTermPublicKeys:TRNLUInt64 read fTotalRejectedRemoteLongTermPublicKeys;
@@ -8063,6 +8090,15 @@ end;
 class function TRNLTime.Minimum(const a,b:TRNLTime):TRNLTime;
 begin
  if a.fValue<b.fValue then begin
+  result.fValue:=a.fValue;
+ end else begin
+  result.fValue:=b.fValue;
+ end;
+end;
+
+class function TRNLTime.Maximum(const a,b:TRNLTime):TRNLTime;
+begin
+ if a.fValue>b.fValue then begin
   result.fValue:=a.fValue;
  end else begin
   result.fValue:=b.fValue;
@@ -18226,6 +18262,32 @@ begin
          ((fUsedInPeriod+aDesired)<=fMaximumPerPeriod);
 end;
 
+function TRNLBandwidthRateLimiter.Admits(const aDesired:TRNLUInt32;const aTime:TRNLTime;out aNextOpportunityTime:TRNLTime):boolean;
+var Desired:TRNLUInt32;
+begin
+ aNextOpportunityTime:=aTime;
+ if fMaximumPerPeriod=0 then begin
+  result:=true;
+  exit;
+ end;
+ // Clamped to a whole period, because a limit which cannot even express a single datagram would
+ // otherwise be refused forever, and a peer which goes silent is worse than a peer which sends
+ // one datagram per period. The cast is safe precisely in the branch which needs it, since
+ // fMaximumPerPeriod is below aDesired there and aDesired is a 32 bit value
+ if aDesired>fMaximumPerPeriod then begin
+  Desired:=TRNLUInt32(fMaximumPerPeriod);
+ end else begin
+  Desired:=aDesired;
+ end;
+ result:=CanProceed(Desired,aTime);
+ if not result then begin
+  // A fixed window counter, so the whole budget is replenished in one step, and the end of the
+  // current period is therefore exactly the point in time at which this answer turns into a yes.
+  // One millisecond past it, because CanProceed compares the period end strictly
+  aNextOpportunityTime:=fPeriodEnd+1;
+ end;
+end;
+
 procedure TRNLBandwidthRateLimiter.AddAmount(const aUsed:TRNLUInt32;const aTime:TRNLTime);
 begin
  if fPeriodEnd<aTime then begin
@@ -27973,8 +28035,20 @@ begin
   end;
   FreeAndNil(fOutgoingMTUProbeBlockPackets);
 
+  // A reliable block packet sitting in this queue is borrowed, not owned: the owning reference
+  // belongs to the send window of its channel, which is why DispatchOutgoingBlockPackets moves such
+  // a packet on without releasing it and only releases the ones which carry no pending resend list.
+  // Releasing it here as well would free it before FreeAndNil(fChannels) below, and the channel
+  // destructor would then decrement a reference counter inside memory which is already gone.
+  //
+  // Unreachable for as long as this queue was emptied completely in every dispatching round, which
+  // is what happened before the outgoing bandwidth rate limiter began postponing a round instead of
+  // building datagrams and refusing them afterwards. The two belong together: without the guard, a
+  // peer which is destroyed while paced data is still queued crashes on teardown
   while fOutgoingBlockPackets.Dequeue(BlockPacket) do begin
-   BlockPacket.DecRef;
+   if not assigned(BlockPacket.fPendingResendOutgoingBlockPacketsList) then begin
+    BlockPacket.DecRef;
+   end;
   end;
   FreeAndNil(fOutgoingBlockPackets);
 
@@ -29520,6 +29594,7 @@ var OutgoingPacketData,OutgoingPayloadData:TRNLPointer;
     OutgoingPacketBuffer:PRNLOutgoingPacketBuffer;
     IsMTUProbe:boolean;
     SendResult:TRNLNetworkSendResult;
+    NextOpportunityTime:TRNLTime;
 begin
 
  result:=true;
@@ -29532,6 +29607,22 @@ begin
  end;
 
  repeat
+
+  // The rate decision belongs here, before anything is built, and not down in SendPacket where it
+  // used to be taken alone. DispatchOutgoingBlockPackets stamps fSentTime and counts
+  // fCountSendAttempts while it fills the buffer, so a datagram which is built and then refused by
+  // our own limiter has already consumed one of MaximumReliableBlockPacketSendAttempts, will have
+  // its retransmission timeout doubled and is counted as packet loss - for a path which was never
+  // even asked. With a tight OutgoingBandwidthLimit that is enough to give up on a peer which is
+  // perfectly reachable, and the reported packet loss points at a network which lost nothing.
+  //
+  // Postponing costs nothing, because the data stays queued where it already is, in the block
+  // packet lists, sorted by channel and by reliability
+  if not MayBuildOutgoingDatagram(NextOpportunityTime) then begin
+   inc(fHost.fTotalOutgoingBandwidthDeferredDispatches);
+   fHost.fNextPeerEventTime:=TRNLTime.Minimum(fHost.fNextPeerEventTime,NextOpportunityTime);
+   break;
+  end;
 
   IsMTUProbe:=DispatchOutgoingMTUProbeBlockPackets(OutgoingPacketBuffer^);
 
@@ -29622,7 +29713,7 @@ begin
     continue;
    end;
 
-   SendResult:=SendPacket(OutgoingPacketData^,OutgoingPacketDataLength);
+   SendResult:=SendPacket(OutgoingPacketData^,OutgoingPacketDataLength,true);
 
    // Only a hard send error aborts the whole host service loop here, everything else, and
    // in particular RNL_NETWORK_SEND_RESULT_WOULD_BLOCK and the bandwidth rate limiter drop,
@@ -29723,23 +29814,48 @@ begin
  inc(fSendNewHostBandwidthLimitsSequenceNumber);
 end;
 
-function TRNLPeer.SendPacketToAddress(const aAddress:TRNLAddress;const aData;const aDataLength:TRNLSizeUInt):TRNLNetworkSendResult;
+function TRNLPeer.MayBuildOutgoingDatagram(out aNextOpportunityTime:TRNLTime):boolean;
+var DatagramSize:TRNLUInt32;
+    PeerNextOpportunityTime,HostNextOpportunityTime:TRNLTime;
+begin
+ // The largest datagram which the dispatching loop could build right now. An upper bound is all
+ // that can be asked with, because the true size is only known once the datagram has been built,
+ // and building it is exactly what stamps fSentTime and counts fCountSendAttempts. A MTU probe is
+ // the one thing which can exceed this bound, since probing for a larger path is its whole point,
+ // so a probe may overshoot the budget by at most RNL_MAXIMUM_MTU minus the current MTU. Accepted
+ // deliberately: probes are rare, and the alternative would be to hold ordinary traffic to the
+ // largest size any probe could ever have
+ DatagramSize:=TRNLUInt32(fMTU-(RNL_IP_HEADER_SIZE+RNL_UDP_HEADER_SIZE)) shl 3;
+ // Both limiters, and both are asked unconditionally rather than short circuited, since each one
+ // has to report its own next opportunity. The peer one carries what the counter side said it is
+ // willing to receive, the host one what this side was configured to send in total
+ result:=fOutgoingBandwidthRateLimiter.Admits(DatagramSize,fHost.fTime,PeerNextOpportunityTime);
+ if not fHost.fOutgoingBandwidthRateLimiter.Admits(DatagramSize,fHost.fTime,HostNextOpportunityTime) then begin
+  result:=false;
+ end;
+ // The later of the two, because both have to admit before anything may be built
+ aNextOpportunityTime:=TRNLTime.Maximum(PeerNextOpportunityTime,HostNextOpportunityTime);
+end;
+
+function TRNLPeer.SendPacketToAddress(const aAddress:TRNLAddress;const aData;const aDataLength:TRNLSizeUInt;const aRateLimiterAlreadyPassed:boolean=false):TRNLNetworkSendResult;
 begin
  // Over this peer's own socket, which for a peer that never nominated anything is still "whichever
  // serves the family"
- result:=SendPacketToAddressOnSocket(fSocketIndex,aAddress,aData,aDataLength);
+ result:=SendPacketToAddressOnSocket(fSocketIndex,aAddress,aData,aDataLength,aRateLimiterAlreadyPassed);
 end;
 
 function TRNLPeer.SendPacketToAddressOnSocket(const aSocketIndex:TRNLSizeInt;
                                               const aAddress:TRNLAddress;
                                               const aData;
-                                              const aDataLength:TRNLSizeUInt):TRNLNetworkSendResult;
+                                              const aDataLength:TRNLSizeUInt;
+                                              const aRateLimiterAlreadyPassed:boolean=false):TRNLNetworkSendResult;
 var DataLength:TRNLSizeUInt;
 begin
  DataLength:=aDataLength shl 3;
  if (DataLength=0) or
+    aRateLimiterAlreadyPassed or
     fOutgoingBandwidthRateLimiter.CanProceed(DataLength,fHost.fTime) then begin
-  result:=fHost.SendPacketOnSocket(aSocketIndex,aAddress,aData,aDataLength);
+  result:=fHost.SendPacketOnSocket(aSocketIndex,aAddress,aData,aDataLength,aRateLimiterAlreadyPassed);
   if result=RNL_NETWORK_SEND_RESULT_OK then begin
    fOutgoingBandwidthRateLimiter.AddAmount(DataLength,fHost.fTime);
    fOutgoingBandwidthRateTracker.AddUnits(DataLength);
@@ -29750,9 +29866,9 @@ begin
  end;
 end;
 
-function TRNLPeer.SendPacket(const aData;const aDataLength:TRNLSizeUInt):TRNLNetworkSendResult;
+function TRNLPeer.SendPacket(const aData;const aDataLength:TRNLSizeUInt;const aRateLimiterAlreadyPassed:boolean=false):TRNLNetworkSendResult;
 begin
- result:=SendPacketToAddress(fAddress,aData,aDataLength);
+ result:=SendPacketToAddress(fAddress,aData,aDataLength,aRateLimiterAlreadyPassed);
 end;
 
 procedure TRNLPeer.Disconnect(const aData:TRNLUInt64=0;const aDelayed:boolean=false);
@@ -30012,6 +30128,8 @@ begin
  fTotalDroppedOutgoingMessages:=0;
 
  fTotalPeersGivenUpOn:=0;
+
+ fTotalOutgoingBandwidthDeferredDispatches:=0;
 
  fTotalRejectedRemoteLongTermPublicKeys:=0;
 
@@ -30303,7 +30421,8 @@ end;
 function TRNLHost.SendPacketOnSocket(const aSocketIndex:TRNLSizeInt;
                                      const aAddress:TRNLAddress;
                                      const aData;
-                                     const aDataLength:TRNLSizeUInt):TRNLNetworkSendResult;
+                                     const aDataLength:TRNLSizeUInt;
+                                     const aRateLimiterAlreadyPassed:boolean=false):TRNLNetworkSendResult;
 var Socket:TRNLSocket;
     Family:TRNLInt64;
     SentLength:TRNLSizeInt;
@@ -30328,7 +30447,8 @@ begin
  if Socket=RNL_SOCKET_NULL then begin
   result:=RNL_NETWORK_SEND_RESULT_ERROR;
  end else begin
-  if fOutgoingBandwidthRateLimiter.CanProceed(aDataLength shl 3,fTime) then begin
+  if aRateLimiterAlreadyPassed or
+     fOutgoingBandwidthRateLimiter.CanProceed(aDataLength shl 3,fTime) then begin
    SentLength:=fNetwork.Send(Socket,@aAddress,aData,aDataLength,Family);
    if SentLength=TRNLSizeInt(aDataLength) then begin
     fOutgoingBandwidthRateLimiter.AddAmount(aDataLength shl 3,fTime);
@@ -32387,6 +32507,10 @@ begin
                                 Peer.fExpectedRemoteLongTermPublicKey,
                                 SizeOf(TRNLKey)) then begin
   inc(fTotalRejectedRemoteLongTermPublicKeys);
+  // Final: the counter side is not going to grow a different long term key within one attempt, so
+  // repeating the handshake would only produce the same refusal until the pending connection timeout
+  // runs out. The attempt ends the way a lapsed one ends.
+  Peer.fState:=RNL_PEER_STATE_DISCONNECTED;
   exit;
  end;
 
@@ -32424,11 +32548,24 @@ begin
    // could be satisfied by simply not sending one
    if fRequireCertificate or Peer.fHasExpectedRemoteCertificateSubject then begin
     inc(fTotalRejectedCertificates);
+    Peer.fState:=RNL_PEER_STATE_DISCONNECTED;
     exit;
    end;
   end;
-  else begin
+  RNL_CERTIFICATE_VERDICT_NOT_YET_VALID:begin
+   // The one verdict which is not final: the window opens later, and the counter side repeats its
+   // request meanwhile, so an attempt which outlives the wait can still succeed. Counted and dropped,
+   // but the attempt stays alive.
    inc(fTotalRejectedCertificates);
+   exit;
+  end;
+  else begin
+   // Everything else says the same thing however often it is asked: the signature will not become
+   // valid, the subject will not change, the window will not reopen and this host will not grow a
+   // clock. Repeating until the pending connection timeout expires would only spend ten seconds
+   // arriving at the same answer.
+   inc(fTotalRejectedCertificates);
+   Peer.fState:=RNL_PEER_STATE_DISCONNECTED;
    exit;
   end;
  end;
