@@ -28853,6 +28853,8 @@ function TRNLPeer.DispatchOutgoingBlockPackets(var aOutgoingPacketBuffer:TRNLOut
 var OutgoingBlockPacket:TRNLPeerBlockPacket;
     MaximumBlockPacketSize:TRNLSizeUInt;
     IsOversized:boolean;
+    KeepAliveWindowItem:PRNLPeerKeepAliveWindowItem;
+    PingSequenceNumber:TRNLUInt8;
 begin
 
  result:=true;
@@ -28940,6 +28942,20 @@ begin
     result:=false;
 
    end else begin
+
+    // A ping starts its resend clock when it is created, and that is only the same moment as going
+    // out for as long as nothing holds the outgoing queue back. Once a bandwidth limit postpones a
+    // dispatching round, DispatchKeepAlive resends a ping which is still sitting in the queue, and
+    // counts every one of those resends as packet loss on a path which never even saw the first
+    // one. So the clock is restarted here, where the ping actually reaches a datagram
+    if OutgoingBlockPacket.fBlockPacket.Header.TypeAndSubtype=TRNLInt32(TRNLProtocolBlockPacketType(RNL_PROTOCOL_BLOCK_PACKET_TYPE_PING)) then begin
+     PingSequenceNumber:=OutgoingBlockPacket.fBlockPacket.Ping.SequenceNumber;
+     KeepAliveWindowItem:=@fKeepAliveWindowItems[PingSequenceNumber and fHost.fKeepAliveWindowMask];
+     if (KeepAliveWindowItem^.State=RNL_PEER_KEEP_ALIVE_WINDOW_ITEM_STATE_SENT) and
+        (KeepAliveWindowItem^.SequenceNumber=PingSequenceNumber) then begin
+      KeepAliveWindowItem^.Time:=fHost.fTime;
+     end;
+    end;
 
     OutgoingBlockPacket.DecRef;
 
@@ -29112,7 +29128,10 @@ begin
     OutgoingBlockPacket.fBlockPacket.Header.TypeAndSubtype:=TRNLInt32(TRNLProtocolBlockPacketType(RNL_PROTOCOL_BLOCK_PACKET_TYPE_PING));
     OutgoingBlockPacket.fBlockPacket.Ping.SequenceNumber:=fOutgoingPingSequenceNumber;
    finally
-    fOutgoingBlockPackets.Enqueue(OutgoingBlockPacket);
+    // At the front, because this is the liveness signal of the connection and a handful of bytes at
+    // that. Behind a queue full of bulk payload it measures the queue instead of the path, and under
+    // a bandwidth limit it is exactly the block packet which the comment above fears getting stuck
+    fOutgoingBlockPackets.EnqueueAtFront(OutgoingBlockPacket);
    end;
 
    KeepAliveWindowItem^.State:=RNL_PEER_KEEP_ALIVE_WINDOW_ITEM_STATE_SENT;
@@ -29156,7 +29175,8 @@ begin
      OutgoingBlockPacket.fBlockPacket.Header.TypeAndSubtype:=TRNLInt32(TRNLProtocolBlockPacketType(RNL_PROTOCOL_BLOCK_PACKET_TYPE_PING));
      OutgoingBlockPacket.fBlockPacket.Ping.SequenceNumber:=KeepAliveWindowItem^.SequenceNumber;
     finally
-     fOutgoingBlockPackets.Enqueue(OutgoingBlockPacket);
+     // At the front for the same reason as the first ping above
+     fOutgoingBlockPackets.EnqueueAtFront(OutgoingBlockPacket);
     end;
 
     KeepAliveWindowItem^.Time:=fHost.fTime;
