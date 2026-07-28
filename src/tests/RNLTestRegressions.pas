@@ -7904,6 +7904,16 @@ begin
  Watchdog:=TRNLTestWatchdog.Create('bandwidth division',120000);
  try
 
+  // Local arrays are not zeroed, so anything the teardown below walks has to be nil before the first
+  // line which could raise. Without this, an exception during the setup is replaced by an access
+  // violation in the teardown, and the actual cause never becomes visible
+  for Index:=1 to COUNT_CLIENTS do begin
+   Clients[Index]:=nil;
+   ClientPeers[Index]:=nil;
+   ServerPeers[Index]:=nil;
+   Shares[Index]:=0;
+  end;
+
   Instance:=TRNLInstance.Create;
   try
    Network:=TRNLVirtualNetwork.Create(Instance);
