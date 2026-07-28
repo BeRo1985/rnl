@@ -7646,7 +7646,7 @@ begin
 end;
 
 procedure TestTightBandwidthLimitDelaysInsteadOfCountingLoss;
-const OUTGOING_BANDWIDTH_LIMIT_BITS=200000;      // 25000 bytes per second
+const OUTGOING_BANDWIDTH_LIMIT_BITS=100000;      // 12500 bytes per second
       MESSAGE_SIZE=800;
       COUNT_MESSAGES=60;                         // about two seconds worth of that budget
       TIMEOUT_MILLISECONDS=20000;

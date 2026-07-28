@@ -5349,7 +5349,11 @@ type PRNLVersion=^TRNLVersion;
        // How often the dispatching of outgoing packets of a peer was postponed because one of the
        // two outgoing bandwidth rate limiters, the one of the peer or the one of the host, had no
        // budget left for a datagram right now. Postponed, not dropped: nothing is built, so nothing
-       // is counted as a send attempt and nothing is counted as packet loss either
+       // is counted as a send attempt and nothing is counted as packet loss either.
+       //
+       // Read it as a yes or no, not as a quantity: it counts how often the question was asked and
+       // answered with no, which scales with how often the application services the host and not
+       // with how much data was held back
        property TotalOutgoingBandwidthDeferredDispatches:TRNLUInt64 read fTotalOutgoingBandwidthDeferredDispatches;
        // How often a handshake was broken off because the counter side held a different long
        // term public key than the one Connect was told to expect
