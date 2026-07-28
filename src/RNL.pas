@@ -5036,11 +5036,6 @@ type PRNLVersion=^TRNLVersion;
        // one repetition round. Zero means all of them.
        fMaximumCandidatesPerHandshakeRound:TRNLSizeInt;
 
-       // Behind a relay every client arrives under the same host address and would share one
-       // bucket, so a single connection spammer would lock out every other client of that relay
-       // and the flooding defence could no longer tell an attacker from a neighbour. Addresses
-       // named here get a bucket of their own instead, which is honest about not being able to
-       // tell them apart rather than pretending it can.
        // Binding requests this host has in flight on the application's behalf, and the answers that
        // have come back for them
        fSTUNQueries:TRNLHostSTUNQueries;
@@ -5083,6 +5078,11 @@ type PRNLVersion=^TRNLVersion;
        fTotalRejectedCertificates:TRNLUInt64;
        fLastCertificateVerdict:TRNLCertificateVerdict;
 
+       // Behind a relay every client arrives under the same host address and would share one
+       // bucket, so a single connection spammer would lock out every other client of that relay
+       // and the flooding defence could no longer tell an attacker from a neighbour. Addresses
+       // named here get a bucket of their own instead, which is honest about not being able to
+       // tell them apart rather than pretending it can.
        fRelayHostAddresses:TRNLHostRelayAddresses;
 
        // On, a client of a declared relay is told apart by its relayed port and gets a bucket of its
@@ -5143,11 +5143,11 @@ type PRNLVersion=^TRNLVersion;
 
        fReceivedAddress:TRNLAddress;
 
-       // The protocol version of the handshake packet currently being processed, kept here for the
        // Which socket the datagram now being dispatched arrived on. Carried the same way and for the
        // same reason as fReceivedAddress: an answer has to go back out where the question came in.
        fReceivedSocketIndex:TRNLSizeInt;
 
+       // The protocol version of the handshake packet currently being processed, kept here for the
        // same reason and in the same way as fReceivedAddress: the per packet dispatch functions
        // need it, and threading it through all of their signatures would buy nothing
        fReceivedProtocolVersion:TRNLUInt64;
@@ -5252,13 +5252,13 @@ type PRNLVersion=^TRNLVersion;
 
        procedure SetKeepAliveWindowSize(const aKeepAliveWindowSize:TRNLUInt32);
 
-       // Which of this host's sockets serves that address family, or -1 if none does
        // The length of an authentication payload, which is the one thing the certificate area changes
        // about the wire. Protocol version 1.0.0 has no such area, 1.1.0 always has one - all zero when
        // there is no certificate. Because the area is the last field, the two layouts differ in this
        // number and in nothing else, so there is no branching over field positions anywhere.
        class function AuthenticationRequestPayloadSize(const aWithCertificate:boolean):TRNLSizeUInt; static;
        class function AuthenticationResponsePayloadSize(const aWithCertificate:boolean):TRNLSizeUInt; static;
+       // Which of this host's sockets serves that address family, or -1 if none does
        function FindSocketForAddressFamily(const aAddress:TRNLAddress):TRNLSizeInt;
        function SendPacket(const aAddress:TRNLAddress;const aData;const aDataLength:TRNLSizeUInt):TRNLNetworkSendResult;
        // Out of one named socket rather than out of whichever serves the family. Needed wherever the
@@ -5351,22 +5351,6 @@ type PRNLVersion=^TRNLVersion;
        function GatherCandidates(const aSTUNServers:array of TRNLAddress;
                                  out aCandidates:TRNLCandidates;
                                  const aTimeoutMilliseconds:TRNLInt64=2000):boolean;
-       // Like Connect, but offered every address the counter side might be reachable at instead of
-       // exactly one. The handshake repetition fans out over the candidates, which opens a local NAT
-       // mapping towards each; whichever answers first becomes the path, and the rest are dropped.
-       // A round serves at most MaximumCandidatesPerHandshakeRound of them and continues where it
-       // left off, so a list longer than that costs time rather than bandwidth.
-       //
-       // This is the initiating half. For two sides which are both behind a restricting NAT it is
-       // not enough on its own: the request can only reach the counter side once that side has sent
-       // something outwards itself, so the answering side has to call PunchCandidates.
-       //
-       // Two hosts calling this at each other at the same time end up with one connection, not two:
-       // the side whose salt is lower drops its own attempt and takes the incoming one instead. The
-       // peer returned here is the one that goes away in that case, silently, exactly as an attempt
-       // which ran into its timeout does, and the connection arrives as an ordinary incoming one
-       // with a peer of its own. So a caller which may be called at the same time has to be
-       // prepared for its connection to show up as RNL_HOST_EVENT_TYPE_PEER_CONNECT.
        // Two binding requests from the same socket to two servers on different hosts tell apart a
        // NAT which keeps one mapping per socket from one which picks a new one per destination,
        // which is what decides whether a server reflexive candidate is of any use. A third server,
@@ -5389,18 +5373,6 @@ type PRNLVersion=^TRNLVersion;
        // Takes one answer out of the queue. False when there is none waiting.
        function TakeSTUNResult(out aResult:TRNLHostSTUNResult):boolean;
        function CountPendingSTUNQueries:TRNLSizeInt;
-       // Declares an address as a relay, so that connection requests arriving from it are counted
-       // against RateLimiterRelayAddressBurst rather than against the per address one. Nothing else
-       // about them changes; in particular this is not a reason to trust anything they say.
-       // Binds a socket to that address as well, instead of the one wildcard socket per family.
-       // Has to be called before Start; afterwards it does nothing, because the sockets are up.
-       //
-       // This is what makes candidate pairing per local socket mean anything: with one socket per
-       // family there is exactly one way out and nothing to pair, and with one per interface the
-       // handshake fans out over every combination of local socket and remote candidate.
-       //
-       // A port of zero means the port this host is configured with, which is the usual case:
-       // several addresses, same port.
        // What this host presents as its own identity. Has to be issued by whoever runs the authority,
        // through TRNLCertificateUtils.Issue, over this host's own long term public key.
        //
@@ -5419,9 +5391,37 @@ type PRNLVersion=^TRNLVersion;
        function VerifyCertificate(const aCertificate:TRNLCertificate;
                                   const aLongTermPublicKey:TRNLKey;
                                   const aExpectedSubject:PRNLCertificateSubject=nil):TRNLCertificateVerdict;
+       // Binds a socket to that address as well, instead of the one wildcard socket per family.
+       // Has to be called before Start; afterwards it does nothing, because the sockets are up.
+       //
+       // This is what makes candidate pairing per local socket mean anything: with one socket per
+       // family there is exactly one way out and nothing to pair, and with one per interface the
+       // handshake fans out over every combination of local socket and remote candidate.
+       //
+       // A port of zero means the port this host is configured with, which is the usual case:
+       // several addresses, same port.
        procedure AddLocalAddress(const aAddress:TRNLAddress);
        procedure ClearLocalAddresses;
+       // Declares an address as a relay, so that connection requests arriving from it are counted
+       // against RateLimiterRelayAddressBurst rather than against the per address one. Nothing else
+       // about them changes; in particular this is not a reason to trust anything they say.
        procedure AddRelayHostAddress(const aHost:TRNLHostAddress);
+       // Like Connect, but offered every address the counter side might be reachable at instead of
+       // exactly one. The handshake repetition fans out over the candidates, which opens a local NAT
+       // mapping towards each; whichever answers first becomes the path, and the rest are dropped.
+       // A round serves at most MaximumCandidatesPerHandshakeRound of them and continues where it
+       // left off, so a list longer than that costs time rather than bandwidth.
+       //
+       // This is the initiating half. For two sides which are both behind a restricting NAT it is
+       // not enough on its own: the request can only reach the counter side once that side has sent
+       // something outwards itself, so the answering side has to call PunchCandidates.
+       //
+       // Two hosts calling this at each other at the same time end up with one connection, not two:
+       // the side whose salt is lower drops its own attempt and takes the incoming one instead. The
+       // peer returned here is the one that goes away in that case, silently, exactly as an attempt
+       // which ran into its timeout does, and the connection arrives as an ordinary incoming one
+       // with a peer of its own. So a caller which may be called at the same time has to be
+       // prepared for its connection to show up as RNL_HOST_EVENT_TYPE_PEER_CONNECT.
        function ConnectViaCandidates(const aRemoteCandidates:TRNLCandidates;
                                      const aCountChannels:TRNLUInt32=1;
                                      const aData:TRNLUInt64=0;
