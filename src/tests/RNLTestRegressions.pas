@@ -7875,6 +7875,170 @@ begin
 
 end;
 
+procedure TestHostBandwidthIsDividedAmongItsPeers;
+const OUTGOING_BANDWIDTH_LIMIT_BITS=240000;      // 30000 bytes per second for the whole host
+      COUNT_CLIENTS=3;
+      HEAVY_CLIENT=2;                            // the one which is given three times the claim
+      HEAVY_WEIGHT=3;
+      MESSAGE_SIZE=800;
+      COUNT_MESSAGES=200;
+      PUMP_MILLISECONDS=4000;
+      REFILL_EVERY=20;
+      SERVER_PORT=18310;
+var Instance:TRNLInstance;
+    Network:TRNLVirtualNetwork;
+    Server:TRNLHost;
+    Clients:array[1..COUNT_CLIENTS] of TRNLHost;
+    ClientPeers:array[1..COUNT_CLIENTS] of TRNLPeer;
+    ServerPeers:array[1..COUNT_CLIENTS] of TRNLPeer;
+    ServerPeer:TRNLPeer;
+    ServerAddress:TRNLAddress;
+    Index,Round_:TRNLSizeInt;
+    Event:TRNLHostEvent;
+    Deadline:TRNLTime;
+    Shares:array[1..COUNT_CLIENTS] of TRNLUInt32;
+    Watchdog:TRNLTestWatchdog;
+begin
+
+ TestBegin('the outgoing bandwidth of a host is divided among its peers by weight');
+ Watchdog:=TRNLTestWatchdog.Create('bandwidth division',120000);
+ try
+
+  Instance:=TRNLInstance.Create;
+  try
+   Network:=TRNLVirtualNetwork.Create(Instance);
+   try
+
+    // One server with three peers on it. The division happens on the side which has several peers, so
+    // the interesting host here is the server and the clients are only there to be its peers
+    Server:=TRNLHost.Create(Instance,Network);
+    try
+     Server.MaximumCountChannels:=1;
+     Server.ChannelTypes[0]:=RNL_PEER_RELIABLE_ORDERED_CHANNEL;
+     Server.Address.Host:=RNL_HOST_ANY;
+     Server.Address.Port:=SERVER_PORT;
+     Server.OutgoingBandwidthLimit:=OUTGOING_BANDWIDTH_LIMIT_BITS;
+     Server.Start(RNL_HOST_ADDRESS_FAMILY_WORK_MODE_IPV4_ONLY);
+
+     Network.AddressSetHost(ServerAddress,'127.0.0.1');
+     ServerAddress.Port:=SERVER_PORT;
+
+     for Index:=1 to COUNT_CLIENTS do begin
+      Clients[Index]:=TRNLHost.Create(Instance,Network);
+      Clients[Index].MaximumCountChannels:=1;
+      Clients[Index].ChannelTypes[0]:=RNL_PEER_RELIABLE_ORDERED_CHANNEL;
+      Clients[Index].Address.Host:=RNL_HOST_ANY;
+      Clients[Index].Address.Port:=SERVER_PORT+TRNLUInt16(Index);
+      Clients[Index].Start(RNL_HOST_ADDRESS_FAMILY_WORK_MODE_IPV4_ONLY);
+      ClientPeers[Index]:=Clients[Index].Connect(ServerAddress,1,0);
+     end;
+
+     try
+
+      // Serviced until all three are through their handshake
+      Deadline:=Instance.Time+5000;
+      while Instance.Time<Deadline do begin
+       Server.Service(Event,0);
+       Event.Free;
+       for Index:=1 to COUNT_CLIENTS do begin
+        Clients[Index].Service(Event,0);
+        Event.Free;
+       end;
+       if Server.CountPeers=COUNT_CLIENTS then begin
+        break;
+       end;
+      end;
+
+      if not Check(Server.CountPeers=COUNT_CLIENTS,
+                   'all three clients have to be connected to the server') then begin
+       exit;
+      end;
+
+      // The weight is set on the peers of the SERVER, since they are the ones sharing its uplink.
+      // Collected by walking rather than by index: TRNLHost.Peers is a ring in the ordinary build and
+      // an indexed list only under RNL_LINEAR_PEER_LIST, and a for-in loop is the one form which reads
+      // both
+      Index:=0;
+      for ServerPeer in Server.Peers do begin
+       inc(Index);
+       ServerPeers[Index]:=ServerPeer;
+       if Index=HEAVY_CLIENT then begin
+        ServerPeer.BandwidthWeight:=HEAVY_WEIGHT;
+       end;
+      end;
+
+      // Something for the server to send to every one of them
+      for Round_:=1 to COUNT_MESSAGES div REFILL_EVERY do begin
+       for Index:=1 to REFILL_EVERY do begin
+        Server.BroadcastMessageRawByteString(0,TestMessageText(Index,MESSAGE_SIZE));
+       end;
+       Deadline:=Instance.Time+(PUMP_MILLISECONDS div (COUNT_MESSAGES div REFILL_EVERY));
+       while Instance.Time<Deadline do begin
+        Server.Service(Event,0);
+        Event.Free;
+        for Index:=1 to COUNT_CLIENTS do begin
+         Clients[Index].Service(Event,0);
+         Event.Free;
+        end;
+       end;
+      end;
+
+      for Index:=1 to COUNT_CLIENTS do begin
+       Shares[Index]:=ServerPeers[Index].OutgoingBandwidthShare;
+      end;
+
+      Info('host limit '+TRNLRawByteString(IntToStr(OUTGOING_BANDWIDTH_LIMIT_BITS div 8))+
+           ' bytes per second over '+TRNLRawByteString(IntToStr(Server.CountPeers))+
+           ' peers, one of them at weight '+TRNLRawByteString(IntToStr(HEAVY_WEIGHT))+': shares '+
+           TRNLRawByteString(IntToStr(Shares[1] div 8))+', '+
+           TRNLRawByteString(IntToStr(Shares[2] div 8))+', '+
+           TRNLRawByteString(IntToStr(Shares[3] div 8))+' bytes per second');
+
+      // Weights 1, 3 and 1 out of 5, so the heavy one gets three fifths and the others one fifth each
+      CheckEqualsInt64(Shares[1],OUTGOING_BANDWIDTH_LIMIT_BITS div 5,
+                       'a peer of weight one gets a fifth of the host limit');
+
+      CheckEqualsInt64(Shares[HEAVY_CLIENT],(OUTGOING_BANDWIDTH_LIMIT_BITS*3) div 5,
+                       'and the peer of weight three gets three fifths of it');
+
+      CheckEqualsInt64(Shares[3],OUTGOING_BANDWIDTH_LIMIT_BITS div 5,
+                       'and the third one gets a fifth again');
+
+      // The point of the division: the parts add up to the whole rather than each peer being allowed
+      // the whole limit for itself
+      CheckAtMostInt64(TRNLInt64(Shares[1])+TRNLInt64(Shares[2])+TRNLInt64(Shares[3]),
+                       OUTGOING_BANDWIDTH_LIMIT_BITS,
+                       'and the shares together must not exceed what the host has');
+
+     finally
+      for Index:=1 to COUNT_CLIENTS do begin
+       if assigned(ClientPeers[Index]) then begin
+        ClientPeers[Index].DecRef;
+       end;
+      end;
+     end;
+
+    finally
+     for Index:=1 to COUNT_CLIENTS do begin
+      FreeAndNil(Clients[Index]);
+     end;
+     FreeAndNil(Server);
+    end;
+
+   finally
+    FreeAndNil(Network);
+   end;
+  finally
+   FreeAndNil(Instance);
+  end;
+
+ finally
+  FreeAndNil(Watchdog);
+  TestEnd;
+ end;
+
+end;
+
 // One run of the controller against one shape of bottleneck. Returns false only on a host service
 // error; everything else is reported through the out parameters, so that the caller can judge all four
 // combinations against one set of expectations
@@ -8800,6 +8964,9 @@ begin
 
  // And finally deciding the rate rather than being told it
  TestCongestionControlFindsTheCapacityOfFourBottlenecks;
+
+ // Several peers on one host, sharing its uplink instead of racing for it
+ TestHostBandwidthIsDividedAmongItsPeers;
 
  // MTU probing
  TestMTUProbingTerminatesAndReportsAMTU;

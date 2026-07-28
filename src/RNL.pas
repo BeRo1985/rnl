@@ -813,6 +813,15 @@ const RNL_PROTOCOL_VERSION_MAJOR=1;
       // wrong rate, and the controller stops easing off and goes straight to the measured capacity
       RNL_PEER_CONGESTION_CONTROL_PANIC_FACTOR=4;
 
+      // Within how many milliseconds a queue which has already built up ought to be gone. The brake is
+      // then exactly as hard as that requires and no harder, which is what keeps a shallow queue from
+      // costing the throughput that a deep one has to cost
+      RNL_PEER_CONGESTION_CONTROL_DRAIN_MILLISECONDS=500;
+
+      // And however deep the queue is, the brake never goes below this fraction of the capacity, as a
+      // percentage. A queue of several seconds would otherwise ask for a negative rate
+      RNL_PEER_CONGESTION_CONTROL_DRAIN_FLOOR_PERCENT=25;
+
       // How far the rate has to have moved since it was last reported before the application is told
       // again, in percent. The rate is adjusted on every flight, so an event per adjustment would be
       // an event per round trip - noise which every application would end up filtering for itself
@@ -4587,6 +4596,10 @@ type PRNLVersion=^TRNLVersion;
        // The rate as the application last heard it, so that only a change worth hearing about is sent
        fReportedCongestionControlRate:TRNLUInt32;
 
+       // This peer's claim on the outgoing bandwidth limit of its host, relative to the claims of the
+       // other peers. One by default, so that the default is an equal division
+       fBandwidthWeight:TRNLUInt32;
+
        fRoundTripTimeVariance:TRNLInt64;
 
        fRetransmissionTimeout:TRNLInt64;
@@ -4721,6 +4734,10 @@ type PRNLVersion=^TRNLVersion;
        function GetDeliveryRate:TRNLUInt32;
        function GetMaximumDeliveryRate:TRNLUInt32;
 
+       // The part of the outgoing bandwidth limit of the host which belongs to this peer, or zero when
+       // the host has no limit at all
+       function GetOutgoingBandwidthShare:TRNLUInt32;
+
        // Whether a datagram may be built for this peer at all right now, asked before anything is
        // built, and if not, when the answer would turn into a yes
        function MayBuildOutgoingDatagram(out aNextOpportunityTime:TRNLTime):boolean;
@@ -4832,6 +4849,12 @@ type PRNLVersion=^TRNLVersion;
        // The two counts of the last completed flight, a flight being one round trip time worth of
        // sending. Loss over a flight rather than over the ten second reporting interval, because a
        // controller has to learn about loss while it can still do something about it
+       // How much of the outgoing bandwidth limit of its host this peer may claim, relative to the other
+       // peers. One by default. Without a division a single peer takes as much of the host limit as it
+       // wants and the others find it spent
+       property BandwidthWeight:TRNLUInt32 read fBandwidthWeight write fBandwidthWeight;
+       // What that claim currently amounts to in bits per second, or zero if the host is unlimited
+       property OutgoingBandwidthShare:TRNLUInt32 read GetOutgoingBandwidthShare;
        property CountLastFlightSentPackets:TRNLUInt32 read fCountLastFlightSentPackets;
        property CountLastFlightLostPackets:TRNLUInt32 read fCountLastFlightLostPackets;
        // The rate the congestion controller has settled on, in bits per second, or zero while it is
@@ -4895,6 +4918,15 @@ type PRNLVersion=^TRNLVersion;
 {$ifend}
 
        fCountPeers:TRNLUInt32;
+
+       // Sum of the weights of all peers which are in a position to send, recomputed once per
+       // dispatching round. At least one, so that the division never has a zero denominator
+       fTotalBandwidthWeight:TRNLUInt32;
+
+       // Advanced by one per dispatching round and used as the offset the peer list is walked from, so
+       // that being early in the list stops being an advantage. A share alone does not achieve that: the
+       // host wide limiter is a single budget, and whoever asks first still finds it full
+       fDispatchRotation:TRNLUInt32;
 
        fPeerToFreeList:TRNLPeerListNode;
 
@@ -28233,6 +28265,8 @@ begin
 
  fReportedCongestionControlRate:=0;
 
+ fBandwidthWeight:=1;
+
  fRoundTripTimeVariance:=0;
 
  fRetransmissionTimeout:=TRNLUInt64(aHost.fDefaultRoundTripTime) shl 32;
@@ -28412,7 +28446,7 @@ begin
 end;
 
 procedure TRNLPeer.UpdateOutgoingBandwidthRateLimiter;
-var Rate:TRNLUInt32;
+var Rate,Share:TRNLUInt32;
 begin
  // The one place which decides what this peer is actually allowed to send, so that everything which
  // can change it goes through here. It used to set the limiter from the counter side alone, and every
@@ -28424,6 +28458,12 @@ begin
   // Zero means unlimited on both sides, so the smaller of the two is only the smaller of those which
   // actually say something
   Rate:=fCongestionControlRate;
+ end;
+ Share:=GetOutgoingBandwidthShare;
+ if (Share>0) and ((Rate=0) or (Share<Rate)) then begin
+  // And the third claimant is the host, whose limit is divided among its peers rather than handed to
+  // whichever of them asks first
+  Rate:=Share;
  end;
  fOutgoingBandwidthRateLimiter.Setup(Rate,1000);
 end;
@@ -28540,7 +28580,7 @@ begin
 end;
 
 procedure TRNLPeer.UpdateCongestionControl;
-var Rate,Ceiling,DeliveryCeiling,Delay:TRNLInt64;
+var Rate,Ceiling,DeliveryCeiling,Delay,Capacity,QueuedBits:TRNLInt64;
     LossPercent:TRNLInt64;
 begin
 
@@ -28592,12 +28632,20 @@ begin
   // deep buffer standing at half a second while the rate sat a quarter above what the path could
   // carry.
   //
-  // Half of it, because the depth of the queue decides how long draining takes and a gentle brake is
-  // no brake at all here. At an eighth below the capacity, one and a half seconds of queue need seven
-  // seconds to clear - the connection would spend that whole time at the latency the controller
-  // exists to prevent. At half the capacity the same queue is gone in three
-  Rate:=TRNLInt64(GetMaximumDeliveryRate)*8;
-  Rate:=Rate div 2;
+  // How far below follows from the queue itself rather than from a fixed factor. What stands in the
+  // queue is the queueing delay multiplied by the capacity, and draining that within a given time
+  // means sending exactly that much less than the capacity. A flat halving does the same job but
+  // charges every queue the price of the deepest one: a queue of 200 ms only needs a fifth off,
+  // where one of 1200 ms needs everything the floor below allows
+  Capacity:=TRNLInt64(GetMaximumDeliveryRate)*8;
+  QueuedBits:=(Capacity*TRNLInt64(Delay)) div 1000;
+  Rate:=Capacity-((QueuedBits*1000) div RNL_PEER_CONGESTION_CONTROL_DRAIN_MILLISECONDS);
+  if Rate>Capacity then begin
+   Rate:=Capacity;
+  end;
+  if Rate<((Capacity*RNL_PEER_CONGESTION_CONTROL_DRAIN_FLOOR_PERCENT) div 100) then begin
+   Rate:=(Capacity*RNL_PEER_CONGESTION_CONTROL_DRAIN_FLOOR_PERCENT) div 100;
+  end;
  end else if Delay>=RNL_PEER_CONGESTION_CONTROL_HIGH_DELAY then begin
   dec(Rate,Rate div 8);
  end else if LossPercent>=RNL_PEER_CONGESTION_CONTROL_LOSS_PERCENT then begin
@@ -28622,9 +28670,11 @@ begin
  if fRemoteIncomingBandwidthLimit>0 then begin
   Ceiling:=fRemoteIncomingBandwidthLimit;
  end;
- if (fHost.fOutgoingBandwidthLimit>0) and
-    ((Ceiling=0) or (TRNLInt64(fHost.fOutgoingBandwidthLimit)<Ceiling)) then begin
-  Ceiling:=fHost.fOutgoingBandwidthLimit;
+ // The share of the host limit rather than the whole of it, so that the controller aims at what this
+ // peer may actually have instead of at what the host would allow if it were alone
+ if (GetOutgoingBandwidthShare>0) and
+    ((Ceiling=0) or (TRNLInt64(GetOutgoingBandwidthShare)<Ceiling)) then begin
+  Ceiling:=GetOutgoingBandwidthShare;
  end;
  if (Ceiling>0) and (Rate>Ceiling) then begin
   Rate:=Ceiling;
@@ -28719,6 +28769,21 @@ end;
 function TRNLPeer.GetDeliveryRate:TRNLUInt32;
 begin
  result:=fDeliveryRateTracker.UnitsPerSecond;
+end;
+
+function TRNLPeer.GetOutgoingBandwidthShare:TRNLUInt32;
+var TotalWeight:TRNLUInt32;
+begin
+ if fHost.fOutgoingBandwidthLimit=0 then begin
+  // Unlimited, so there is nothing to divide and no share to speak of
+  result:=0;
+ end else begin
+  TotalWeight:=fHost.fTotalBandwidthWeight;
+  if TotalWeight<1 then begin
+   TotalWeight:=1;
+  end;
+  result:=TRNLUInt32((TRNLUInt64(fHost.fOutgoingBandwidthLimit)*TRNLUInt64(fBandwidthWeight)) div TRNLUInt64(TotalWeight));
+ end;
 end;
 
 function TRNLPeer.GetMaximumDeliveryRate:TRNLUInt32;
@@ -30466,6 +30531,12 @@ begin
 
  UpdateMaximumDeliveryRate;
 
+ // Once per round, because the share of the host limit which belongs to this peer moves whenever a
+ // peer joins or leaves or changes its weight, and none of those go through an event this peer would
+ // otherwise hear about. Setup only assigns two fields and leaves the departure schedule of the
+ // pacing alone, so repeating it every round costs nothing and misses nothing
+ UpdateOutgoingBandwidthRateLimiter;
+
  UpdateFlightStatistics;
 
  DispatchNewHostBandwidthLimits;
@@ -30627,6 +30698,10 @@ begin
 {$ifend}
 
  fCountPeers:=0;
+
+ fTotalBandwidthWeight:=1;
+
+ fDispatchRotation:=0;
 
  fPeerToFreeList:=TRNLPeerListNode.Create;
 
@@ -34072,16 +34147,76 @@ end;
 
 function TRNLHost.DispatchPeers(var aNextTimeout:TRNLTime):boolean;
 var Peer:TRNLPeer;
+    Index,Start,CountPeers:TRNLSizeInt;
+{$if not defined(RNL_LINEAR_PEER_LIST)}
+    PeerListNode,NextPeerListNode:TRNLPeerListNode;
+{$ifend}
 begin
 
  fNextPeerEventTime.fValue:=TRNLUInt64(High(TRNLUInt64));
 
+ // Both of these are read by every peer below while it works out how much it may send, so they are
+ // settled once here rather than recomputed per peer
+ fTotalBandwidthWeight:=0;
+ CountPeers:=0;
  for Peer in fPeerList do begin
+  inc(CountPeers);
+  if Peer.fState in [RNL_PEER_STATE_CONNECTED,
+                     RNL_PEER_STATE_DISCONNECT_LATER] then begin
+   // Only the peers which are in a position to send payload take part in the division. Counting a
+   // peer which is still handshaking or already gone would hand out shares to connections that
+   // cannot use them, and shrink the ones which can
+   inc(fTotalBandwidthWeight,Peer.fBandwidthWeight);
+  end;
+ end;
+ if fTotalBandwidthWeight<1 then begin
+  fTotalBandwidthWeight:=1;
+ end;
+
+ // Where this round starts. Rotating the starting point is what makes the share above reachable at
+ // all: the host wide limiter is one budget for everybody, so a fixed order means the first peer in
+ // the list meets a full budget every single round and the last one meets whatever is left.
+ //
+ // Walking from an offset is safe because no peer leaves this list while this loop runs: Disconnect
+ // only puts a peer onto fPeerToFreeList, and the only place which releases it, ClearPeerToFreeList,
+ // runs at the head of the dispatching loop in DispatchIteration rather than inside this one
+ if CountPeers>0 then begin
+  Start:=fDispatchRotation mod TRNLUInt32(CountPeers);
+  inc(fDispatchRotation);
+ end else begin
+  Start:=0;
+ end;
+
+{$if defined(RNL_LINEAR_PEER_LIST)}
+ for Index:=0 to CountPeers-1 do begin
+  Peer:=fPeerList[(Start+Index) mod CountPeers];
   if not Peer.DispatchPeer then begin
    result:=false;
    exit;
   end;
  end;
+{$else}
+ PeerListNode:=fPeerList.Front;
+ for Index:=1 to Start do begin
+  PeerListNode:=PeerListNode.Next;
+  if PeerListNode=fPeerList then begin
+   // The sentinel of the ring, which is not a peer
+   PeerListNode:=fPeerList.Front;
+  end;
+ end;
+ for Index:=1 to CountPeers do begin
+  NextPeerListNode:=PeerListNode.Next;
+  if NextPeerListNode=fPeerList then begin
+   NextPeerListNode:=fPeerList.Front;
+  end;
+  Peer:=PeerListNode.Value;
+  if not Peer.DispatchPeer then begin
+   result:=false;
+   exit;
+  end;
+  PeerListNode:=NextPeerListNode;
+ end;
+{$ifend}
 
  if (fNextPeerEventTime<>TRNLUInt64(High(TRNLUInt64))) and
     (fNextPeerEventTime>fTime) and
