@@ -98,6 +98,30 @@ are the typical case for egoshooters, racing games, and so forth. Or in other wo
          attacker rewriting one clear text version field, which is why it says so here
        - The long term public key the counter side proved possession of is available on every
          connection and can be pinned
+   - Optional single stage certificates for the mutual authentication
+       - One public key of an issuing authority in the client's configuration instead of one pinned key
+         per server, which is what pinning cannot do: key rotation, and several servers behind one name.
+         Several authority keys are accepted at once, so that rotating the authority itself is not a
+         flag day either
+       - No chain, no ASN.1, no revocation list. Subject, issuer signature and two validity fields, 104
+         bytes, in a fixed area which is all zero when there is none. It does not carry the subject's
+         public key although that is what it vouches for: the key is already in the payload as the one
+         which signed the handshake, and the signature covers it from there, so there cannot be a second
+         copy disagreeing with the first
+       - The subject is opaque and RNL never interprets it. No host name concept, no wildcard matching,
+         no case folding, no parsing; the issuer puts whatever the deployment uses as an identity into
+         it and the client compares byte for byte. That is deliberate: every serious failure of X.509
+         name handling comes from the library trying to understand names
+       - Validity as two counts of minutes since 1 January 2026, zero for no bound. Minutes rather than
+         days because the most useful shape is a short lived certificate issued per session by the same
+         thing that already hands out connection and authentication tokens. The wall clock is set by the
+         application rather than read from the operating system, and a certificate with a validity
+         period is refused outright where there is no clock to hold it against
+       - Checked before the client hands over its authentication token, which is the real gain rather
+         than the rotation: the server's identity travels in the packet before the one carrying the
+         token, so a bearer token is only ever given to a server which has proved who it is
+       - Entirely opt in. Without a configured certificate and without an authority key, nothing about
+         a handshake changes
    - NAT traversal
        - Candidate gathering: one host candidate per local interface address and socket, one server
          reflexive candidate per STUN server which answers, and a relayed one if a relay is in front
@@ -149,9 +173,6 @@ are the typical case for egoshooters, racing games, and so forth. Or in other wo
      blocks UDP; TLS additionally covers one which only lets TLS out. It needs a TLS stack, which RNL
      does not have and which is a good deal larger than everything around it, so the sensible shape is
      an external library behind a callback interface rather than own code
-   - Single stage certificates for the mutual authentication, so that a client can carry one CA public
-     key instead of one pinned key per server. That is what pinning cannot do: key rotation and
-     several servers behind one name
    - Adaptive congestion control. The measurements are already taken, they are simply not acted upon
      yet, and a relayed path is where it would matter most
    - TODO

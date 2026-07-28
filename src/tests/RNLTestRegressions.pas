@@ -5463,6 +5463,272 @@ begin
 end;
 
 // ---------------------------------------------------------------------------------------
+// A certificate instead of a pinned key
+// ---------------------------------------------------------------------------------------
+
+// Pinning the long term key of the counter side works, and it is what a client had to do until now.
+// What it cannot do is scale: one pinned key per server, configured out of band, and rotating a key
+// means reconfiguring every client. A certificate turns that into one authority key which vouches for
+// as many servers as the authority likes.
+//
+// The security gain is not the rotation, though, it is the ordering. The authentication request carries
+// the server's identity and the response to it carries the client's authentication token. So the
+// certificate is checked before the token is handed over, which closes the hole a bearer token leaves
+// open: whoever terminates two handshakes reads the token out of the client's response and presents it
+// to the real server as their own.
+//
+// Every part of this is asserted the same way: the same construction, once with the thing correct and
+// once with exactly one thing wrong.
+procedure TestCertificateIsCheckedBeforeTheTokenIsHandedOver;
+const SERVER_PORT=18650;
+      CLIENT_PORT=18651;
+      MESSAGE_COUNT=3;
+      // Minutes since the certificate epoch. Something in the middle, so that both a window around it
+      // and windows entirely before and after it can be expressed.
+      NOW_MINUTES=300000;
+var Watchdog:TRNLTestWatchdog;
+    AuthorityPublicKey,AuthorityPrivateKey:TRNLKey;
+    OtherAuthorityPublicKey,OtherAuthorityPrivateKey:TRNLKey;
+    ServerSubject,OtherSubject:TRNLCertificateSubject;
+    RandomGenerator:TRNLRandomGenerator;
+    Index:TRNLSizeInt;
+
+ // Runs one connection attempt and says whether it came up. Everything the test varies is a parameter,
+ // so that any two runs differ in exactly one thing.
+ function Attempt(const aIssueCertificate:boolean;
+                  const aValidFrom,aValidUntil:TRNLUInt32;
+                  const aSignedByOtherAuthority:boolean;
+                  const aCertificateSubject:PRNLCertificateSubject;
+                  const aExpectedSubject:PRNLCertificateSubject;
+                  const aClientClockMinutes:TRNLUInt32;
+                  const aRequireCertificate:boolean;
+                  out aVerdict:TRNLCertificateVerdict;
+                  out aCountAccepted,aCountRejected:TRNLUInt64):boolean;
+ var Instance:TRNLInstance;
+     VirtualNetwork:TRNLVirtualNetwork;
+     Server,Client:TRNLHost;
+     ServerAddress:TRNLAddress;
+     Certificate:TRNLCertificate;
+     Peer:TRNLPeer;
+     Event:TRNLHostEvent;
+     StartTime:TRNLTime;
+     Connected:boolean;
+     Subject:TRNLCertificateSubject;
+ begin
+
+  result:=false;
+  aVerdict:=RNL_CERTIFICATE_VERDICT_ABSENT;
+  aCountAccepted:=0;
+  aCountRejected:=0;
+  Connected:=false;
+
+  Instance:=TRNLInstance.Create;
+  try
+   VirtualNetwork:=TRNLVirtualNetwork.Create(Instance);
+   try
+
+    FillChar(ServerAddress,SizeOf(TRNLAddress),#0);
+    VirtualNetwork.AddressSetHost(ServerAddress,'127.0.0.1');
+    ServerAddress.Port:=SERVER_PORT;
+
+    Server:=TRNLHost.Create(Instance,VirtualNetwork);
+    try
+
+     Server.Address.Host:=ServerAddress.Host;
+     Server.Address.Port:=SERVER_PORT;
+     // A certificate needs an area to travel in, and 1.0.0 has none
+     Server.TranscriptBindingMode:=RNL_PROTOCOL_TRANSCRIPT_BINDING_REQUIRED;
+
+     if aIssueCertificate then begin
+      if assigned(aCertificateSubject) then begin
+       Subject:=aCertificateSubject^;
+      end else begin
+       Subject:=ServerSubject;
+      end;
+      if aSignedByOtherAuthority then begin
+       TRNLCertificateUtils.Issue(Certificate,Subject,Server.LongTermPublicKey,
+                                  aValidFrom,aValidUntil,
+                                  OtherAuthorityPrivateKey,OtherAuthorityPublicKey);
+      end else begin
+       TRNLCertificateUtils.Issue(Certificate,Subject,Server.LongTermPublicKey,
+                                  aValidFrom,aValidUntil,
+                                  AuthorityPrivateKey,AuthorityPublicKey);
+      end;
+      Server.SetCertificate(Certificate);
+     end;
+
+     Server.Start(RNL_HOST_ADDRESS_FAMILY_WORK_MODE_IPV4_ONLY);
+
+     Client:=TRNLHost.Create(Instance,VirtualNetwork);
+     try
+
+      Client.Address.Host:=ServerAddress.Host;
+      Client.Address.Port:=CLIENT_PORT;
+      Client.TranscriptBindingMode:=RNL_PROTOCOL_TRANSCRIPT_BINDING_REQUIRED;
+      // Only the one authority, so a certificate from the other one has to fail
+      Client.AddCertificateAuthorityPublicKey(AuthorityPublicKey);
+      Client.CurrentTimeMinutes:=aClientClockMinutes;
+      Client.RequireCertificate:=aRequireCertificate;
+      Client.Start(RNL_HOST_ADDRESS_FAMILY_WORK_MODE_IPV4_ONLY);
+
+      Peer:=Client.Connect(ServerAddress,1,0,nil,nil,nil,aExpectedSubject);
+      if assigned(Peer) then begin
+       Peer.IncRef;
+       try
+        StartTime:=Instance.Time;
+        Event.Initialize;
+        try
+         repeat
+          while Server.Service(Event,0)=RNL_HOST_SERVICE_STATUS_EVENT do begin
+           Event.Free;
+          end;
+          Event.Free;
+          while Client.Service(Event,0)=RNL_HOST_SERVICE_STATUS_EVENT do begin
+           if Event.Type_=RNL_HOST_EVENT_TYPE_PEER_APPROVAL then begin
+            Connected:=true;
+           end;
+           Event.Free;
+          end;
+          Event.Free;
+          Sleep(1);
+         until Connected or (TRNLTime.RelativeDifference(Instance.Time,StartTime)>=1500);
+        finally
+         Event.Free;
+        end;
+       finally
+        Peer.DecRef;
+       end;
+      end;
+
+      aVerdict:=Client.LastCertificateVerdict;
+      aCountAccepted:=Client.TotalAcceptedCertificates;
+      aCountRejected:=Client.TotalRejectedCertificates;
+      result:=Connected;
+
+     finally
+      FreeAndNil(Client);
+     end;
+
+    finally
+     FreeAndNil(Server);
+    end;
+
+   finally
+    FreeAndNil(VirtualNetwork);
+   end;
+  finally
+   FreeAndNil(Instance);
+  end;
+
+ end;
+
+ procedure CheckCase(const aWhat:TRNLRawByteString;
+                     const aIssueCertificate:boolean;
+                     const aValidFrom,aValidUntil:TRNLUInt32;
+                     const aSignedByOtherAuthority:boolean;
+                     const aCertificateSubject,aExpectedSubject:PRNLCertificateSubject;
+                     const aClientClockMinutes:TRNLUInt32;
+                     const aRequireCertificate:boolean;
+                     const aExpectConnected:boolean;
+                     const aExpectedVerdict:TRNLCertificateVerdict);
+ var Connected:boolean;
+     Verdict:TRNLCertificateVerdict;
+     Accepted,Rejected:TRNLUInt64;
+ begin
+  Connected:=Attempt(aIssueCertificate,aValidFrom,aValidUntil,aSignedByOtherAuthority,
+                     aCertificateSubject,aExpectedSubject,aClientClockMinutes,aRequireCertificate,
+                     Verdict,Accepted,Rejected);
+  Info(aWhat+': connected '+TRNLRawByteString(BoolToStr(Connected,true))+
+       ', verdict '+TRNLRawByteString(IntToStr(TRNLInt32(Verdict)))+
+       ', accepted '+TRNLRawByteString(IntToStr(Accepted))+
+       ', rejected '+TRNLRawByteString(IntToStr(Rejected)));
+  Check(Connected=aExpectConnected,
+        aWhat+': the connection has to '+TRNLRawByteString(BoolToStr(aExpectConnected,true))+' come up');
+  Check(Verdict=aExpectedVerdict,
+        aWhat+': and the verdict has to be '+TRNLRawByteString(IntToStr(TRNLInt32(aExpectedVerdict)))+
+        ' rather than '+TRNLRawByteString(IntToStr(TRNLInt32(Verdict))));
+ end;
+
+begin
+
+ TestBegin('a certificate is checked before the authentication token is handed over');
+ Watchdog:=TRNLTestWatchdog.Create('certificate',180000);
+ try
+
+  RandomGenerator:=TRNLRandomGenerator.Create;
+  try
+   TRNLED25519.GeneratePublicPrivateKeyPair(RandomGenerator,AuthorityPublicKey,AuthorityPrivateKey);
+   TRNLED25519.GeneratePublicPrivateKeyPair(RandomGenerator,OtherAuthorityPublicKey,OtherAuthorityPrivateKey);
+  finally
+   FreeAndNil(RandomGenerator);
+  end;
+
+  for Index:=0 to SizeOf(TRNLCertificateSubject)-1 do begin
+   ServerSubject[Index]:=TRNLUInt8($40+Index);
+   OtherSubject[Index]:=TRNLUInt8($80+Index);
+  end;
+
+  // The case everything else is a variation of: issued by the accepted authority, no time bounds at
+  // all, and the client asks for that very subject
+  CheckCase('a valid certificate for the expected subject',
+            true,0,0,false,nil,@ServerSubject,0,false,
+            true,RNL_CERTIFICATE_VERDICT_ACCEPTED);
+
+  // One thing wrong: the wrong authority signed it. Nothing else differs.
+  CheckCase('the same certificate from an authority the client does not accept',
+            true,0,0,true,nil,@ServerSubject,0,false,
+            false,RNL_CERTIFICATE_VERDICT_BAD_SIGNATURE);
+
+  // One thing wrong: it is for somebody else
+  CheckCase('a valid certificate for a different subject',
+            true,0,0,false,@OtherSubject,@ServerSubject,0,false,
+            false,RNL_CERTIFICATE_VERDICT_WRONG_SUBJECT);
+
+  // Time bounds, with a clock which says the window has passed
+  CheckCase('a certificate whose window has passed',
+            true,NOW_MINUTES-1000,NOW_MINUTES-500,false,nil,@ServerSubject,NOW_MINUTES,false,
+            false,RNL_CERTIFICATE_VERDICT_EXPIRED);
+
+  CheckCase('a certificate whose window has not started',
+            true,NOW_MINUTES+500,NOW_MINUTES+1000,false,nil,@ServerSubject,NOW_MINUTES,false,
+            false,RNL_CERTIFICATE_VERDICT_NOT_YET_VALID);
+
+  // The same certificate, inside its window
+  CheckCase('a certificate inside its window',
+            true,NOW_MINUTES-500,NOW_MINUTES+500,false,nil,@ServerSubject,NOW_MINUTES,false,
+            true,RNL_CERTIFICATE_VERDICT_ACCEPTED);
+
+  // A validity period and no clock to hold it against. Refused, because what cannot be checked cannot
+  // be vouched for - the tempting alternative of waving it through is what makes such a field
+  // decorative.
+  CheckCase('a certificate with a window against a client with no clock',
+            true,NOW_MINUTES-500,NOW_MINUTES+500,false,nil,@ServerSubject,0,false,
+            false,RNL_CERTIFICATE_VERDICT_NO_CLOCK);
+
+  // No certificate at all. Nothing asked for it, so nothing is missing.
+  CheckCase('no certificate and nobody asking for one',
+            false,0,0,false,nil,nil,0,false,
+            true,RNL_CERTIFICATE_VERDICT_ABSENT);
+
+  // No certificate, but the client insists on one
+  CheckCase('no certificate against a client which requires one',
+            false,0,0,false,nil,nil,0,true,
+            false,RNL_CERTIFICATE_VERDICT_ABSENT);
+
+  // No certificate, and the client named a subject it expects. That has to be a refusal as well, or
+  // the expectation could be satisfied by not presenting one at all.
+  CheckCase('no certificate against a client which expects a subject',
+            false,0,0,false,nil,@ServerSubject,0,false,
+            false,RNL_CERTIFICATE_VERDICT_ABSENT);
+
+ finally
+  FreeAndNil(Watchdog);
+  TestEnd;
+ end;
+
+end;
+
+// ---------------------------------------------------------------------------------------
 // Peer capacity
 // ---------------------------------------------------------------------------------------
 
@@ -7653,6 +7919,7 @@ begin
  TestTranscriptBindingCoversTheCleartextHandshakeFields;
  TestTranscriptBindingDowngrade;
  TestRemoteLongTermPublicKeyIsVisibleAndPinnable;
+ TestCertificateIsCheckedBeforeTheTokenIsHandedOver;
 
  // Socket level error classification
  TestSoftSendFailuresDoNotTerminateHost;

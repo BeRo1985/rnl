@@ -841,6 +841,21 @@ const RNL_PROTOCOL_VERSION_MAJOR=1;
       RNL_TURN_CHANNEL_IDLE_TIMEOUT=600000;
       RNL_TURN_CHANNEL_NUMBER_REUSE_DELAY=900000;
 
+      // The epoch the two validity fields of a certificate count minutes from: 1 January 2026,
+      // 00:00 UTC, as Unix seconds. Minutes rather than seconds because 32 bits of them reach
+      // 8166 years, which is range nobody will ever need, while a day would be too coarse for the
+      // one thing certificates are really good for here: short lived ones, issued per session by
+      // the same matchmaker that already hands out connection and authentication tokens.
+      //
+      // Zero means no bound, in either field. That sentinel is safe in both directions and for two
+      // different reasons: read literally, a zero ValidFrom means the epoch, which is in the past
+      // anyway and therefore the same thing as no lower bound; and a zero ValidUntil read literally
+      // would mean expired since the epoch, which is the refusing and therefore safe direction. A
+      // genuine zero cannot be produced by anything issued after the epoch, so the two readings can
+      // never be confused in practice.
+      RNL_CERTIFICATE_EPOCH_UNIX_SECONDS=TRNLUInt64(1767225600);
+      RNL_CERTIFICATE_SUBJECT_SIZE=32;
+
       // How long a request waits before it is sent again, and how often
       RNL_TURN_REQUEST_TIMEOUT=500;
       RNL_TURN_REQUEST_ATTEMPTS=5;
@@ -2427,6 +2442,87 @@ type PRNLVersion=^TRNLVersion;
       );
 
      PRNLProtocolHandshakePacketHeaderSignature=^TRNLProtocolHandshakePacketHeaderSignature;
+     // An opaque identity, which RNL never interprets: no notion of a host name, no wildcard match,
+     // no case folding, no parsing at all. The issuer puts whatever a deployment uses as an identity
+     // into it, and a client compares it byte for byte against what it expected. A name longer than
+     // this belongs in here as a hash of itself.
+     //
+     // That is deliberate rather than lazy. Every serious failure of X.509 name handling comes from
+     // the library trying to understand names, and there is nothing here for RNL to understand.
+     PRNLCertificateSubject=^TRNLCertificateSubject;
+     TRNLCertificateSubject=array[0..RNL_CERTIFICATE_SUBJECT_SIZE-1] of TRNLUInt8;
+
+     // One single stage certificate: no chain, no ASN.1, no revocation list.
+     //
+     // What it does not carry is the subject's public key, although that is what it vouches for. The
+     // key is already in the payload this sits in, as the long term public key which signed the
+     // handshake, and the issuer signature covers it from there. So there is no second copy which
+     // could disagree with the first one - a class of defect X.509 implementations have had more than
+     // once - and the record is 32 bytes shorter for it.
+     //
+     // All zero means no certificate. That is not a special case in a parser, it is simply what an
+     // unused fixed area looks like, and it is covered by the AEAD and by the transcript like every
+     // other byte, so an attacker cannot turn a certificate into its absence.
+     PRNLCertificate=^TRNLCertificate;
+     TRNLCertificate=packed record
+      Subject:TRNLCertificateSubject;
+      // Over Subject, the long term public key, ValidFromMinutes and ValidUntilMinutes, in that
+      // order, by the issuing authority
+      Signature:TRNLED25519Signature;
+      // Minutes since RNL_CERTIFICATE_EPOCH_UNIX_SECONDS, little endian. Zero means no bound.
+      ValidFromMinutes:TRNLUInt32;
+      ValidUntilMinutes:TRNLUInt32;
+     end;
+
+     // Why a certificate was not accepted. Worth telling apart rather than lumping together: a bad
+     // signature is an attack or a misconfiguration, an expired one is operations, and a missing
+     // clock is neither.
+     PRNLCertificateVerdict=^TRNLCertificateVerdict;
+     TRNLCertificateVerdict=
+      (
+       RNL_CERTIFICATE_VERDICT_ACCEPTED,
+       // The area was all zero, so there was nothing to accept or reject
+       RNL_CERTIFICATE_VERDICT_ABSENT,
+       // No issuer key this host accepts produced that signature
+       RNL_CERTIFICATE_VERDICT_BAD_SIGNATURE,
+       RNL_CERTIFICATE_VERDICT_NOT_YET_VALID,
+       RNL_CERTIFICATE_VERDICT_EXPIRED,
+       // It carries a validity period and this host has no wall clock to hold it against. Refused
+       // rather than waved through: what cannot be checked cannot be vouched for.
+       RNL_CERTIFICATE_VERDICT_NO_CLOCK,
+       // Signed by an accepted issuer, valid, and for somebody else
+       RNL_CERTIFICATE_VERDICT_WRONG_SUBJECT
+      );
+
+     // Making and checking one. Pure arithmetic over the record plus one signature, so it sits here
+     // and not on a host: issuing happens wherever the authority is, which is not in a game client.
+     PRNLCertificateUtils=^TRNLCertificateUtils;
+     TRNLCertificateUtils=record
+      public
+       // What the issuer signature is computed over. Assembled in one place so that signing and
+       // checking cannot drift apart, which is the usual way such a scheme breaks.
+       class procedure BuildSignedMessage(out aMessage;
+                                          const aSubject:TRNLCertificateSubject;
+                                          const aLongTermPublicKey:TRNLKey;
+                                          const aValidFromMinutes,aValidUntilMinutes:TRNLUInt32); static;
+       // Issues one. aValidFromMinutes and aValidUntilMinutes are minutes since
+       // RNL_CERTIFICATE_EPOCH_UNIX_SECONDS, zero for no bound.
+       class procedure Issue(out aCertificate:TRNLCertificate;
+                             const aSubject:TRNLCertificateSubject;
+                             const aLongTermPublicKey:TRNLKey;
+                             const aValidFromMinutes,aValidUntilMinutes:TRNLUInt32;
+                             const aAuthorityPrivateKey,aAuthorityPublicKey:TRNLKey); static;
+       class function IsAbsent(const aCertificate:TRNLCertificate):boolean; static;
+       // Whether that signature is one of the accepted authorities over that key and subject. Says
+       // nothing about validity in time, which the caller checks with the clock it has.
+       class function VerifySignature(const aCertificate:TRNLCertificate;
+                                      const aLongTermPublicKey:TRNLKey;
+                                      const aAuthorityPublicKeys:array of TRNLKey):boolean; static;
+       // Turns a Unix time in seconds into the minute count the fields use. Zero if it is before the
+       // epoch, which then reads as no clock rather than as a bound of its own.
+       class function MinutesFromUnixTime(const aUnixTimeSeconds:TRNLUInt64):TRNLUInt32; static;
+     end;
+
      TRNLProtocolHandshakePacketHeaderSignature=array[0..3] of TRNLUInt8;
 
      PRNLProtocolHandshakePacketType=^TRNLProtocolHandshakePacketType;
@@ -2517,6 +2613,10 @@ type PRNLVersion=^TRNLVersion;
       LongTermPublicKey:TRNLKey;
       Signature:TRNLED25519Signature;
       MTU:TRNLUInt16;
+      // Last, and that is a requirement rather than a habit: protocol version 1.0.0 has no certificate
+      // area, so the two layouts have to differ in a length and never in a field position. Anything
+      // added after this would have to be added to both.
+      Certificate:TRNLCertificate;
      end;
 
      PRNLProtocolHandshakePacketConnectionAuthenticationRequest=^TRNLProtocolHandshakePacketConnectionAuthenticationRequest;
@@ -2548,6 +2648,11 @@ type PRNLVersion=^TRNLVersion;
       CountChannels:TRNLUInt16;
       ChannelTypes:TRNLProtocolHandshakePacketPeerChannelTypes;
       Data:TRNLUInt64;
+      // Reserved and, for now, never anything but all zero: client certificates are not implemented.
+      // Reserved rather than left out, because leaving it out would make adding them later another
+      // protocol break, while reserving it costs no byte on the wire - the datagram is padded to 508
+      // either way, so only the padding shrinks. Last, for the same reason as above.
+      Certificate:TRNLCertificate;
      end;
 
      PRNLProtocolHandshakePacketConnectionAuthenticationResponse=^TRNLProtocolHandshakePacketConnectionAuthenticationResponse;
@@ -4333,6 +4438,17 @@ type PRNLVersion=^TRNLVersion;
        fExpectedRemoteLongTermPublicKey:TRNLKey;
        fHasExpectedRemoteLongTermPublicKey:boolean;
 
+       // The certificate the counter side presented, once it has been accepted. Absent for a 1.0.0
+       // handshake, which has no area for one, and for a counter side which simply has none.
+       fRemoteCertificate:TRNLCertificate;
+       fHasRemoteCertificate:boolean;
+
+       // What the application said it expects to find in that certificate. Naming one also makes an
+       // absent certificate a refusal, since otherwise the expectation could be met by not sending
+       // one at all.
+       fExpectedRemoteCertificateSubject:TRNLCertificateSubject;
+       fHasExpectedRemoteCertificateSubject:boolean;
+
 
        // Initiator only, and only in ALLOWED: the point in time at which offering the newer
        // protocol version is given up on, because a counter side which does not know it answers
@@ -4508,6 +4624,10 @@ type PRNLVersion=^TRNLVersion;
        // connection, whether or not anybody asked for it. Not published, because a record typed
        // property cannot be.
        property RemoteLongTermPublicKey:TRNLKey read fRemoteLongTermPublicKey;
+       // The accepted certificate of the counter side, and whether there is one. Not published,
+       // because a record typed property cannot be.
+       property RemoteCertificate:TRNLCertificate read fRemoteCertificate;
+       property HasRemoteCertificate:boolean read fHasRemoteCertificate;
       published
        property ReferenceCounter:TRNLUInt32 read fReferenceCounter write fReferenceCounter;
        property LocalPeerID:TRNLID read fLocalPeerID;
@@ -4697,6 +4817,28 @@ type PRNLVersion=^TRNLVersion;
        // address and the family logic of the work mode, which is what every host did before.
        fLocalAddresses:array of TRNLAddress;
 
+       // What this host presents as its own identity, if anything. All zero means none, and then
+       // nothing about the handshake changes beyond the area being all zero.
+       fCertificate:TRNLCertificate;
+       fHasCertificate:boolean;
+
+       // Which authorities this host accepts a certificate from. Several, so that rotating the
+       // authority itself is not a flag day.
+       fCertificateAuthorityPublicKeys:array of TRNLKey;
+
+       fRequireCertificate:boolean;
+
+       // Minutes since RNL_CERTIFICATE_EPOCH_UNIX_SECONDS, set by the application. Zero means this
+       // host has no wall clock, and a certificate which carries a validity period is then refused
+       // rather than waved through - what cannot be checked cannot be vouched for. Not read from the
+       // operating system on purpose: some deployments have a trusted time source of their own, some
+       // embedded targets have no clock at all, and a test wants to set it.
+       fCurrentTimeMinutes:TRNLUInt32;
+
+       fTotalAcceptedCertificates:TRNLUInt64;
+       fTotalRejectedCertificates:TRNLUInt64;
+       fLastCertificateVerdict:TRNLCertificateVerdict;
+
        fRelayHostAddresses:TRNLHostRelayAddresses;
 
        // On, a client of a declared relay is told apart by its relayed port and gets a bucket of its
@@ -4857,6 +4999,12 @@ type PRNLVersion=^TRNLVersion;
        procedure SetKeepAliveWindowSize(const aKeepAliveWindowSize:TRNLUInt32);
 
        // Which of this host's sockets serves that address family, or -1 if none does
+       // The length of an authentication payload, which is the one thing the certificate area changes
+       // about the wire. Protocol version 1.0.0 has no such area, 1.1.0 always has one - all zero when
+       // there is no certificate. Because the area is the last field, the two layouts differ in this
+       // number and in nothing else, so there is no branching over field positions anywhere.
+       class function AuthenticationRequestPayloadSize(const aWithCertificate:boolean):TRNLSizeUInt; static;
+       class function AuthenticationResponsePayloadSize(const aWithCertificate:boolean):TRNLSizeUInt; static;
        function FindSocketForAddressFamily(const aAddress:TRNLAddress):TRNLSizeInt;
        function SendPacket(const aAddress:TRNLAddress;const aData;const aDataLength:TRNLSizeUInt):TRNLNetworkSendResult;
        // Out of one named socket rather than out of whichever serves the family. Needed wherever the
@@ -4998,6 +5146,24 @@ type PRNLVersion=^TRNLVersion;
        //
        // A port of zero means the port this host is configured with, which is the usual case:
        // several addresses, same port.
+       // What this host presents as its own identity. Has to be issued by whoever runs the authority,
+       // through TRNLCertificateUtils.Issue, over this host's own long term public key.
+       //
+       // Requires the transcript binding to be anything but off, and Start refuses otherwise: protocol
+       // version 1.0.0 has no area to carry one, so a certificate with the binding off would be a
+       // guarantee that silently never applies.
+       procedure SetCertificate(const aCertificate:TRNLCertificate);
+       procedure ClearCertificate;
+       // An authority whose certificates this host accepts. Several may be added, which is what makes
+       // rotating an authority possible without a flag day.
+       procedure AddCertificateAuthorityPublicKey(const aKey:TRNLKey);
+       procedure ClearCertificateAuthorityPublicKeys;
+       // Checks one against the accepted authorities and against the clock. Public because the same
+       // question is worth asking outside a handshake, for instance about a certificate which arrived
+       // over the application's own signalling.
+       function VerifyCertificate(const aCertificate:TRNLCertificate;
+                                  const aLongTermPublicKey:TRNLKey;
+                                  const aExpectedSubject:PRNLCertificateSubject=nil):TRNLCertificateVerdict;
        procedure AddLocalAddress(const aAddress:TRNLAddress);
        procedure ClearLocalAddresses;
        procedure AddRelayHostAddress(const aHost:TRNLHostAddress);
@@ -5006,7 +5172,8 @@ type PRNLVersion=^TRNLVersion;
                                      const aData:TRNLUInt64=0;
                                      const aConnectionToken:PRNLConnectionToken=nil;
                                      const aAuthenticationToken:PRNLAuthenticationToken=nil;
-                                     const aExpectedRemoteLongTermPublicKey:PRNLKey=nil):TRNLPeer;
+                                     const aExpectedRemoteLongTermPublicKey:PRNLKey=nil;
+                                     const aExpectedRemoteCertificateSubject:PRNLCertificateSubject=nil):TRNLPeer;
        // Opens a local mapping towards every one of those addresses, without starting a connection.
        //
        // A restricting NAT only lets a datagram in from somewhere its inside has already written to,
@@ -5027,7 +5194,11 @@ type PRNLVersion=^TRNLVersion;
                         const aData:TRNLUInt64=0;
                         const aConnectionToken:PRNLConnectionToken=nil;
                         const aAuthenticationToken:PRNLAuthenticationToken=nil;
-                        const aExpectedRemoteLongTermPublicKey:PRNLKey=nil):TRNLPeer;
+                        const aExpectedRemoteLongTermPublicKey:PRNLKey=nil;
+                        // Names what the certificate of the counter side has to say about who it is. Naming one
+                        // also makes an absent certificate a refusal, since otherwise the expectation could be
+                        // met by not presenting one at all.
+                        const aExpectedRemoteCertificateSubject:PRNLCertificateSubject=nil):TRNLPeer;
        procedure BroadcastMessage(const aChannel:TRNLUInt8;const aMessage:TRNLMessage);
        procedure BroadcastMessageData(const aChannel:TRNLUInt8;const aData:TRNLPointer;const aDataLength:TRNLUInt32;const aFlags:TRNLMessageFlags=[]);
        procedure BroadcastMessageBytes(const aChannel:TRNLUInt8;const aBytes:TBytes;const aFlags:TRNLMessageFlags=[]); overload;
@@ -5156,6 +5327,17 @@ type PRNLVersion=^TRNLVersion;
        // How often a handshake was broken off because the counter side held a different long
        // term public key than the one Connect was told to expect
        property TotalRejectedRemoteLongTermPublicKeys:TRNLUInt64 read fTotalRejectedRemoteLongTermPublicKeys;
+       // Refuse a counter side which presents no certificate at all. Off by default, so that adding a
+       // certificate to one end does not lock out the other.
+       property RequireCertificate:boolean read fRequireCertificate write fRequireCertificate;
+       // Minutes since RNL_CERTIFICATE_EPOCH_UNIX_SECONDS. Zero means no clock, and then a certificate
+       // with a validity period is refused. TRNLCertificateUtils.MinutesFromUnixTime converts.
+       property CurrentTimeMinutes:TRNLUInt32 read fCurrentTimeMinutes write fCurrentTimeMinutes;
+       property HasCertificate:boolean read fHasCertificate;
+       property TotalAcceptedCertificates:TRNLUInt64 read fTotalAcceptedCertificates;
+       property TotalRejectedCertificates:TRNLUInt64 read fTotalRejectedCertificates;
+       // Why the last one was not accepted, which tells an attack from operations from a missing clock
+       property LastCertificateVerdict:TRNLCertificateVerdict read fLastCertificateVerdict;
        // How many connection requests the per address flooding limit turned away. Only requests
        // which would start a new handshake are counted, since repetitions of one already under way
        // are not subject to it.
@@ -19203,6 +19385,91 @@ begin
  end;
 end;
 
+class procedure TRNLCertificateUtils.BuildSignedMessage(out aMessage;
+                                                        const aSubject:TRNLCertificateSubject;
+                                                        const aLongTermPublicKey:TRNLKey;
+                                                        const aValidFromMinutes,aValidUntilMinutes:TRNLUInt32);
+var Data:PRNLUInt8Array;
+begin
+ Data:=@aMessage;
+ Move(aSubject[0],Data^[0],SizeOf(TRNLCertificateSubject));
+ Move(aLongTermPublicKey,Data^[SizeOf(TRNLCertificateSubject)],SizeOf(TRNLKey));
+ // Little endian, like every other multi byte field of this protocol
+ TRNLMemoryAccess.StoreLittleEndianUInt32(Data^[SizeOf(TRNLCertificateSubject)+SizeOf(TRNLKey)],
+                                          aValidFromMinutes);
+ TRNLMemoryAccess.StoreLittleEndianUInt32(Data^[SizeOf(TRNLCertificateSubject)+SizeOf(TRNLKey)+4],
+                                          aValidUntilMinutes);
+end;
+
+class procedure TRNLCertificateUtils.Issue(out aCertificate:TRNLCertificate;
+                                           const aSubject:TRNLCertificateSubject;
+                                           const aLongTermPublicKey:TRNLKey;
+                                           const aValidFromMinutes,aValidUntilMinutes:TRNLUInt32;
+                                           const aAuthorityPrivateKey,aAuthorityPublicKey:TRNLKey);
+var Message_:array[0..SizeOf(TRNLCertificateSubject)+SizeOf(TRNLKey)+7] of TRNLUInt8;
+begin
+ FillChar(aCertificate,SizeOf(TRNLCertificate),#0);
+ aCertificate.Subject:=aSubject;
+ aCertificate.ValidFromMinutes:=TRNLEndianness.HostToLittleEndian32(aValidFromMinutes);
+ aCertificate.ValidUntilMinutes:=TRNLEndianness.HostToLittleEndian32(aValidUntilMinutes);
+ BuildSignedMessage(Message_,aSubject,aLongTermPublicKey,aValidFromMinutes,aValidUntilMinutes);
+ TRNLED25519.Sign(aCertificate.Signature,
+                  aAuthorityPrivateKey,
+                  aAuthorityPublicKey,
+                  Message_,
+                  SizeOf(Message_));
+end;
+
+class function TRNLCertificateUtils.IsAbsent(const aCertificate:TRNLCertificate):boolean;
+var Index:TRNLSizeInt;
+    Data:PRNLUInt8Array;
+begin
+ // All zero and nothing else counts as absent, so a certificate cannot be made to disappear by
+ // clearing part of it
+ result:=true;
+ Data:=@aCertificate;
+ for Index:=0 to SizeOf(TRNLCertificate)-1 do begin
+  if Data^[Index]<>0 then begin
+   result:=false;
+   exit;
+  end;
+ end;
+end;
+
+class function TRNLCertificateUtils.VerifySignature(const aCertificate:TRNLCertificate;
+                                                    const aLongTermPublicKey:TRNLKey;
+                                                    const aAuthorityPublicKeys:array of TRNLKey):boolean;
+var Message_:array[0..SizeOf(TRNLCertificateSubject)+SizeOf(TRNLKey)+7] of TRNLUInt8;
+    Index:TRNLSizeInt;
+begin
+ result:=false;
+ BuildSignedMessage(Message_,
+                    aCertificate.Subject,
+                    aLongTermPublicKey,
+                    TRNLEndianness.LittleEndianToHost32(aCertificate.ValidFromMinutes),
+                    TRNLEndianness.LittleEndianToHost32(aCertificate.ValidUntilMinutes));
+ // Any of the accepted authorities will do, which is what makes rotating the authority itself
+ // something other than a flag day
+ for Index:=Low(aAuthorityPublicKeys) to High(aAuthorityPublicKeys) do begin
+  if TRNLED25519.Verify(aCertificate.Signature,
+                        aAuthorityPublicKeys[Index],
+                        Message_,
+                        SizeOf(Message_)) then begin
+   result:=true;
+   exit;
+  end;
+ end;
+end;
+
+class function TRNLCertificateUtils.MinutesFromUnixTime(const aUnixTimeSeconds:TRNLUInt64):TRNLUInt32;
+begin
+ if aUnixTimeSeconds<=RNL_CERTIFICATE_EPOCH_UNIX_SECONDS then begin
+  result:=0;
+ end else begin
+  result:=TRNLUInt32((aUnixTimeSeconds-RNL_CERTIFICATE_EPOCH_UNIX_SECONDS) div 60);
+ end;
+end;
+
 class function TRNLCandidateUtils.TypePreference(const aKind:TRNLCandidateKind):TRNLUInt32;
 begin
  case aKind of
@@ -27582,6 +27849,11 @@ begin
 
  fHasExpectedRemoteLongTermPublicKey:=false;
 
+ FillChar(fRemoteCertificate,SizeOf(TRNLCertificate),#0);
+ fHasRemoteCertificate:=false;
+ FillChar(fExpectedRemoteCertificateSubject,SizeOf(TRNLCertificateSubject),#0);
+ fHasExpectedRemoteCertificateSubject:=false;
+
  fConnectionToken:=nil;
 
  fAuthenticationToken:=nil;
@@ -29680,6 +29952,15 @@ begin
 
  fTotalTimedOutSTUNQueries:=0;
 
+ FillChar(fCertificate,SizeOf(TRNLCertificate),#0);
+ fHasCertificate:=false;
+ fCertificateAuthorityPublicKeys:=nil;
+ fRequireCertificate:=false;
+ fCurrentTimeMinutes:=0;
+ fTotalAcceptedCertificates:=0;
+ fTotalRejectedCertificates:=0;
+ fLastCertificateVerdict:=RNL_CERTIFICATE_VERDICT_ABSENT;
+
  fLocalAddresses:=nil;
 
  fRelayHostAddresses:=nil;
@@ -29981,6 +30262,22 @@ begin
  fKeepAliveWindowMask:=fKeepAliveWindowSize-1;
 end;
 
+class function TRNLHost.AuthenticationRequestPayloadSize(const aWithCertificate:boolean):TRNLSizeUInt;
+begin
+ result:=SizeOf(TTRNLProtocolHandshakePacketConnectionAuthenticationRequestPayload);
+ if not aWithCertificate then begin
+  dec(result,SizeOf(TRNLCertificate));
+ end;
+end;
+
+class function TRNLHost.AuthenticationResponsePayloadSize(const aWithCertificate:boolean):TRNLSizeUInt;
+begin
+ result:=SizeOf(TRNLProtocolHandshakePacketConnectionAuthenticationResponsePayload);
+ if not aWithCertificate then begin
+  dec(result,SizeOf(TRNLCertificate));
+ end;
+end;
+
 function TRNLHost.FindSocketForAddressFamily(const aAddress:TRNLAddress):TRNLSizeInt;
 var Index:TRNLSizeInt;
     Family:TRNLInt64;
@@ -30218,6 +30515,14 @@ begin
   Families:=Families and fAddress.GetAddressFamily;
  end;
 
+ // A certificate can only travel in a payload which has an area for it, and protocol version 1.0.0
+ // has none. Refused here rather than at the first handshake, because a guarantee which silently
+ // never applies is worse than one which is refused out loud.
+ if (fHasCertificate or fRequireCertificate) and
+    (fTranscriptBindingMode=RNL_PROTOCOL_TRANSCRIPT_BINDING_OFF) then begin
+  raise ERNLHost.Create('A certificate needs the transcript binding to be allowed or required');
+ end;
+
  fSockets:=nil;
 
  // With local addresses named, one socket per named address and nothing else: the whole point of
@@ -30351,7 +30656,8 @@ function TRNLHost.Connect(const aAddress:TRNLAddress;
                           const aData:TRNLUInt64=0;
                           const aConnectionToken:PRNLConnectionToken=nil;
                           const aAuthenticationToken:PRNLAuthenticationToken=nil;
-                          const aExpectedRemoteLongTermPublicKey:PRNLKey=nil):TRNLPeer;
+                          const aExpectedRemoteLongTermPublicKey:PRNLKey=nil;
+                          const aExpectedRemoteCertificateSubject:PRNLCertificateSubject=nil):TRNLPeer;
 var Index:TRNLInt32;
 //    Channel:TRNLChannel;
 begin
@@ -30433,6 +30739,11 @@ begin
  result.fProtocolFallbackPending:=fTranscriptBindingMode=RNL_PROTOCOL_TRANSCRIPT_BINDING_ALLOWED;
  if result.fProtocolFallbackPending then begin
   result.fProtocolFallbackTimeout:=fTime+fPendingConnectionProtocolFallbackTimeout;
+ end;
+
+ result.fHasExpectedRemoteCertificateSubject:=assigned(aExpectedRemoteCertificateSubject);
+ if result.fHasExpectedRemoteCertificateSubject then begin
+  result.fExpectedRemoteCertificateSubject:=aExpectedRemoteCertificateSubject^;
  end;
 
  result.fHasExpectedRemoteLongTermPublicKey:=assigned(aExpectedRemoteLongTermPublicKey);
@@ -30780,7 +31091,8 @@ function TRNLHost.ConnectViaCandidates(const aRemoteCandidates:TRNLCandidates;
                                        const aData:TRNLUInt64=0;
                                        const aConnectionToken:PRNLConnectionToken=nil;
                                        const aAuthenticationToken:PRNLAuthenticationToken=nil;
-                                       const aExpectedRemoteLongTermPublicKey:PRNLKey=nil):TRNLPeer;
+                                       const aExpectedRemoteLongTermPublicKey:PRNLKey=nil;
+                                       const aExpectedRemoteCertificateSubject:PRNLCertificateSubject=nil):TRNLPeer;
 var Sorted:TRNLCandidates;
     Index,Count:TRNLSizeInt;
 begin
@@ -30804,7 +31116,8 @@ begin
                  aData,
                  aConnectionToken,
                  aAuthenticationToken,
-                 aExpectedRemoteLongTermPublicKey);
+                 aExpectedRemoteLongTermPublicKey,
+                 aExpectedRemoteCertificateSubject);
 
  if not assigned(result) then begin
   exit;
@@ -31039,6 +31352,85 @@ begin
   exit;
 
  end;
+
+end;
+
+procedure TRNLHost.SetCertificate(const aCertificate:TRNLCertificate);
+begin
+ fCertificate:=aCertificate;
+ fHasCertificate:=not TRNLCertificateUtils.IsAbsent(aCertificate);
+end;
+
+procedure TRNLHost.ClearCertificate;
+begin
+ FillChar(fCertificate,SizeOf(TRNLCertificate),#0);
+ fHasCertificate:=false;
+end;
+
+procedure TRNLHost.AddCertificateAuthorityPublicKey(const aKey:TRNLKey);
+var Index,Count:TRNLSizeInt;
+begin
+ for Index:=0 to length(fCertificateAuthorityPublicKeys)-1 do begin
+  if TRNLMemory.SecureIsEqual(fCertificateAuthorityPublicKeys[Index],aKey,SizeOf(TRNLKey)) then begin
+   exit;
+  end;
+ end;
+ Count:=length(fCertificateAuthorityPublicKeys);
+ SetLength(fCertificateAuthorityPublicKeys,Count+1);
+ fCertificateAuthorityPublicKeys[Count]:=aKey;
+end;
+
+procedure TRNLHost.ClearCertificateAuthorityPublicKeys;
+begin
+ fCertificateAuthorityPublicKeys:=nil;
+end;
+
+function TRNLHost.VerifyCertificate(const aCertificate:TRNLCertificate;
+                                    const aLongTermPublicKey:TRNLKey;
+                                    const aExpectedSubject:PRNLCertificateSubject=nil):TRNLCertificateVerdict;
+var ValidFrom,ValidUntil:TRNLUInt32;
+begin
+
+ if TRNLCertificateUtils.IsAbsent(aCertificate) then begin
+  result:=RNL_CERTIFICATE_VERDICT_ABSENT;
+  exit;
+ end;
+
+ // The signature first, because everything after it is only meaningful if the authority really said
+ // it. In particular the validity period is part of what is signed, so reading it before checking
+ // the signature would be reading a number an attacker chose.
+ if not TRNLCertificateUtils.VerifySignature(aCertificate,
+                                             aLongTermPublicKey,
+                                             fCertificateAuthorityPublicKeys) then begin
+  result:=RNL_CERTIFICATE_VERDICT_BAD_SIGNATURE;
+  exit;
+ end;
+
+ ValidFrom:=TRNLEndianness.LittleEndianToHost32(aCertificate.ValidFromMinutes);
+ ValidUntil:=TRNLEndianness.LittleEndianToHost32(aCertificate.ValidUntilMinutes);
+
+ if (ValidFrom<>0) or (ValidUntil<>0) then begin
+  if fCurrentTimeMinutes=0 then begin
+   result:=RNL_CERTIFICATE_VERDICT_NO_CLOCK;
+   exit;
+  end;
+  if (ValidFrom<>0) and (fCurrentTimeMinutes<ValidFrom) then begin
+   result:=RNL_CERTIFICATE_VERDICT_NOT_YET_VALID;
+   exit;
+  end;
+  if (ValidUntil<>0) and (fCurrentTimeMinutes>ValidUntil) then begin
+   result:=RNL_CERTIFICATE_VERDICT_EXPIRED;
+   exit;
+  end;
+ end;
+
+ if assigned(aExpectedSubject) and
+    TRNLMemory.SecureIsNotEqual(aCertificate.Subject,aExpectedSubject^,SizeOf(TRNLCertificateSubject)) then begin
+  result:=RNL_CERTIFICATE_VERDICT_WRONG_SUBJECT;
+  exit;
+ end;
+
+ result:=RNL_CERTIFICATE_VERDICT_ACCEPTED;
 
 end;
 
@@ -31863,6 +32255,14 @@ begin
   PRNLUInt64Array(TRNLPointer(@Nonce))^[1]:=TRNLEndianness.HostToLittleEndian64(ConnectionCandidate^.fRemoteSalt);
   PRNLUInt64Array(TRNLPointer(@Nonce))^[2]:=TRNLEndianness.HostToLittleEndian64(ConnectionCandidate^.fLocalSalt);
 
+  // Explicitly, both when there is one and when there is not: a handshake packet is not zero filled,
+  // its padding is whatever the stack held, so an unset area would travel as authenticated rubbish
+  if fHasCertificate then begin
+   OutgoingPacket.ConnectionAuthenticationRequest.Payload.Certificate:=fCertificate;
+  end else begin
+   FillChar(OutgoingPacket.ConnectionAuthenticationRequest.Payload.Certificate,SizeOf(TRNLCertificate),#0);
+  end;
+
   if not TRNLAuthenticatedEncryption.Encrypt(OutgoingPacket.ConnectionAuthenticationRequest.Payload,
                                              ConnectionCandidate^.fData^.fSharedSecretKey,
                                              Nonce,
@@ -31870,7 +32270,7 @@ begin
                                              ConnectionCandidate^.fData^.fSolvedChallenge,
                                              SizeOf(TRNLConnectionChallenge),
                                              OutgoingPacket.ConnectionAuthenticationRequest.Payload,
-                                             SizeOf(TTRNLProtocolHandshakePacketConnectionAuthenticationRequestPayload)) then begin
+                                             AuthenticationRequestPayloadSize(ConnectionCandidate^.fData^.fTranscriptBinding)) then begin
    exit;
   end;
 
@@ -31894,6 +32294,7 @@ var Index:TRNLInt32;
     Nonce:TRNLCipherNonce;
     TwoKeys:TRNLTwoKeys;
     TranscriptHash:TRNLProtocolTranscriptHash;
+    CertificateVerdict:TRNLCertificateVerdict;
 begin
 
 {$if defined(RNL_DEBUG) and defined(RNL_DEBUG_SECURITY)}
@@ -31950,7 +32351,7 @@ begin
                                             Peer.fConnectionChallengeResponse^,
                                             SizeOf(TRNLConnectionChallenge),
                                             aIncomingPacket^.Payload,
-                                            SizeOf(TTRNLProtocolHandshakePacketConnectionAuthenticationRequestPayload)) then begin
+                                            AuthenticationRequestPayloadSize(Peer.fTranscriptBinding)) then begin
   exit;
  end;
 
@@ -31987,6 +32388,49 @@ begin
                                 SizeOf(TRNLKey)) then begin
   inc(fTotalRejectedRemoteLongTermPublicKeys);
   exit;
+ end;
+
+ // The certificate of the counter side, and this is the point in the handshake where it matters: this
+ // packet carries the server's identity, and the answer to it carries the client's authentication
+ // token. Checking here means the token is only ever handed to a server which has proved who it is,
+ // which is exactly the hole a bearer token leaves open otherwise.
+ //
+ // A 1.0.0 handshake has no area at all, so there is nothing to look at and nothing to hold against
+ // the counter side unless the application asked for one.
+ if Peer.fTranscriptBinding then begin
+  if Peer.fHasExpectedRemoteCertificateSubject then begin
+   CertificateVerdict:=VerifyCertificate(aIncomingPacket^.Payload.Certificate,
+                                         Peer.fRemoteLongTermPublicKey,
+                                         @Peer.fExpectedRemoteCertificateSubject);
+  end else begin
+   CertificateVerdict:=VerifyCertificate(aIncomingPacket^.Payload.Certificate,
+                                         Peer.fRemoteLongTermPublicKey,
+                                         nil);
+  end;
+ end else begin
+  CertificateVerdict:=RNL_CERTIFICATE_VERDICT_ABSENT;
+ end;
+
+ fLastCertificateVerdict:=CertificateVerdict;
+
+ case CertificateVerdict of
+  RNL_CERTIFICATE_VERDICT_ACCEPTED:begin
+   Peer.fRemoteCertificate:=aIncomingPacket^.Payload.Certificate;
+   Peer.fHasRemoteCertificate:=true;
+   inc(fTotalAcceptedCertificates);
+  end;
+  RNL_CERTIFICATE_VERDICT_ABSENT:begin
+   // Naming a subject to expect makes an absent certificate a refusal as well, or the expectation
+   // could be satisfied by simply not sending one
+   if fRequireCertificate or Peer.fHasExpectedRemoteCertificateSubject then begin
+    inc(fTotalRejectedCertificates);
+    exit;
+   end;
+  end;
+  else begin
+   inc(fTotalRejectedCertificates);
+   exit;
+  end;
  end;
 
  Peer.fRemoteMTU:=TRNLEndianness.LittleEndianToHost16(aIncomingPacket^.Payload.MTU);
@@ -32044,6 +32488,11 @@ begin
 
  Peer.fPendingConnectionHandshakeSendData.fHandshakePacket.ConnectionAuthenticationResponse.Payload.Data:=TRNLEndianness.HostToLittleEndian64(Peer.fConnectionData);
 
+ // Reserved and unused: client certificates are not implemented, and the area is cleared rather than
+ // left alone for the same reason as above
+ FillChar(Peer.fPendingConnectionHandshakeSendData.fHandshakePacket.ConnectionAuthenticationResponse.Payload.Certificate,
+          SizeOf(TRNLCertificate),#0);
+
  if not TRNLAuthenticatedEncryption.Encrypt(Peer.fPendingConnectionHandshakeSendData.fHandshakePacket.ConnectionAuthenticationResponse.Payload,
                                             Peer.fSharedSecretKey,
                                             Nonce,
@@ -32051,7 +32500,7 @@ begin
                                             Peer.fConnectionChallengeResponse^,
                                             SizeOf(TRNLConnectionChallenge),
                                             Peer.fPendingConnectionHandshakeSendData.fHandshakePacket.ConnectionAuthenticationResponse.Payload,
-                                            SizeOf(TRNLProtocolHandshakePacketConnectionAuthenticationResponsePayload)
+                                            AuthenticationResponsePayloadSize(Peer.fTranscriptBinding)
                                            ) then begin
   exit;
  end;
@@ -32292,7 +32741,7 @@ begin
                                              ConnectionCandidate^.fData^.fSolvedChallenge,
                                              SizeOf(TRNLConnectionChallenge),
                                              aIncomingPacket^.Payload,
-                                             SizeOf(TRNLProtocolHandshakePacketConnectionAuthenticationResponsePayload)) then begin
+                                             AuthenticationResponsePayloadSize(ConnectionCandidate^.fData^.fTranscriptBinding)) then begin
    Authorized:=false;
   end;
 
