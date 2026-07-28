@@ -7875,6 +7875,193 @@ begin
 
 end;
 
+// Asks the discovery server once and returns what its answer carried as metadata. Built by hand and
+// sent as a unicast rather than through TRNLDiscoveryClient, because that one browses by multicast and
+// TRNLVirtualNetwork delivers to exactly one matching address - it has no broadcast at all. The server
+// binds to RNL_HOST_ANY, which the virtual network maps to 127.0.0.1, so it is reachable directly and
+// the whole answer path including the metadata is still the real one
+function AskDiscoveryServer(const aNetwork:TRNLNetwork;
+                            const aInstance:TRNLInstance;
+                            const aServerPort:TRNLUInt16;
+                            const aServiceID:TRNLDiscoveryServiceID;
+                            const aClientPort:TRNLUInt16;
+                            out aMeta:TRNLDiscoveryMeta):boolean;
+const TIMEOUT_MILLISECONDS=2000;
+      // Spelled out rather than taken from RNL, and not only because they live in its implementation
+      // section: a test which reuses the constant it is checking against would stay green if that
+      // constant changed, and these eight bytes are part of a format other implementations match
+      REQUEST_SIGNATURE:TRNLDiscoverySignature='RNLDR';
+      ANSWER_SIGNATURE:TRNLDiscoverySignature='RNLDA';
+var Socket:TRNLSocket;
+    ClientAddress,ServerAddress,FromAddress:TRNLAddress;
+    Request:TRNLDiscoveryRequestPacket;
+    Answer:TRNLDiscoveryAnswerPacket;
+    Deadline:TRNLTime;
+    Received:TRNLSizeInt;
+begin
+
+ result:=false;
+ aMeta:='';
+
+ Socket:=aNetwork.SocketCreate(RNL_SOCKET_TYPE_DATAGRAM,RNL_IPV4);
+ if Socket=RNL_SOCKET_NULL then begin
+  exit;
+ end;
+ try
+
+  aNetwork.AddressSetHost(ClientAddress,'127.0.0.1');
+  ClientAddress.Port:=aClientPort;
+  if not aNetwork.SocketBind(Socket,@ClientAddress,RNL_IPV4) then begin
+   exit;
+  end;
+
+  aNetwork.AddressSetHost(ServerAddress,'127.0.0.1');
+  ServerAddress.Port:=aServerPort;
+
+  FillChar(Request,SizeOf(Request),#0);
+  Request.Signature:=REQUEST_SIGNATURE;
+  Request.ServiceID:=aServiceID;
+  Request.ClientVersion:=TRNLEndianness.HostToLittleEndian32(1);
+  Request.ClientHost:=ClientAddress.Host;
+  Request.ClientPort:=TRNLEndianness.HostToLittleEndian16(aClientPort);
+  Request.Meta:='';
+
+  if aNetwork.Send(Socket,@ServerAddress,Request,SizeOf(Request),RNL_IPV4)<>SizeOf(Request) then begin
+   exit;
+  end;
+
+  Deadline:=aInstance.Time+TIMEOUT_MILLISECONDS;
+  while aInstance.Time<Deadline do begin
+   FillChar(Answer,SizeOf(Answer),#0);
+   Received:=aNetwork.Receive(Socket,@FromAddress,Answer,SizeOf(Answer),RNL_IPV4);
+   if (Received=SizeOf(Answer)) and
+      (Answer.Signature=ANSWER_SIGNATURE) and
+      (Answer.ServiceID=aServiceID) then begin
+    aMeta:=Answer.Meta;
+    result:=true;
+    exit;
+   end;
+   Sleep(1);
+  end;
+
+ finally
+  aNetwork.SocketDestroy(Socket);
+ end;
+
+end;
+
+procedure TestDiscoveryMetadataCanBeChangedWhileRunning;
+const SERVER_PORT=18320;
+      FIRST_CLIENT_PORT=18321;
+      SECOND_CLIENT_PORT=18322;
+      THIRD_CLIENT_PORT=18323;
+      LOBBY_SERVICE_ID:TRNLRawByteString='LOBBY!';
+      ERSTE_MELDUNG='seats 1/8, mode race';
+      ZWEITE_MELDUNG='seats 4/8, mode race, track harbour';
+var Instance:TRNLInstance;
+    Network:TRNLVirtualNetwork;
+    Server:TRNLDiscoveryServer;
+    ServiceAddressIPv4,ServiceAddressIPv6:TRNLAddress;
+    ServiceID:TRNLDiscoveryServiceID;
+    Meta:TRNLDiscoveryMeta;
+    Index:TRNLSizeInt;
+    Watchdog:TRNLTestWatchdog;
+begin
+
+ TestBegin('the metadata of a running discovery server can be changed');
+ Watchdog:=TRNLTestWatchdog.Create('discovery metadata',60000);
+ try
+
+  Instance:=TRNLInstance.Create;
+  try
+   Network:=TRNLVirtualNetwork.Create(Instance);
+   try
+
+    // The service id is a fixed field of characters and carries no length of its own, so the name goes
+    // in at the front and everything behind it stays zero - which is what the counter side compares
+    // against. Asserted rather than clamped, because a name which does not fit is a mistake here and
+    // not a case to handle at run time
+    Assert(length(LOBBY_SERVICE_ID)<=SizeOf(ServiceID));
+    FillChar(ServiceID,SizeOf(ServiceID),#0);
+    Move(LOBBY_SERVICE_ID[1],ServiceID[0],length(LOBBY_SERVICE_ID));
+
+    Network.AddressSetHost(ServiceAddressIPv4,'127.0.0.1');
+    ServiceAddressIPv4.Port:=SERVER_PORT;
+    ServiceAddressIPv6:=RNL_ADDRESS_NONE;
+
+    // IPv4 only: the virtual network maps every RNL_HOST_ANY bind to 127.0.0.1, so a second socket
+    // would want the very same address and could not come up beside the first one
+    Server:=TRNLDiscoveryServer.Create(Instance,
+                                       Network,
+                                       SERVER_PORT,
+                                       ServiceID,
+                                       1,
+                                       ServiceAddressIPv4,
+                                       ServiceAddressIPv6,
+                                       [RNL_DISCOVERY_SERVER_FLAG_IPV4],
+                                       nil,
+                                       ERSTE_MELDUNG);
+    try
+
+     if not Check(AskDiscoveryServer(Network,Instance,SERVER_PORT,ServiceID,FIRST_CLIENT_PORT,Meta),
+                  'the discovery server has to answer a browse request at all') then begin
+      exit;
+     end;
+
+     Info('first answer: "'+TRNLRawByteString(Meta)+'"');
+
+     CheckEqualsRawByteString(TRNLRawByteString(Meta),ERSTE_MELDUNG,
+                              'and it carries what the constructor was given');
+
+     // The point of the whole exercise: a lobby fills up, and the browse list has to show it without
+     // the discovery thread being torn down and set up again
+     Server.Meta:=ZWEITE_MELDUNG;
+
+     CheckEqualsRawByteString(TRNLRawByteString(Server.Meta),ZWEITE_MELDUNG,
+                              'reading it back gives what was just written');
+
+     if not Check(AskDiscoveryServer(Network,Instance,SERVER_PORT,ServiceID,SECOND_CLIENT_PORT,Meta),
+                  'and the server still answers afterwards') then begin
+      exit;
+     end;
+
+     Info('second answer: "'+TRNLRawByteString(Meta)+'"');
+
+     // Read fresh per answer, so the very next request already carries it - no restart, no delay of
+     // one interval, and nothing cached from when the thread was started
+     CheckEqualsRawByteString(TRNLRawByteString(Meta),ZWEITE_MELDUNG,
+                              'and the next browse answer carries the new value');
+
+     // An empty one has to work as well, since a lobby which is no longer taking anybody may want to
+     // say nothing rather than something stale
+     Server.Meta:='';
+
+     if not Check(AskDiscoveryServer(Network,Instance,SERVER_PORT,ServiceID,THIRD_CLIENT_PORT,Meta),
+                  'and it answers with an empty metadata as well') then begin
+      exit;
+     end;
+
+     CheckEqualsInt64(length(Meta),0,
+                      'which then arrives as empty rather than as the previous value');
+
+    finally
+     FreeAndNil(Server);
+    end;
+
+   finally
+    FreeAndNil(Network);
+   end;
+  finally
+   FreeAndNil(Instance);
+  end;
+
+ finally
+  FreeAndNil(Watchdog);
+  TestEnd;
+ end;
+
+end;
+
 procedure TestHostBandwidthIsDividedAmongItsPeers;
 const OUTGOING_BANDWIDTH_LIMIT_BITS=240000;      // 30000 bytes per second for the whole host
       COUNT_CLIENTS=3;
@@ -8988,6 +9175,9 @@ begin
 
  // Several peers on one host, sharing its uplink instead of racing for it
  TestHostBandwidthIsDividedAmongItsPeers;
+
+ // A LAN lobby which fills up while it is being advertised
+ TestDiscoveryMetadataCanBeChangedWhileRunning;
 
  // MTU probing
  TestMTUProbingTerminatesAndReportsAMTU;

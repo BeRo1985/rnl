@@ -6193,10 +6193,20 @@ type PRNLVersion=^TRNLVersion;
        fFlags:TRNLDiscoveryServerFlags;
        fOnAccept:TRNLDiscoveryServerOnAccept;
        fMeta:TRNLDiscoveryMeta;
+       // Guards fMeta alone, because that is the one field which the application may change while the
+       // thread is running. A String[255] is fixed storage without a heap allocation and without
+       // reference counting, so a torn read could not free anything and could not crash - but the
+       // length byte and the characters could briefly disagree, and one browse answer would then carry
+       // visible nonsense. A lock is the honest answer here rather than a comment about the risk: a
+       // discovery answer is only produced when somebody is actually browsing, so this is a lock which
+       // is taken a handful of times per lobby and never in a hot path
+       fMetaLock:TCriticalSection;
        fSockets:TRNLDualStackSockets;
        fActiveSockets:TRNLSocketArray;
        fEvent:TRNLNetworkEvent;
        fRecvData:array[0..$ffff] of TRNLUInt8;
+       function GetMeta:TRNLDiscoveryMeta;
+       procedure SetMeta(const aMeta:TRNLDiscoveryMeta);
       protected
        procedure Execute; override;
       public
@@ -6221,6 +6231,13 @@ type PRNLVersion=^TRNLVersion;
        property ServiceAddressIPv4:TRNLAddress read fServiceAddressIPv4;
        property ServiceAddressIPv6:TRNLAddress read fServiceAddressIPv6;
        property Flags:TRNLDiscoveryServerFlags read fFlags;
+       // What a browse answer carries besides the address, and the one thing here which may be changed
+       // while the server is running. A LAN lobby puts into it what changes while people are waiting -
+       // seats taken and free, the chosen mode, the chosen track - and without a way to write it, the
+       // whole thread would have to be torn down and set up again on every single join.
+       //
+       // Read fresh for every answer, so the next browse request already sees the new value.
+       property Meta:TRNLDiscoveryMeta read GetMeta write SetMeta;
      end;
 
      TRNLDiscoveryService=record
@@ -34587,6 +34604,9 @@ begin
  fFlags:=aFlags;
  fOnAccept:=aOnAccept;
  fMeta:=aMeta;
+ // Before inherited Create, which starts the thread with its CreateSuspended of false and therefore
+ // has Execute reading fMeta before the next statement here would have run
+ fMetaLock:=TCriticalSection.Create;
  fSockets[0]:=RNL_SOCKET_NULL;
  fSockets[1]:=RNL_SOCKET_NULL;
  fActiveSockets:=nil;
@@ -34596,10 +34616,32 @@ end;
 
 destructor TRNLDiscoveryServer.Destroy;
 begin
+ // Shutdown first, so that the thread is finished before the lock it reads under goes away
  Shutdown;
  fActiveSockets:=nil;
  FreeAndNil(fEvent);
+ FreeAndNil(fMetaLock);
  inherited Destroy;
+end;
+
+function TRNLDiscoveryServer.GetMeta:TRNLDiscoveryMeta;
+begin
+ fMetaLock.Acquire;
+ try
+  result:=fMeta;
+ finally
+  fMetaLock.Release;
+ end;
+end;
+
+procedure TRNLDiscoveryServer.SetMeta(const aMeta:TRNLDiscoveryMeta);
+begin
+ fMetaLock.Acquire;
+ try
+  fMeta:=aMeta;
+ finally
+  fMetaLock.Release;
+ end;
 end;
 
 procedure TRNLDiscoveryServer.Shutdown;
@@ -34717,7 +34759,9 @@ begin
            DiscoveryAnswerPacket.ServerHost:=fServiceAddressIPv6.Host;
            DiscoveryAnswerPacket.ServerPort:=TRNLEndianness.HostToLittleEndian16(fServiceAddressIPv6.Port);
           end;
-          DiscoveryAnswerPacket.Meta:=fMeta;
+          // Through the getter, so that an application changing it right now is either fully seen or
+          // not seen at all
+          DiscoveryAnswerPacket.Meta:=GetMeta;
 
           ClientAddress.Port:=DiscoveryRequestPacket^.ClientPort;
 
