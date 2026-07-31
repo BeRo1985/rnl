@@ -177,6 +177,10 @@ are the typical case for egoshooters, racing games, and so forth. Or in other wo
      delay above it, delivery rate, and loss per flight
    - Delayed rather than dropped enforcement of an outgoing bandwidth limit, and an optional age
      bound after which unreliable data is discarded on the way out instead of delivered stale
+   - LAN service discovery, as a server which answers browse requests and a client which sends them.
+     Each answer carries up to 255 bytes of metadata which the application chooses, and that metadata
+     is writable while the server is running: a lobby which fills up publishes its new seat count to
+     the next browse request without the discovery thread being torn down and set up again
    - The outgoing bandwidth limit of a host is divided among its peers by a per peer weight instead
      of being a single budget which whoever is dispatched first empties. The order in which peers are
      dispatched rotates as well, since a share nobody can reach is not a share

@@ -7885,8 +7885,10 @@ function AskDiscoveryServer(const aNetwork:TRNLNetwork;
                             const aServerPort:TRNLUInt16;
                             const aServiceID:TRNLDiscoveryServiceID;
                             const aClientPort:TRNLUInt16;
-                            out aMeta:TRNLDiscoveryMeta):boolean;
-const TIMEOUT_MILLISECONDS=2000;
+                            out aMeta:TRNLDiscoveryMeta;
+                            out aStep:TRNLRawByteString):boolean;
+const TIMEOUT_MILLISECONDS=3000;
+      RETRY_MILLISECONDS=50;
       // Spelled out rather than taken from RNL, and not only because they live in its implementation
       // section: a test which reuses the constant it is checking against would stay green if that
       // constant changed, and these eight bytes are part of a format other implementations match
@@ -7896,12 +7898,13 @@ var Socket:TRNLSocket;
     ClientAddress,ServerAddress,FromAddress:TRNLAddress;
     Request:TRNLDiscoveryRequestPacket;
     Answer:TRNLDiscoveryAnswerPacket;
-    Deadline:TRNLTime;
+    Deadline,NextRequest:TRNLTime;
     Received:TRNLSizeInt;
 begin
 
  result:=false;
  aMeta:='';
+ aStep:='socket';
 
  Socket:=aNetwork.SocketCreate(RNL_SOCKET_TYPE_DATAGRAM,RNL_IPV4);
  if Socket=RNL_SOCKET_NULL then begin
@@ -7909,12 +7912,19 @@ begin
  end;
  try
 
+  // Zeroed, because these are local records and the virtual network compares a whole TRNLAddress,
+  // scope id included, when it looks for the socket a datagram is addressed to. A stale scope id from
+  // the stack is enough to make every request vanish without a trace
+  FillChar(ClientAddress,SizeOf(ClientAddress),#0);
   aNetwork.AddressSetHost(ClientAddress,'127.0.0.1');
   ClientAddress.Port:=aClientPort;
+
+  aStep:='bind';
   if not aNetwork.SocketBind(Socket,@ClientAddress,RNL_IPV4) then begin
    exit;
   end;
 
+  FillChar(ServerAddress,SizeOf(ServerAddress),#0);
   aNetwork.AddressSetHost(ServerAddress,'127.0.0.1');
   ServerAddress.Port:=aServerPort;
 
@@ -7926,18 +7936,30 @@ begin
   Request.ClientPort:=TRNLEndianness.HostToLittleEndian16(aClientPort);
   Request.Meta:='';
 
-  if aNetwork.Send(Socket,@ServerAddress,Request,SizeOf(Request),RNL_IPV4)<>SizeOf(Request) then begin
-   exit;
-  end;
-
+  // Asked again and again rather than once, because the server binds its sockets inside its own
+  // thread: a request sent before that has happened reaches nobody, and there is nothing to wait on
+  // from out here
+  aStep:='answer';
   Deadline:=aInstance.Time+TIMEOUT_MILLISECONDS;
+  NextRequest:=0;
   while aInstance.Time<Deadline do begin
+   if aInstance.Time>=NextRequest then begin
+    // Zero means there is nothing bound under that address yet, which is the normal state while the
+    // server thread is still creating its sockets - so it is a reason to ask again, not to give up.
+    // Only a negative result is an actual failure of the send itself
+    if aNetwork.Send(Socket,@ServerAddress,Request,SizeOf(Request),RNL_IPV4)<0 then begin
+     aStep:='send';
+     exit;
+    end;
+    NextRequest:=aInstance.Time+RETRY_MILLISECONDS;
+   end;
    FillChar(Answer,SizeOf(Answer),#0);
    Received:=aNetwork.Receive(Socket,@FromAddress,Answer,SizeOf(Answer),RNL_IPV4);
    if (Received=SizeOf(Answer)) and
       (Answer.Signature=ANSWER_SIGNATURE) and
       (Answer.ServiceID=aServiceID) then begin
     aMeta:=Answer.Meta;
+    aStep:='';
     result:=true;
     exit;
    end;
@@ -7964,6 +7986,7 @@ var Instance:TRNLInstance;
     ServiceAddressIPv4,ServiceAddressIPv6:TRNLAddress;
     ServiceID:TRNLDiscoveryServiceID;
     Meta:TRNLDiscoveryMeta;
+    Step:TRNLRawByteString;
     Index:TRNLSizeInt;
     Watchdog:TRNLTestWatchdog;
 begin
@@ -8003,8 +8026,9 @@ begin
                                        ERSTE_MELDUNG);
     try
 
-     if not Check(AskDiscoveryServer(Network,Instance,SERVER_PORT,ServiceID,FIRST_CLIENT_PORT,Meta),
-                  'the discovery server has to answer a browse request at all') then begin
+     if not Check(AskDiscoveryServer(Network,Instance,SERVER_PORT,ServiceID,FIRST_CLIENT_PORT,Meta,Step),
+                  TRNLRawByteString('the discovery server has to answer a browse request at all, '+
+                                    'failing step: ')+Step) then begin
       exit;
      end;
 
@@ -8020,7 +8044,7 @@ begin
      CheckEqualsRawByteString(TRNLRawByteString(Server.Meta),ZWEITE_MELDUNG,
                               'reading it back gives what was just written');
 
-     if not Check(AskDiscoveryServer(Network,Instance,SERVER_PORT,ServiceID,SECOND_CLIENT_PORT,Meta),
+     if not Check(AskDiscoveryServer(Network,Instance,SERVER_PORT,ServiceID,SECOND_CLIENT_PORT,Meta,Step),
                   'and the server still answers afterwards') then begin
       exit;
      end;
@@ -8036,7 +8060,7 @@ begin
      // say nothing rather than something stale
      Server.Meta:='';
 
-     if not Check(AskDiscoveryServer(Network,Instance,SERVER_PORT,ServiceID,THIRD_CLIENT_PORT,Meta),
+     if not Check(AskDiscoveryServer(Network,Instance,SERVER_PORT,ServiceID,THIRD_CLIENT_PORT,Meta,Step),
                   'and it answers with an empty metadata as well') then begin
       exit;
      end;
