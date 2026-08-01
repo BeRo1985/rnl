@@ -4071,6 +4071,12 @@ type PRNLVersion=^TRNLVersion;
 
        property MaximumUnfragmentedMessageSize:TRNLSizeUInt read GetMaximumUnfragmentedMessageSize;
 
+       // How much this channel is still carrying for its peer, as described at the getter above. Exposed
+       // because SendMessage enqueues without bound and never refuses: a sender which wants to notice a
+       // receiver that has quietly stopped acknowledging, before its queue grows without end, has nothing
+       // else to go by.
+       property CountPendingOutgoing:TRNLSizeInt read GetCountPendingOutgoing;
+
      end;
 
      PRNLPeerReliableChannelCommandType=^TRNLPeerReliableChannelCommandType;
