@@ -1068,6 +1068,11 @@ type PRNLVersion=^TRNLVersion;
        procedure Initialize(const aKey,aNonce;const aCounter:TRNLUInt64=0);
        procedure EndianNeutralInitialize(const aKey;const aNonce:TRNLUInt64=0;const aCounter:TRNLUInt64=0);
        procedure XChaCha20Initialize(const aKey,aNonce;const aCounter:TRNLUInt64=0);
+       // RFC 8439 lays the last four state words out differently from the original ChaCha20: a 32 bit
+       // block counter and a 96 bit nonce, where the original has 64 bits of each. TLS 1.3 and DTLS
+       // 1.3 mean this one. It sits next to Initialize rather than replacing it, because RNL's own
+       // AEAD uses the original layout and its wire format rests on that.
+       procedure RFC8439Initialize(const aKey,aNonce;const aCounter:TRNLUInt32=0);
        procedure RefillPool;
        procedure Process(out aCipherText;const aPlainText;const aTextSize:TRNLSizeUInt;const aUsePlainText:boolean=true);
        procedure Stream(out aCipherText;const aTextSize:TRNLSizeUInt);
@@ -1381,6 +1386,42 @@ type PRNLVersion=^TRNLVersion;
        class procedure SelfTest; static;
      end;
 
+     // RFC 8439 section 2.8, AEAD_CHACHA20_POLY1305, which is what TLS 1.3 and DTLS 1.3 mean by the
+     // cipher suite TLS_CHACHA20_POLY1305_SHA256.
+     //
+     // This is deliberately NOT TRNLAuthenticatedEncryption. That one is RNL's own composition: it
+     // sits on XChaCha20 with a 24 byte nonce, takes the Poly1305 key off the front of the same
+     // keystream the ciphertext continues, and authenticates without the padding to sixteen and the
+     // two length words this one ends with. It defines RNL's own wire format. Two constructions for
+     // two purposes, and neither may be quietly turned into the other.
+     PRNLChaCha20Poly1305=^TRNLChaCha20Poly1305;
+     TRNLChaCha20Poly1305=record
+      public
+       const KeySize=32;
+             NonceSize=12;
+             TagSize=16;
+      private
+       // mac_data = AAD | pad16(AAD) | ciphertext | pad16(ciphertext) | le64(|AAD|) | le64(|ct|).
+       // The padding and the two lengths are what keep an attacker from moving a byte from the end of
+       // the associated data to the front of the ciphertext without the tag noticing.
+       class procedure ComputeTag(out aTag;
+                                  const aOneTimeKey;
+                                  const aAssociatedData;const aAssociatedDataSize:TRNLSizeUInt;
+                                  const aCipherText;const aCipherTextSize:TRNLSizeUInt); static;
+      public
+       class procedure Encrypt(out aCipherText;out aTag;
+                               const aKey;const aNonce;
+                               const aAssociatedData;const aAssociatedDataSize:TRNLSizeUInt;
+                               const aPlainText;const aPlainTextSize:TRNLSizeUInt); static;
+       // False, and aPlainText untouched, when the tag does not verify. Nothing is decrypted before
+       // it does.
+       class function Decrypt(out aPlainText;
+                              const aKey;const aNonce;const aTag;
+                              const aAssociatedData;const aAssociatedDataSize:TRNLSizeUInt;
+                              const aCipherText;const aCipherTextSize:TRNLSizeUInt):boolean; static;
+       class procedure SelfTest; static;
+     end;
+
      // What HMAC needs of a hash, and nothing else: three operations on an opaque context plus three
      // sizes. Handed over as plain procedural variables rather than as a generic type parameter,
      // because Delphi will not let a method be called on an unconstrained one and a record constraint
@@ -1421,7 +1462,11 @@ type PRNLVersion=^TRNLVersion;
      PRNLSHA512Context=^TRNLSHA512Context;
      TRNLSHA512Context=record
       public
-       const BLOCK_SIZE=512;
+       const // In bytes, both of them, which is what HMAC needs of them. This one used to say 512,
+             // the block size in bits, and since Descriptor hands it straight to TRNLHashDescriptor
+             // every HMAC-SHA-512 failed its bounds check and returned false without ever being
+             // wrong out loud. Nothing called it, so nothing said so.
+             BLOCK_SIZE=128;
              HASH_SIZE=64;
       private
        const InitialState:TRNLSHA512State=
@@ -1808,6 +1853,19 @@ type PRNLVersion=^TRNLVersion;
        class procedure SelfTest; static;
      end;
 
+     // Nothing in RNL asks for this one. It is here as the guard on TRNLSHA512.Descriptor, whose
+     // block size said 512 rather than 128 and therefore failed the bounds check of every HMAC built
+     // on it - silently, since a descriptor which does not add up makes TRNLHMAC.Process return
+     // false rather than a wrong MAC, and nothing called it to see the false.
+     PRNLHMACSHA512=^TRNLHMACSHA512;
+     TRNLHMACSHA512=record
+      public
+       class procedure Process(out aMAC;
+                               const aKey;const aKeySize:TRNLSizeUInt;
+                               const aMessage;const aMessageSize:TRNLSizeUInt); static;
+       class procedure SelfTest; static;
+     end;
+
 {$if defined(RNL_TURN_RFC5389_COMPAT)}
      PRNLHMACSHA1=^TRNLHMACSHA1;
      TRNLHMACSHA1=record
@@ -1899,6 +1957,125 @@ type PRNLVersion=^TRNLVersion;
                                    const aParentSecret;const aParentSecretSize:TRNLSizeUInt;
                                    const aLabel:TRNLRawByteString;
                                    const aTranscriptHash;const aTranscriptHashSize:TRNLSizeUInt):boolean; static;
+       class procedure SelfTest; static;
+     end;
+
+     // RFC 8446 section 7.3 for key and iv, RFC 9147 section 4.2.3 for the third one, which TLS does
+     // not have: over a datagram the sequence number travels in the clear where TCP had it implicit,
+     // so DTLS 1.3 masks it with a keystream taken from the record's own ciphertext.
+     PRNLDTLSTrafficKeys=^TRNLDTLSTrafficKeys;
+     TRNLDTLSTrafficKeys=record
+      public
+       const KeySize=TRNLChaCha20Poly1305.KeySize;
+             IVSize=TRNLChaCha20Poly1305.NonceSize;
+             SequenceNumberKeySize=TRNLChaCha20Poly1305.KeySize;
+      public
+       Key:array[0..KeySize-1] of TRNLUInt8;
+       IV:array[0..IVSize-1] of TRNLUInt8;
+       SequenceNumberKey:array[0..SequenceNumberKeySize-1] of TRNLUInt8;
+       // All three out of one traffic secret, which is what the handshake hands over
+       function DeriveFrom(const aTrafficSecret;const aTrafficSecretSize:TRNLSizeUInt):boolean;
+       procedure Clear;
+     end;
+
+     // A sliding window over the sequence numbers already seen inside one epoch. Deliberately two
+     // operations rather than one: whether a number may be accepted is asked before the AEAD runs, so
+     // that a replayed record costs a shift and a test instead of a decryption, but it is remembered
+     // only once the AEAD has said the record is genuine - otherwise anybody able to put a datagram
+     // on the path could push the window forward with a made up number and lock out the real ones.
+     PRNLDTLSReplayWindow=^TRNLDTLSReplayWindow;
+     TRNLDTLSReplayWindow=record
+      public
+       const Width=64;
+      private
+       fHighest:TRNLUInt64;
+       fBitmap:TRNLUInt64;
+       fAnySeen:boolean;
+      public
+       procedure Initialize;
+       // Only the low eight or sixteen bits of the sequence number travel, so the rest has to be put
+       // back from what has been seen. RFC 9147 section 4.2.2: the value closest to the one expected
+       // next is the one meant.
+       function Reconstruct(const aPartial:TRNLUInt64;const aPartialSize:TRNLSizeUInt):TRNLUInt64;
+       function Permits(const aSequenceNumber:TRNLUInt64):boolean;
+       procedure Remember(const aSequenceNumber:TRNLUInt64);
+     end;
+
+     // One record, protected or unprotected. Both halves are here because a client has to write what
+     // it sends and read what comes back, and the two share the header layout, the nonce and the
+     // sequence number mask - three things which have to agree exactly or nothing works, and which
+     // would drift if they existed twice.
+     PRNLDTLSRecord=^TRNLDTLSRecord;
+     TRNLDTLSRecord=record
+      public
+       const // Only the content types which occur are named. One which is not among these is a
+             // record this client has no business reading.
+             CONTENT_TYPE_CHANGE_CIPHER_SPEC=TRNLUInt8(20);
+             CONTENT_TYPE_ALERT=TRNLUInt8(21);
+             CONTENT_TYPE_HANDSHAKE=TRNLUInt8(22);
+             CONTENT_TYPE_APPLICATION_DATA=TRNLUInt8(23);
+             CONTENT_TYPE_ACK=TRNLUInt8(26);
+
+             // The unified header of RFC 9147 figure 4:
+             //
+             //   0 1 2 3 4 5 6 7
+             //  +-+-+-+-+-+-+-+-+
+             //  |0|0|1|C|S|L|E E|
+             //  +-+-+-+-+-+-+-+-+
+             //
+             // C is a connection id, S the width of the sequence number, L whether a length
+             // follows, and E the low two bits of the epoch.
+             HEADER_FIXED_MASK=TRNLUInt8($e0);
+             HEADER_FIXED_BITS=TRNLUInt8($20);
+             HEADER_CONNECTION_ID=TRNLUInt8($10);
+             HEADER_LONG_SEQUENCE_NUMBER=TRNLUInt8($08);
+             HEADER_LENGTH_PRESENT=TRNLUInt8($04);
+             HEADER_EPOCH_MASK=TRNLUInt8($03);
+
+             // A sequence number of two bytes rather than one: with one, a gap of more than 128
+             // records could no longer be told from a wrap, and a client behind a relay on a lossy
+             // path is exactly where such a gap happens
+             SentSequenceNumberSize=2;
+             SentHeaderSize=1+SentSequenceNumberSize+2;
+             // What the mask is taken from, and therefore the least a ciphertext can be
+             MaskSourceSize=16;
+             TagSize=TRNLChaCha20Poly1305.TagSize;
+             // RFC 8446 section 5.1, and DTLS keeps it
+             MaximumContentSize=16384;
+      private
+       // Nonce = iv xor the 64 bit sequence number, right aligned. RFC 9147 section 4.2.2: the epoch
+       // does not go in, unlike DTLS 1.2.
+       class procedure BuildNonce(out aNonce;const aIV;const aSequenceNumber:TRNLUInt64); static;
+       // Mask = ChaCha20(sn_key, Ciphertext[0..3], Ciphertext[4..15]), RFC 9147 section 4.2.3. The
+       // first four bytes are the block counter and the next twelve the nonce, which is why a
+       // ciphertext shorter than sixteen bytes has no mask and no record can be that short.
+       class procedure BuildSequenceNumberMask(out aMask;
+                                               const aSequenceNumberKey;
+                                               const aCipherText); static;
+      public
+       // False when the datagram will not hold the record, when the content is over the limit, or
+       // when the keys do not add up. Writes SentHeaderSize+aContentSize+1+TagSize bytes.
+       class function Protect(out aDatagram;out aDatagramSize:TRNLSizeUInt;
+                              const aMaximumDatagramSize:TRNLSizeUInt;
+                              const aKeys:TRNLDTLSTrafficKeys;
+                              const aEpoch:TRNLUInt64;const aSequenceNumber:TRNLUInt64;
+                              const aContentType:TRNLUInt8;
+                              const aContent;const aContentSize:TRNLSizeUInt):boolean; static;
+       // Reads one record from the front of a datagram, which may hold several. aConsumedSize says
+       // how far it got, so that the caller can go on to the next one.
+       //
+       // False for anything at all which does not add up, and deliberately without saying which:
+       // a caller cannot do anything different about a bad length than about a bad tag, and a
+       // counter side which learns which of the two it was learns something about the key.
+       class function Unprotect(out aContent;out aContentSize:TRNLSizeUInt;
+                                out aContentType:TRNLUInt8;
+                                out aSequenceNumber:TRNLUInt64;
+                                out aConsumedSize:TRNLSizeUInt;
+                                const aMaximumContentSize:TRNLSizeUInt;
+                                const aKeys:TRNLDTLSTrafficKeys;
+                                const aEpoch:TRNLUInt64;
+                                var aReplayWindow:TRNLDTLSReplayWindow;
+                                const aDatagram;const aDatagramSize:TRNLSizeUInt):boolean; static;
        class procedure SelfTest; static;
      end;
 
@@ -10878,6 +11055,13 @@ begin
  TRNLHMAC.Process(TRNLSHA256.Descriptor,aMAC,aKey,aKeySize,aMessage,aMessageSize);
 end;
 
+class procedure TRNLHMACSHA512.Process(out aMAC;
+                                       const aKey;const aKeySize:TRNLSizeUInt;
+                                       const aMessage;const aMessageSize:TRNLSizeUInt);
+begin
+ TRNLHMAC.Process(TRNLSHA512.Descriptor,aMAC,aKey,aKeySize,aMessage,aMessageSize);
+end;
+
 {$if defined(RNL_TURN_RFC5389_COMPAT)}
 class procedure TRNLHMACSHA1.Process(out aMAC;
                                      const aKey;const aKeySize:TRNLSizeUInt;
@@ -11556,6 +11740,426 @@ begin
 end;
 
 {$ifend}
+
+// Two anchors, and they do different jobs.
+//
+// The first is RFC 8448: it prints a server handshake traffic secret and the write key and iv
+// expanded out of it, so the labels "key" and "iv" are pinned against numbers somebody else derived.
+// That handshake uses AES-128-GCM, hence a key of sixteen bytes rather than the thirty two this
+// cipher suite wants - which is the point of checking it at that length, since the requested length
+// travels inside HkdfLabel and is therefore part of what has to agree.
+//
+// The second is a whole protected record. There is no published DTLS 1.3 record vector to hold it
+// against, so this one was built by a separate implementation of RFC 9147 section 4 over another
+// library's ChaCha20-Poly1305, and what is compared is the finished datagram byte for byte. A round
+// trip through Protect and Unprotect would not do instead: both halves share the header layout, the
+// nonce and the mask, so both would be wrong together and agree with each other.
+class procedure TRNLDTLSRecord.SelfTest;
+const TrafficSecret:array[0..31] of TRNLUInt8=
+       (
+        $b6,$7b,$7d,$69,$0c,$c1,$6c,$4e,$75,$e5,$42,$13,
+        $cb,$2d,$37,$b4,$e9,$c9,$12,$bc,$de,$d9,$10,$5d,
+        $42,$be,$fd,$59,$d3,$91,$ad,$38
+       );
+      // What RFC 8448 prints for that secret, at the length its own cipher suite asks for
+      ExpectedAESKey:array[0..15] of TRNLUInt8=
+       (
+        $3f,$ce,$51,$60,$09,$c2,$17,$27,$d0,$f2,$e4,$e8,
+        $6e,$e4,$03,$bc
+       );
+      ExpectedIV:array[0..11] of TRNLUInt8=
+       (
+        $5d,$31,$3e,$b2,$67,$12,$76,$ee,$13,$00,$0b,$30
+       );
+      ExpectedKey:array[0..31] of TRNLUInt8=
+       (
+        $ac,$70,$44,$3f,$7f,$e3,$bd,$af,$56,$8b,$1d,$cd,
+        $b0,$a7,$f3,$fe,$a0,$98,$bc,$a1,$89,$c3,$45,$5b,
+        $a4,$1f,$cd,$9d,$48,$83,$48,$a4
+       );
+      ExpectedSequenceNumberKey:array[0..31] of TRNLUInt8=
+       (
+        $15,$1b,$04,$0f,$8e,$6d,$de,$3a,$1c,$3a,$dd,$5c,
+        $98,$be,$0d,$0f,$4f,$22,$82,$ed,$e4,$b9,$75,$63,
+        $5e,$b5,$27,$82,$65,$6b,$f9,$25
+       );
+      Content:array[0..19] of TRNLUInt8=
+       (
+        $40,$41,$42,$43,$44,$45,$46,$47,$48,$49,$4a,$4b,
+        $4c,$4d,$4e,$4f,$50,$51,$52,$53
+       );
+      EPOCH=2;
+      SEQUENCE_NUMBER=$1234;
+      // Header 2e 7a e3 00 25: fixed bits 001, no connection id, a two byte sequence number, a
+      // length, and epoch two in the low bits. 7a e3 is $1234 with the mask 68 d7 over it.
+      ExpectedDatagram:array[0..41] of TRNLUInt8=
+       (
+        $2e,$7a,$e3,$00,$25,$9d,$56,$fa,$0f,$b4,$e8,$7e,
+        $44,$1e,$7d,$5d,$f4,$e5,$71,$f8,$57,$77,$6c,$66,
+        $46,$d6,$b8,$07,$f1,$5c,$a3,$7b,$3e,$0e,$28,$e0,
+        $3a,$68,$5c,$00,$1b,$21
+       );
+var Keys:TRNLDTLSTrafficKeys;
+    Window:TRNLDTLSReplayWindow;
+    AESKey:array[0..15] of TRNLUInt8;
+    Datagram,Damaged:array[0..127] of TRNLUInt8;
+    Recovered:array[0..127] of TRNLUInt8;
+    DatagramSize,RecoveredSize,ConsumedSize:TRNLSizeUInt;
+    ContentType:TRNLUInt8;
+    SequenceNumber:TRNLUInt64;
+    Nothing:TRNLUInt8;
+begin
+
+ Nothing:=0;
+
+ write('[DTLS1.3] RFC 8448 write key, which pins the "key" label at sixteen bytes ... ');
+ if TRNLTLS13KeySchedule.ExpandLabel(TRNLSHA256.Descriptor,AESKey,SizeOf(AESKey),
+                                     TrafficSecret,SizeOf(TrafficSecret),'key',Nothing,0) and
+    TRNLMemory.SecureIsEqual(AESKey,ExpectedAESKey,SizeOf(ExpectedAESKey)) then begin
+  writeln('OK!');
+ end else begin
+  RNLSelfTestFailure;
+ end;
+
+ write('[DTLS1.3] the three traffic keys out of one secret ... ');
+ if Keys.DeriveFrom(TrafficSecret,SizeOf(TrafficSecret)) and
+    TRNLMemory.SecureIsEqual(Keys.Key,ExpectedKey,SizeOf(ExpectedKey)) and
+    TRNLMemory.SecureIsEqual(Keys.IV,ExpectedIV,SizeOf(ExpectedIV)) and
+    TRNLMemory.SecureIsEqual(Keys.SequenceNumberKey,ExpectedSequenceNumberKey,
+                             SizeOf(ExpectedSequenceNumberKey)) then begin
+  writeln('OK!');
+ end else begin
+  RNLSelfTestFailure;
+ end;
+
+ write('[DTLS1.3] one protected record, byte for byte ... ');
+ if Protect(Datagram,DatagramSize,SizeOf(Datagram),Keys,EPOCH,SEQUENCE_NUMBER,
+            CONTENT_TYPE_HANDSHAKE,Content,SizeOf(Content)) and
+    (DatagramSize=TRNLSizeUInt(SizeOf(ExpectedDatagram))) and
+    TRNLMemory.SecureIsEqual(Datagram,ExpectedDatagram,SizeOf(ExpectedDatagram)) then begin
+  writeln('OK!');
+ end else begin
+  RNLSelfTestFailure;
+ end;
+
+ write('[DTLS1.3] and read back with its sequence number and content type ... ');
+ Window.Initialize;
+ if Unprotect(Recovered,RecoveredSize,ContentType,SequenceNumber,ConsumedSize,
+              SizeOf(Recovered),Keys,EPOCH,Window,ExpectedDatagram,SizeOf(ExpectedDatagram)) and
+    (RecoveredSize=TRNLSizeUInt(SizeOf(Content))) and
+    (ContentType=CONTENT_TYPE_HANDSHAKE) and
+    (SequenceNumber=SEQUENCE_NUMBER) and
+    (ConsumedSize=TRNLSizeUInt(SizeOf(ExpectedDatagram))) and
+    TRNLMemory.SecureIsEqual(Recovered,Content,SizeOf(Content)) then begin
+  writeln('OK!');
+ end else begin
+  RNLSelfTestFailure;
+ end;
+
+ // Without this one, a replay window which never said no would pass everything above
+ write('[DTLS1.3] the very same record a second time is refused ... ');
+ if not Unprotect(Recovered,RecoveredSize,ContentType,SequenceNumber,ConsumedSize,
+                  SizeOf(Recovered),Keys,EPOCH,Window,ExpectedDatagram,SizeOf(ExpectedDatagram)) then begin
+  writeln('OK!');
+ end else begin
+  RNLSelfTestFailure;
+ end;
+
+ write('[DTLS1.3] a record whose ciphertext was changed on the way is refused ... ');
+ Window.Initialize;
+ Move(ExpectedDatagram,Damaged,SizeOf(ExpectedDatagram));
+ Damaged[SizeOf(ExpectedDatagram)-1]:=Damaged[SizeOf(ExpectedDatagram)-1] xor 1;
+ if not Unprotect(Recovered,RecoveredSize,ContentType,SequenceNumber,ConsumedSize,
+                  SizeOf(Recovered),Keys,EPOCH,Window,Damaged,SizeOf(ExpectedDatagram)) then begin
+  writeln('OK!');
+ end else begin
+  RNLSelfTestFailure;
+ end;
+
+ // The header is the associated data, so changing it has to be caught by the tag rather than by any
+ // check written out by hand - which is what makes the header protected instead of merely present
+ write('[DTLS1.3] and so is one whose header length was rewritten ... ');
+ Window.Initialize;
+ Move(ExpectedDatagram,Damaged,SizeOf(ExpectedDatagram));
+ Damaged[4]:=Damaged[4]-1;
+ if not Unprotect(Recovered,RecoveredSize,ContentType,SequenceNumber,ConsumedSize,
+                  SizeOf(Recovered),Keys,EPOCH,Window,Damaged,SizeOf(ExpectedDatagram)) then begin
+  writeln('OK!');
+ end else begin
+  RNLSelfTestFailure;
+ end;
+
+end;
+
+// RFC 8439, both of the vectors it prints for the pieces used here: section 2.4.2 for ChaCha20 in the
+// IETF state layout, and section 2.8.2 for the AEAD built on it. Both use the same 114 byte
+// plaintext, which is deliberate on the RFC's part - it is not a multiple of the 64 byte ChaCha20
+// block nor of the 16 byte Poly1305 block, so a final partial block is exercised in both.
+class procedure TRNLChaCha20Poly1305.SelfTest;
+const Key:array[0..31] of TRNLUInt8=
+       (
+        $00,$01,$02,$03,$04,$05,$06,$07,$08,$09,$0a,$0b,
+        $0c,$0d,$0e,$0f,$10,$11,$12,$13,$14,$15,$16,$17,
+        $18,$19,$1a,$1b,$1c,$1d,$1e,$1f
+       );
+      Nonce:array[0..11] of TRNLUInt8=
+       (
+        $00,$00,$00,$00,$00,$00,$00,$4a,$00,$00,$00,$00
+       );
+      PlainText:array[0..113] of TRNLUInt8=
+       (
+        $4c,$61,$64,$69,$65,$73,$20,$61,$6e,$64,$20,$47,
+        $65,$6e,$74,$6c,$65,$6d,$65,$6e,$20,$6f,$66,$20,
+        $74,$68,$65,$20,$63,$6c,$61,$73,$73,$20,$6f,$66,
+        $20,$27,$39,$39,$3a,$20,$49,$66,$20,$49,$20,$63,
+        $6f,$75,$6c,$64,$20,$6f,$66,$66,$65,$72,$20,$79,
+        $6f,$75,$20,$6f,$6e,$6c,$79,$20,$6f,$6e,$65,$20,
+        $74,$69,$70,$20,$66,$6f,$72,$20,$74,$68,$65,$20,
+        $66,$75,$74,$75,$72,$65,$2c,$20,$73,$75,$6e,$73,
+        $63,$72,$65,$65,$6e,$20,$77,$6f,$75,$6c,$64,$20,
+        $62,$65,$20,$69,$74,$2e
+       );
+      ExpectedCipherText:array[0..113] of TRNLUInt8=
+       (
+        $6e,$2e,$35,$9a,$25,$68,$f9,$80,$41,$ba,$07,$28,
+        $dd,$0d,$69,$81,$e9,$7e,$7a,$ec,$1d,$43,$60,$c2,
+        $0a,$27,$af,$cc,$fd,$9f,$ae,$0b,$f9,$1b,$65,$c5,
+        $52,$47,$33,$ab,$8f,$59,$3d,$ab,$cd,$62,$b3,$57,
+        $16,$39,$d6,$24,$e6,$51,$52,$ab,$8f,$53,$0c,$35,
+        $9f,$08,$61,$d8,$07,$ca,$0d,$bf,$50,$0d,$6a,$61,
+        $56,$a3,$8e,$08,$8a,$22,$b6,$5e,$52,$bc,$51,$4d,
+        $16,$cc,$f8,$06,$81,$8c,$e9,$1a,$b7,$79,$37,$36,
+        $5a,$f9,$0b,$bf,$74,$a3,$5b,$e6,$b4,$0b,$8e,$ed,
+        $f2,$78,$5e,$42,$87,$4d
+       );
+      AEADKey:array[0..31] of TRNLUInt8=
+       (
+        $80,$81,$82,$83,$84,$85,$86,$87,$88,$89,$8a,$8b,
+        $8c,$8d,$8e,$8f,$90,$91,$92,$93,$94,$95,$96,$97,
+        $98,$99,$9a,$9b,$9c,$9d,$9e,$9f
+       );
+      AEADNonce:array[0..11] of TRNLUInt8=
+       (
+        $07,$00,$00,$00,$40,$41,$42,$43,$44,$45,$46,$47
+       );
+      // Twelve bytes, so it is not a multiple of sixteen either and the padding of the associated
+      // data is exercised as well as that of the ciphertext
+      AEADAssociatedData:array[0..11] of TRNLUInt8=
+       (
+        $50,$51,$52,$53,$c0,$c1,$c2,$c3,$c4,$c5,$c6,$c7
+       );
+      ExpectedAEADCipherText:array[0..113] of TRNLUInt8=
+       (
+        $d3,$1a,$8d,$34,$64,$8e,$60,$db,$7b,$86,$af,$bc,
+        $53,$ef,$7e,$c2,$a4,$ad,$ed,$51,$29,$6e,$08,$fe,
+        $a9,$e2,$b5,$a7,$36,$ee,$62,$d6,$3d,$be,$a4,$5e,
+        $8c,$a9,$67,$12,$82,$fa,$fb,$69,$da,$92,$72,$8b,
+        $1a,$71,$de,$0a,$9e,$06,$0b,$29,$05,$d6,$a5,$b6,
+        $7e,$cd,$3b,$36,$92,$dd,$bd,$7f,$2d,$77,$8b,$8c,
+        $98,$03,$ae,$e3,$28,$09,$1b,$58,$fa,$b3,$24,$e4,
+        $fa,$d6,$75,$94,$55,$85,$80,$8b,$48,$31,$d7,$bc,
+        $3f,$f4,$de,$f0,$8e,$4b,$7a,$9d,$e5,$76,$d2,$65,
+        $86,$ce,$c6,$4b,$61,$16
+       );
+      ExpectedAEADTag:array[0..15] of TRNLUInt8=
+       (
+        $1a,$e1,$0b,$59,$4f,$09,$e2,$6a,$7e,$90,$2e,$cb,
+        $d0,$60,$06,$91
+       );
+var Context:TRNLChaCha20Context;
+    CipherText,Recovered:array[0..113] of TRNLUInt8;
+    Tag,DamagedTag:array[0..TagSize-1] of TRNLUInt8;
+    DamagedAssociatedData:array[0..11] of TRNLUInt8;
+begin
+
+ write('[ChaCha20] RFC 8439 section 2.4.2, the ietf state layout at counter one ... ');
+ Context.RFC8439Initialize(Key,Nonce,1);
+ Context.Process(CipherText,PlainText,SizeOf(PlainText));
+ if TRNLMemory.SecureIsEqual(CipherText,ExpectedCipherText,SizeOf(ExpectedCipherText)) then begin
+  writeln('OK!');
+ end else begin
+  RNLSelfTestFailure;
+ end;
+
+ write('[ChaCha20-Poly1305] RFC 8439 section 2.8.2, ciphertext ... ');
+ Encrypt(CipherText,Tag,AEADKey,AEADNonce,
+         AEADAssociatedData,SizeOf(AEADAssociatedData),
+         PlainText,SizeOf(PlainText));
+ if TRNLMemory.SecureIsEqual(CipherText,ExpectedAEADCipherText,SizeOf(ExpectedAEADCipherText)) then begin
+  writeln('OK!');
+ end else begin
+  RNLSelfTestFailure;
+ end;
+
+ write('[ChaCha20-Poly1305] RFC 8439 section 2.8.2, tag ... ');
+ if TRNLMemory.SecureIsEqual(Tag,ExpectedAEADTag,SizeOf(ExpectedAEADTag)) then begin
+  writeln('OK!');
+ end else begin
+  RNLSelfTestFailure;
+ end;
+
+ write('[ChaCha20-Poly1305] and the plaintext comes back out ... ');
+ if Decrypt(Recovered,AEADKey,AEADNonce,Tag,
+            AEADAssociatedData,SizeOf(AEADAssociatedData),
+            CipherText,SizeOf(CipherText)) and
+    TRNLMemory.SecureIsEqual(Recovered,PlainText,SizeOf(PlainText)) then begin
+  writeln('OK!');
+ end else begin
+  RNLSelfTestFailure;
+ end;
+
+ // Without these two, a Decrypt which returned true unconditionally would pass everything above
+ write('[ChaCha20-Poly1305] a tag with one bit turned over is refused ... ');
+ Move(Tag,DamagedTag,SizeOf(Tag));
+ DamagedTag[0]:=DamagedTag[0] xor 1;
+ if not Decrypt(Recovered,AEADKey,AEADNonce,DamagedTag,
+                AEADAssociatedData,SizeOf(AEADAssociatedData),
+                CipherText,SizeOf(CipherText)) then begin
+  writeln('OK!');
+ end else begin
+  RNLSelfTestFailure;
+ end;
+
+ write('[ChaCha20-Poly1305] and so is associated data which was changed on the way ... ');
+ Move(AEADAssociatedData,DamagedAssociatedData,SizeOf(AEADAssociatedData));
+ DamagedAssociatedData[SizeOf(DamagedAssociatedData)-1]:=
+  DamagedAssociatedData[SizeOf(DamagedAssociatedData)-1] xor 1;
+ if not Decrypt(Recovered,AEADKey,AEADNonce,Tag,
+                DamagedAssociatedData,SizeOf(DamagedAssociatedData),
+                CipherText,SizeOf(CipherText)) then begin
+  writeln('OK!');
+ end else begin
+  RNLSelfTestFailure;
+ end;
+
+end;
+
+// The same four RFC 4231 cases as HMAC-SHA-256, over the hash with the other block size. That is the
+// whole point of them being here: 128 rather than 64 is exactly what TRNLSHA512.Descriptor got wrong,
+// and case 6, whose key of 131 bytes is longer than one SHA-256 block but shorter than one SHA-512
+// block, is where a block size taken from the wrong hash would come out.
+class procedure TRNLHMACSHA512.SelfTest;
+const Expected0:TRNLSHA512Hash=
+       (
+        $87,$aa,$7c,$de,$a5,$ef,$61,$9d,$4f,$f0,$b4,$24,
+        $1a,$1d,$6c,$b0,$23,$79,$f4,$e2,$ce,$4e,$c2,$78,
+        $7a,$d0,$b3,$05,$45,$e1,$7c,$de,$da,$a8,$33,$b7,
+        $d6,$b8,$a7,$02,$03,$8b,$27,$4e,$ae,$a3,$f4,$e4,
+        $be,$9d,$91,$4e,$eb,$61,$f1,$70,$2e,$69,$6c,$20,
+        $3a,$12,$68,$54
+       );
+      Data0:array[0..7] of TRNLUInt8=
+       (
+        $48,$69,$20,$54,$68,$65,$72,$65
+       );
+      Key0:array[0..19] of TRNLUInt8=
+       (
+        $0b,$0b,$0b,$0b,$0b,$0b,$0b,$0b,$0b,$0b,$0b,$0b,
+        $0b,$0b,$0b,$0b,$0b,$0b,$0b,$0b
+       );
+      Expected1:TRNLSHA512Hash=
+       (
+        $16,$4b,$7a,$7b,$fc,$f8,$19,$e2,$e3,$95,$fb,$e7,
+        $3b,$56,$e0,$a3,$87,$bd,$64,$22,$2e,$83,$1f,$d6,
+        $10,$27,$0c,$d7,$ea,$25,$05,$54,$97,$58,$bf,$75,
+        $c0,$5a,$99,$4a,$6d,$03,$4f,$65,$f8,$f0,$e6,$fd,
+        $ca,$ea,$b1,$a3,$4d,$4a,$6b,$4b,$63,$6e,$07,$0a,
+        $38,$bc,$e7,$37
+       );
+      Data1:array[0..27] of TRNLUInt8=
+       (
+        $77,$68,$61,$74,$20,$64,$6f,$20,$79,$61,$20,$77,
+        $61,$6e,$74,$20,$66,$6f,$72,$20,$6e,$6f,$74,$68,
+        $69,$6e,$67,$3f
+       );
+      Key1:array[0..3] of TRNLUInt8=
+       (
+        $4a,$65,$66,$65
+       );
+      Expected2:TRNLSHA512Hash=
+       (
+        $fa,$73,$b0,$08,$9d,$56,$a2,$84,$ef,$b0,$f0,$75,
+        $6c,$89,$0b,$e9,$b1,$b5,$db,$dd,$8e,$e8,$1a,$36,
+        $55,$f8,$3e,$33,$b2,$27,$9d,$39,$bf,$3e,$84,$82,
+        $79,$a7,$22,$c8,$06,$b4,$85,$a4,$7e,$67,$c8,$07,
+        $b9,$46,$a3,$37,$be,$e8,$94,$26,$74,$27,$88,$59,
+        $e1,$32,$92,$fb
+       );
+      Data2:array[0..49] of TRNLUInt8=
+       (
+        $dd,$dd,$dd,$dd,$dd,$dd,$dd,$dd,$dd,$dd,$dd,$dd,
+        $dd,$dd,$dd,$dd,$dd,$dd,$dd,$dd,$dd,$dd,$dd,$dd,
+        $dd,$dd,$dd,$dd,$dd,$dd,$dd,$dd,$dd,$dd,$dd,$dd,
+        $dd,$dd,$dd,$dd,$dd,$dd,$dd,$dd,$dd,$dd,$dd,$dd,
+        $dd,$dd
+       );
+      Key2:array[0..19] of TRNLUInt8=
+       (
+        $aa,$aa,$aa,$aa,$aa,$aa,$aa,$aa,$aa,$aa,$aa,$aa,
+        $aa,$aa,$aa,$aa,$aa,$aa,$aa,$aa
+       );
+      Expected3:TRNLSHA512Hash=
+       (
+        $80,$b2,$42,$63,$c7,$c1,$a3,$eb,$b7,$14,$93,$c1,
+        $dd,$7b,$e8,$b4,$9b,$46,$d1,$f4,$1b,$4a,$ee,$c1,
+        $12,$1b,$01,$37,$83,$f8,$f3,$52,$6b,$56,$d0,$37,
+        $e0,$5f,$25,$98,$bd,$0f,$d2,$21,$5d,$6a,$1e,$52,
+        $95,$e6,$4f,$73,$f6,$3f,$0a,$ec,$8b,$91,$5a,$98,
+        $5d,$78,$65,$98
+       );
+      Data3:array[0..53] of TRNLUInt8=
+       (
+        $54,$65,$73,$74,$20,$55,$73,$69,$6e,$67,$20,$4c,
+        $61,$72,$67,$65,$72,$20,$54,$68,$61,$6e,$20,$42,
+        $6c,$6f,$63,$6b,$2d,$53,$69,$7a,$65,$20,$4b,$65,
+        $79,$20,$2d,$20,$48,$61,$73,$68,$20,$4b,$65,$79,
+        $20,$46,$69,$72,$73,$74
+       );
+      Key3:array[0..130] of TRNLUInt8=
+       (
+        $aa,$aa,$aa,$aa,$aa,$aa,$aa,$aa,$aa,$aa,$aa,$aa,
+        $aa,$aa,$aa,$aa,$aa,$aa,$aa,$aa,$aa,$aa,$aa,$aa,
+        $aa,$aa,$aa,$aa,$aa,$aa,$aa,$aa,$aa,$aa,$aa,$aa,
+        $aa,$aa,$aa,$aa,$aa,$aa,$aa,$aa,$aa,$aa,$aa,$aa,
+        $aa,$aa,$aa,$aa,$aa,$aa,$aa,$aa,$aa,$aa,$aa,$aa,
+        $aa,$aa,$aa,$aa,$aa,$aa,$aa,$aa,$aa,$aa,$aa,$aa,
+        $aa,$aa,$aa,$aa,$aa,$aa,$aa,$aa,$aa,$aa,$aa,$aa,
+        $aa,$aa,$aa,$aa,$aa,$aa,$aa,$aa,$aa,$aa,$aa,$aa,
+        $aa,$aa,$aa,$aa,$aa,$aa,$aa,$aa,$aa,$aa,$aa,$aa,
+        $aa,$aa,$aa,$aa,$aa,$aa,$aa,$aa,$aa,$aa,$aa,$aa,
+        $aa,$aa,$aa,$aa,$aa,$aa,$aa,$aa,$aa,$aa,$aa
+       );
+var Value:TRNLSHA512Hash;
+begin
+ write('[HMAC-SHA512] RFC 4231 case 1 ... ');
+ Process(Value,Key0,SizeOf(Key0),Data0,SizeOf(Data0));
+ if TRNLMemory.SecureIsEqual(Value,Expected0,SizeOf(TRNLSHA512Hash)) then begin
+  writeln('OK!');
+ end else begin
+  RNLSelfTestFailure;
+ end;
+ write('[HMAC-SHA512] RFC 4231 case 2 ... ');
+ Process(Value,Key1,SizeOf(Key1),Data1,SizeOf(Data1));
+ if TRNLMemory.SecureIsEqual(Value,Expected1,SizeOf(TRNLSHA512Hash)) then begin
+  writeln('OK!');
+ end else begin
+  RNLSelfTestFailure;
+ end;
+ write('[HMAC-SHA512] RFC 4231 case 3 ... ');
+ Process(Value,Key2,SizeOf(Key2),Data2,SizeOf(Data2));
+ if TRNLMemory.SecureIsEqual(Value,Expected2,SizeOf(TRNLSHA512Hash)) then begin
+  writeln('OK!');
+ end else begin
+  RNLSelfTestFailure;
+ end;
+ write('[HMAC-SHA512] RFC 4231 case 6, key longer than one block ... ');
+ Process(Value,Key3,SizeOf(Key3),Data3,SizeOf(Data3));
+ if TRNLMemory.SecureIsEqual(Value,Expected3,SizeOf(TRNLSHA512Hash)) then begin
+  writeln('OK!');
+ end else begin
+  RNLSelfTestFailure;
+ end;
+end;
 
 // RFC 5869 appendix A, the three SHA-256 cases. Both halves are checked separately rather than only
 // the final output, because the two can be wrong in ways which cancel: a salt handed to Extract as
@@ -15840,6 +16444,29 @@ begin
  fPoolIndex:=64;
 end;
 
+procedure TRNLChaCha20Context.RFC8439Initialize(const aKey,aNonce;const aCounter:TRNLUInt32=0);
+begin
+ fInput[0]:=$61707865;
+ fInput[1]:=$3320646e;
+ fInput[2]:=$79622d32;
+ fInput[3]:=$6b206574;
+ fInput[4]:=TRNLMemoryAccess.LoadLittleEndianUInt32(PRNLUInt32Array(TRNLPointer(@aKey))^[0]);
+ fInput[5]:=TRNLMemoryAccess.LoadLittleEndianUInt32(PRNLUInt32Array(TRNLPointer(@aKey))^[1]);
+ fInput[6]:=TRNLMemoryAccess.LoadLittleEndianUInt32(PRNLUInt32Array(TRNLPointer(@aKey))^[2]);
+ fInput[7]:=TRNLMemoryAccess.LoadLittleEndianUInt32(PRNLUInt32Array(TRNLPointer(@aKey))^[3]);
+ fInput[8]:=TRNLMemoryAccess.LoadLittleEndianUInt32(PRNLUInt32Array(TRNLPointer(@aKey))^[4]);
+ fInput[9]:=TRNLMemoryAccess.LoadLittleEndianUInt32(PRNLUInt32Array(TRNLPointer(@aKey))^[5]);
+ fInput[10]:=TRNLMemoryAccess.LoadLittleEndianUInt32(PRNLUInt32Array(TRNLPointer(@aKey))^[6]);
+ fInput[11]:=TRNLMemoryAccess.LoadLittleEndianUInt32(PRNLUInt32Array(TRNLPointer(@aKey))^[7]);
+ // One word of counter and three of nonce, where Initialize has two and two
+ fInput[12]:=aCounter;
+ fInput[13]:=TRNLMemoryAccess.LoadLittleEndianUInt32(PRNLUInt32Array(TRNLPointer(@aNonce))^[0]);
+ fInput[14]:=TRNLMemoryAccess.LoadLittleEndianUInt32(PRNLUInt32Array(TRNLPointer(@aNonce))^[1]);
+ fInput[15]:=TRNLMemoryAccess.LoadLittleEndianUInt32(PRNLUInt32Array(TRNLPointer(@aNonce))^[2]);
+ FillChar(fPool,SizeOf(TRNLChaCha20State),#0);
+ fPoolIndex:=64;
+end;
+
 procedure TRNLChaCha20Context.EndianNeutralInitialize(const aKey;const aNonce:TRNLUInt64=0;const aCounter:TRNLUInt64=0);
 var LocalNonce:TRNLUInt64;
 begin
@@ -16218,6 +16845,436 @@ end;
 class function TRNLAuthenticatedEncryption.Decrypt(out aPlainText;const aKey,aNonce,aMAC,aCipherText;const aCipherTextSize:TRNLSizeUInt):boolean;
 begin
  result:=Decrypt(aPlainText,aKey,aNonce,aMac,TRNLPointer(nil)^,0,aCipherText,aCipherTextSize);
+end;
+
+class procedure TRNLChaCha20Poly1305.ComputeTag(out aTag;
+                                                const aOneTimeKey;
+                                                const aAssociatedData;const aAssociatedDataSize:TRNLSizeUInt;
+                                                const aCipherText;const aCipherTextSize:TRNLSizeUInt);
+const Padding:array[0..15] of TRNLUInt8=(0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0);
+var Context:TRNLPoly1305Context;
+    Lengths:array[0..1] of TRNLUInt64;
+begin
+ Context.Initialize(aOneTimeKey);
+ try
+  if aAssociatedDataSize>0 then begin
+   Context.Update(aAssociatedData,aAssociatedDataSize);
+   if (aAssociatedDataSize and 15)<>0 then begin
+    Context.Update(Padding[0],16-(aAssociatedDataSize and 15));
+   end;
+  end;
+  if aCipherTextSize>0 then begin
+   Context.Update(aCipherText,aCipherTextSize);
+   if (aCipherTextSize and 15)<>0 then begin
+    Context.Update(Padding[0],16-(aCipherTextSize and 15));
+   end;
+  end;
+  // Little endian, unlike everything else on a wire, because Poly1305 reads its input that way
+  TRNLMemoryAccess.StoreLittleEndianUInt64(Lengths[0],aAssociatedDataSize);
+  TRNLMemoryAccess.StoreLittleEndianUInt64(Lengths[1],aCipherTextSize);
+  Context.Update(Lengths[0],SizeOf(Lengths));
+  Context.Finalize(aTag);
+ finally
+  FillChar(Context,SizeOf(TRNLPoly1305Context),#0);
+ end;
+end;
+
+class procedure TRNLChaCha20Poly1305.Encrypt(out aCipherText;out aTag;
+                                             const aKey;const aNonce;
+                                             const aAssociatedData;const aAssociatedDataSize:TRNLSizeUInt;
+                                             const aPlainText;const aPlainTextSize:TRNLSizeUInt);
+var Context:TRNLChaCha20Context;
+    OneTimeKey:array[0..KeySize-1] of TRNLUInt8;
+begin
+ try
+  // The Poly1305 key is the first 32 bytes of the keystream at counter zero, and the ciphertext
+  // begins at counter one - a fresh block, not the remaining 32 bytes of that first one
+  Context.RFC8439Initialize(aKey,aNonce,0);
+  Context.Stream(OneTimeKey,SizeOf(OneTimeKey));
+  Context.RFC8439Initialize(aKey,aNonce,1);
+  if aPlainTextSize>0 then begin
+   Context.Process(aCipherText,aPlainText,aPlainTextSize);
+  end;
+  ComputeTag(aTag,OneTimeKey,aAssociatedData,aAssociatedDataSize,aCipherText,aPlainTextSize);
+ finally
+  FillChar(OneTimeKey,SizeOf(OneTimeKey),#0);
+  FillChar(Context,SizeOf(TRNLChaCha20Context),#0);
+ end;
+end;
+
+function TRNLDTLSTrafficKeys.DeriveFrom(const aTrafficSecret;const aTrafficSecretSize:TRNLSizeUInt):boolean;
+var Nothing:TRNLUInt8;
+begin
+ // Somewhere for the empty context to point at. Nothing is read from it.
+ Nothing:=0;
+ result:=TRNLTLS13KeySchedule.ExpandLabel(TRNLSHA256.Descriptor,Key,KeySize,
+                                          aTrafficSecret,aTrafficSecretSize,
+                                          'key',Nothing,0) and
+         TRNLTLS13KeySchedule.ExpandLabel(TRNLSHA256.Descriptor,IV,IVSize,
+                                          aTrafficSecret,aTrafficSecretSize,
+                                          'iv',Nothing,0) and
+         TRNLTLS13KeySchedule.ExpandLabel(TRNLSHA256.Descriptor,SequenceNumberKey,SequenceNumberKeySize,
+                                          aTrafficSecret,aTrafficSecretSize,
+                                          'sn',Nothing,0);
+ if not result then begin
+  Clear;
+ end;
+end;
+
+procedure TRNLDTLSTrafficKeys.Clear;
+begin
+ FillChar(self,SizeOf(TRNLDTLSTrafficKeys),#0);
+end;
+
+procedure TRNLDTLSReplayWindow.Initialize;
+begin
+ fHighest:=0;
+ fBitmap:=0;
+ fAnySeen:=false;
+end;
+
+function TRNLDTLSReplayWindow.Reconstruct(const aPartial:TRNLUInt64;const aPartialSize:TRNLSizeUInt):TRNLUInt64;
+var Span,Half,Expected,Candidate:TRNLUInt64;
+begin
+ Span:=TRNLUInt64(1) shl (aPartialSize*8);
+ Half:=Span shr 1;
+ if fAnySeen then begin
+  Expected:=fHighest+1;
+ end else begin
+  Expected:=0;
+ end;
+ Candidate:=(Expected and not (Span-1)) or aPartial;
+ // A number a little behind what is expected is a reordered record; one a long way behind is really
+ // one wrap further on, and the other way round for one a long way ahead
+ if (Candidate+Half)<Expected then begin
+  inc(Candidate,Span);
+ end else if (Candidate>(Expected+Half)) and (Candidate>=Span) then begin
+  dec(Candidate,Span);
+ end;
+ result:=Candidate;
+end;
+
+function TRNLDTLSReplayWindow.Permits(const aSequenceNumber:TRNLUInt64):boolean;
+var Distance:TRNLUInt64;
+begin
+ if not fAnySeen then begin
+  result:=true;
+ end else if aSequenceNumber>fHighest then begin
+  result:=true;
+ end else begin
+  Distance:=fHighest-aSequenceNumber;
+  if Distance>=TRNLUInt64(Width) then begin
+   // Too far back to tell a late arrival from a replay, so it counts as a replay. Being wrong in
+   // this direction loses a record which was probably useless by now; being wrong in the other one
+   // accepts one which was already delivered.
+   result:=false;
+  end else begin
+   result:=(fBitmap and (TRNLUInt64(1) shl Distance))=0;
+  end;
+ end;
+end;
+
+procedure TRNLDTLSReplayWindow.Remember(const aSequenceNumber:TRNLUInt64);
+var Shift,Distance:TRNLUInt64;
+begin
+ if not fAnySeen then begin
+  fAnySeen:=true;
+  fHighest:=aSequenceNumber;
+  fBitmap:=1;
+ end else if aSequenceNumber>fHighest then begin
+  Shift:=aSequenceNumber-fHighest;
+  if Shift>=TRNLUInt64(Width) then begin
+   // Everything in the old window is now out of reach anyway
+   fBitmap:=1;
+  end else begin
+   fBitmap:=(fBitmap shl Shift) or 1;
+  end;
+  fHighest:=aSequenceNumber;
+ end else begin
+  Distance:=fHighest-aSequenceNumber;
+  if Distance<TRNLUInt64(Width) then begin
+   fBitmap:=fBitmap or (TRNLUInt64(1) shl Distance);
+  end;
+ end;
+end;
+
+class procedure TRNLDTLSRecord.BuildNonce(out aNonce;const aIV;const aSequenceNumber:TRNLUInt64);
+var Index:TRNLSizeInt;
+    Sequence:array[0..7] of TRNLUInt8;
+begin
+ // The sequence number big endian in eight bytes, left padded with zeros to the width of the iv,
+ // then xored over it. The padding is why only the last eight bytes change.
+ TRNLMemoryAccess.StoreBigEndianUInt64(Sequence[0],aSequenceNumber);
+ Move(aIV,aNonce,TRNLDTLSTrafficKeys.IVSize);
+ for Index:=0 to 7 do begin
+  PRNLUInt8Array(TRNLPointer(@aNonce))^[(TRNLDTLSTrafficKeys.IVSize-8)+Index]:=
+   PRNLUInt8Array(TRNLPointer(@aNonce))^[(TRNLDTLSTrafficKeys.IVSize-8)+Index] xor Sequence[Index];
+ end;
+end;
+
+class procedure TRNLDTLSRecord.BuildSequenceNumberMask(out aMask;
+                                                       const aSequenceNumberKey;
+                                                       const aCipherText);
+var Context:TRNLChaCha20Context;
+begin
+ try
+  // The first four bytes of the ciphertext are the block counter and the next twelve the nonce, so
+  // every record masks its own number with a keystream nobody without the key can reproduce
+  Context.RFC8439Initialize(aSequenceNumberKey,
+                            PRNLUInt8Array(TRNLPointer(@aCipherText))^[4],
+                            TRNLMemoryAccess.LoadLittleEndianUInt32(aCipherText));
+  Context.Stream(aMask,SentSequenceNumberSize);
+ finally
+  FillChar(Context,SizeOf(TRNLChaCha20Context),#0);
+ end;
+end;
+
+class function TRNLDTLSRecord.Protect(out aDatagram;out aDatagramSize:TRNLSizeUInt;
+                                      const aMaximumDatagramSize:TRNLSizeUInt;
+                                      const aKeys:TRNLDTLSTrafficKeys;
+                                      const aEpoch:TRNLUInt64;const aSequenceNumber:TRNLUInt64;
+                                      const aContentType:TRNLUInt8;
+                                      const aContent;const aContentSize:TRNLSizeUInt):boolean;
+var Datagram:PRNLUInt8Array;
+    Nonce:array[0..TRNLDTLSTrafficKeys.IVSize-1] of TRNLUInt8;
+    Mask:array[0..SentSequenceNumberSize-1] of TRNLUInt8;
+    InnerSize,TotalSize:TRNLSizeUInt;
+begin
+
+ result:=false;
+ aDatagramSize:=0;
+
+ if aContentSize>TRNLSizeUInt(MaximumContentSize) then begin
+  exit;
+ end;
+
+ // The content type goes after the content rather than in the header, which is what lets the header
+ // stay this short: DTLSInnerPlaintext is content, then type, then any padding, and all of it is
+ // encrypted. No padding is added here, since nothing this client sends is worth hiding the length
+ // of and a length which is not padded is one fewer thing to get wrong.
+ InnerSize:=aContentSize+1;
+ TotalSize:=TRNLSizeUInt(SentHeaderSize)+InnerSize+TRNLSizeUInt(TagSize);
+ if TotalSize>aMaximumDatagramSize then begin
+  exit;
+ end;
+
+ Datagram:=PRNLUInt8Array(TRNLPointer(@aDatagram));
+
+ try
+
+  Datagram^[0]:=HEADER_FIXED_BITS or
+                HEADER_LONG_SEQUENCE_NUMBER or
+                HEADER_LENGTH_PRESENT or
+                TRNLUInt8(aEpoch and TRNLUInt64(HEADER_EPOCH_MASK));
+  TRNLMemoryAccess.StoreBigEndianUInt16(Datagram^[1],TRNLUInt16(aSequenceNumber));
+  TRNLMemoryAccess.StoreBigEndianUInt16(Datagram^[3],TRNLUInt16(InnerSize+TRNLSizeUInt(TagSize)));
+
+  if aContentSize>0 then begin
+   Move(aContent,Datagram^[SentHeaderSize],aContentSize);
+  end;
+  Datagram^[TRNLSizeUInt(SentHeaderSize)+aContentSize]:=aContentType;
+
+  BuildNonce(Nonce,aKeys.IV,aSequenceNumber);
+
+  // The header is the associated data, and it is the header as it stands now - with the sequence
+  // number still in the clear. The masking below happens after, and the counter side undoes it
+  // before it authenticates.
+  TRNLChaCha20Poly1305.Encrypt(Datagram^[SentHeaderSize],
+                               Datagram^[TRNLSizeUInt(SentHeaderSize)+InnerSize],
+                               aKeys.Key,Nonce,
+                               Datagram^[0],SentHeaderSize,
+                               Datagram^[SentHeaderSize],InnerSize);
+
+  BuildSequenceNumberMask(Mask,aKeys.SequenceNumberKey,Datagram^[SentHeaderSize]);
+  Datagram^[1]:=Datagram^[1] xor Mask[0];
+  Datagram^[2]:=Datagram^[2] xor Mask[1];
+
+  aDatagramSize:=TotalSize;
+  result:=true;
+
+ finally
+  FillChar(Nonce,SizeOf(Nonce),#0);
+  FillChar(Mask,SizeOf(Mask),#0);
+ end;
+
+end;
+
+class function TRNLDTLSRecord.Unprotect(out aContent;out aContentSize:TRNLSizeUInt;
+                                        out aContentType:TRNLUInt8;
+                                        out aSequenceNumber:TRNLUInt64;
+                                        out aConsumedSize:TRNLSizeUInt;
+                                        const aMaximumContentSize:TRNLSizeUInt;
+                                        const aKeys:TRNLDTLSTrafficKeys;
+                                        const aEpoch:TRNLUInt64;
+                                        var aReplayWindow:TRNLDTLSReplayWindow;
+                                        const aDatagram;const aDatagramSize:TRNLSizeUInt):boolean;
+var Datagram:PRNLUInt8Array;
+    Nonce:array[0..TRNLDTLSTrafficKeys.IVSize-1] of TRNLUInt8;
+    Mask:array[0..SentSequenceNumberSize-1] of TRNLUInt8;
+    Header:array[0..SentHeaderSize-1] of TRNLUInt8;
+    Plain:array[0..(MaximumContentSize+1)-1] of TRNLUInt8;
+    HeaderSize,CipherTextSize,SequenceNumberSize,PlainSize,Index:TRNLSizeUInt;
+    First:TRNLUInt8;
+    Partial:TRNLUInt64;
+begin
+
+ result:=false;
+ aContentSize:=0;
+ aContentType:=0;
+ aSequenceNumber:=0;
+ aConsumedSize:=0;
+
+ Datagram:=PRNLUInt8Array(TRNLPointer(@aDatagram));
+
+ try
+
+  if aDatagramSize<1 then begin
+   exit;
+  end;
+
+  First:=Datagram^[0];
+  if (First and HEADER_FIXED_MASK)<>HEADER_FIXED_BITS then begin
+   exit;
+  end;
+
+  // No connection id was ever negotiated, so a record claiming to carry one is a record whose
+  // header length this client cannot compute. Guessing at it is how a parser reads past its buffer.
+  if (First and HEADER_CONNECTION_ID)<>0 then begin
+   exit;
+  end;
+
+  if (TRNLUInt64(First and HEADER_EPOCH_MASK))<>(aEpoch and TRNLUInt64(HEADER_EPOCH_MASK)) then begin
+   exit;
+  end;
+
+  if (First and HEADER_LONG_SEQUENCE_NUMBER)<>0 then begin
+   SequenceNumberSize:=2;
+  end else begin
+   SequenceNumberSize:=1;
+  end;
+
+  HeaderSize:=1+SequenceNumberSize;
+  if (First and HEADER_LENGTH_PRESENT)<>0 then begin
+   inc(HeaderSize,2);
+  end;
+  if aDatagramSize<HeaderSize then begin
+   exit;
+  end;
+
+  if (First and HEADER_LENGTH_PRESENT)<>0 then begin
+   CipherTextSize:=TRNLMemoryAccess.LoadBigEndianUInt16(Datagram^[1+SequenceNumberSize]);
+   // A length which claims more than is there is the whole reason this field is not believed
+   if CipherTextSize>(aDatagramSize-HeaderSize) then begin
+    exit;
+   end;
+  end else begin
+   // Without a length the record runs to the end of the datagram, so it has to be the last one
+   CipherTextSize:=aDatagramSize-HeaderSize;
+  end;
+
+  // Below sixteen there is no mask to be had, and below tag plus one there is no room for even an
+  // empty content and its type byte
+  if (CipherTextSize<TRNLSizeUInt(MaskSourceSize)) or
+     (CipherTextSize<(TRNLSizeUInt(TagSize)+1)) then begin
+   exit;
+  end;
+
+  PlainSize:=CipherTextSize-TRNLSizeUInt(TagSize);
+  if PlainSize>TRNLSizeUInt(SizeOf(Plain)) then begin
+   exit;
+  end;
+
+  // The mask comes off first, because the number underneath it is part of what gets authenticated
+  BuildSequenceNumberMask(Mask,aKeys.SequenceNumberKey,Datagram^[HeaderSize]);
+  Move(Datagram^[0],Header[0],HeaderSize);
+  for Index:=0 to SequenceNumberSize-1 do begin
+   Header[1+Index]:=Header[1+Index] xor Mask[Index];
+  end;
+
+  Partial:=0;
+  for Index:=0 to SequenceNumberSize-1 do begin
+   Partial:=(Partial shl 8) or TRNLUInt64(Header[1+Index]);
+  end;
+  aSequenceNumber:=aReplayWindow.Reconstruct(Partial,SequenceNumberSize);
+
+  // Asked before the AEAD runs, so that a replayed record costs a test rather than a decryption
+  if not aReplayWindow.Permits(aSequenceNumber) then begin
+   exit;
+  end;
+
+  BuildNonce(Nonce,aKeys.IV,aSequenceNumber);
+
+  if not TRNLChaCha20Poly1305.Decrypt(Plain[0],
+                                      aKeys.Key,Nonce,
+                                      Datagram^[HeaderSize+PlainSize],
+                                      Header[0],HeaderSize,
+                                      Datagram^[HeaderSize],PlainSize) then begin
+   exit;
+  end;
+
+  // The content type is the last byte which is not padding, and padding is zeros. An inner plaintext
+  // of nothing but zeros has no type at all and is a record to throw away, not to guess at.
+  Index:=PlainSize;
+  while (Index>0) and (Plain[Index-1]=0) do begin
+   dec(Index);
+  end;
+  if Index=0 then begin
+   exit;
+  end;
+  aContentType:=Plain[Index-1];
+  aContentSize:=Index-1;
+
+  if aContentSize>aMaximumContentSize then begin
+   aContentSize:=0;
+   exit;
+  end;
+  if aContentSize>0 then begin
+   Move(Plain[0],aContent,aContentSize);
+  end;
+
+  // Only now, with the AEAD satisfied, does this number count as seen
+  aReplayWindow.Remember(aSequenceNumber);
+
+  aConsumedSize:=HeaderSize+CipherTextSize;
+  result:=true;
+
+ finally
+  FillChar(Nonce,SizeOf(Nonce),#0);
+  FillChar(Mask,SizeOf(Mask),#0);
+  FillChar(Plain,SizeOf(Plain),#0);
+ end;
+
+end;
+
+class function TRNLChaCha20Poly1305.Decrypt(out aPlainText;
+                                            const aKey;const aNonce;const aTag;
+                                            const aAssociatedData;const aAssociatedDataSize:TRNLSizeUInt;
+                                            const aCipherText;const aCipherTextSize:TRNLSizeUInt):boolean;
+var Context:TRNLChaCha20Context;
+    OneTimeKey:array[0..KeySize-1] of TRNLUInt8;
+    ComputedTag:array[0..TagSize-1] of TRNLUInt8;
+begin
+ result:=false;
+ try
+  Context.RFC8439Initialize(aKey,aNonce,0);
+  Context.Stream(OneTimeKey,SizeOf(OneTimeKey));
+  ComputeTag(ComputedTag,OneTimeKey,aAssociatedData,aAssociatedDataSize,aCipherText,aCipherTextSize);
+  // Checked before a single byte is decrypted, so that nothing which failed authentication ever
+  // reaches the caller's buffer, and compared in constant time so that the comparison itself says
+  // nothing about how far it got
+  if not TRNLMemory.SecureIsEqual(aTag,ComputedTag,TagSize) then begin
+   exit;
+  end;
+  Context.RFC8439Initialize(aKey,aNonce,1);
+  if aCipherTextSize>0 then begin
+   Context.Process(aPlainText,aCipherText,aCipherTextSize);
+  end;
+  result:=true;
+ finally
+  FillChar(OneTimeKey,SizeOf(OneTimeKey),#0);
+  FillChar(ComputedTag,SizeOf(ComputedTag),#0);
+  FillChar(Context,SizeOf(TRNLChaCha20Context),#0);
+ end;
 end;
 
 constructor TRNLSpinLock.Create;
@@ -19831,11 +20888,14 @@ begin
  TRNLED25519.SelfTest;
  TRNLChaCha20.SelfTest;
  TRNLPoly1305.SelfTest;
+ TRNLChaCha20Poly1305.SelfTest;
  TRNLSHA512.SelfTest;
  TRNLSHA256.SelfTest;
  TRNLHMACSHA256.SelfTest;
+ TRNLHMACSHA512.SelfTest;
  TRNLHKDF.SelfTest;
  TRNLTLS13KeySchedule.SelfTest;
+ TRNLDTLSRecord.SelfTest;
 {$if defined(RNL_TURN_RFC5389_COMPAT)}
  TRNLSHA1.SelfTest;
  TRNLHMACSHA1.SelfTest;

@@ -4019,6 +4019,315 @@ begin
 end;
 
 // ---------------------------------------------------------------------------------------
+// The DTLS record layer, where a parser meets a datagram from a stranger
+// ---------------------------------------------------------------------------------------
+
+// TRNLDTLSRecord.SelfTest pins one whole record against a separate implementation, which says the
+// wire format is right. What it cannot say is anything about the records which are wrong, and those
+// are the ones that matter: Unprotect reads a length field, a header flag and a sequence number out
+// of a datagram which anybody on the path may have written.
+//
+// Driven straight through the record layer with no host and no network, because what is under test
+// is arithmetic over a buffer and observing it through two hosts would take seconds and could be
+// blamed on half a dozen other things.
+procedure TestDTLSRecordLayerRejectsWhatDoesNotAddUp;
+const EPOCH=2;
+      SEQUENCE_NUMBER=$1234;
+var Watchdog:TRNLTestWatchdog;
+    Secret:array[0..31] of TRNLUInt8;
+    Keys:TRNLDTLSTrafficKeys;
+    Content:array[0..19] of TRNLUInt8;
+    Index:TRNLSizeInt;
+
+ // Whatever came out of Protect, run through Unprotect on a fresh window
+ function Accepts(const aDatagram;const aDatagramSize:TRNLSizeUInt):boolean;
+ var Window:TRNLDTLSReplayWindow;
+     Recovered:array[0..255] of TRNLUInt8;
+     RecoveredSize,ConsumedSize:TRNLSizeUInt;
+     ContentType:TRNLUInt8;
+     SequenceNumber:TRNLUInt64;
+ begin
+  Window.Initialize;
+  result:=TRNLDTLSRecord.Unprotect(Recovered,RecoveredSize,ContentType,SequenceNumber,ConsumedSize,
+                                   SizeOf(Recovered),Keys,EPOCH,Window,aDatagram,aDatagramSize);
+ end;
+
+ // Every one of these is a header a stranger can write, and every one of them has to come back false
+ // rather than as a read past the end of the buffer
+ procedure CheckMalformedRecordsAreRefused;
+ var Datagram,Damaged:array[0..127] of TRNLUInt8;
+     DatagramSize:TRNLSizeUInt;
+     AllRefused:boolean;
+
+  procedure Refuse(const aWhat:TRNLRawByteString;const aSize:TRNLSizeUInt);
+  begin
+   if Accepts(Damaged,aSize) then begin
+    AllRefused:=false;
+    Info('accepted a record with '+aWhat);
+   end;
+  end;
+
+ begin
+
+  if not TRNLDTLSRecord.Protect(Datagram,DatagramSize,SizeOf(Datagram),Keys,
+                                EPOCH,SEQUENCE_NUMBER,
+                                TRNLDTLSRecord.CONTENT_TYPE_HANDSHAKE,
+                                Content,SizeOf(Content)) then begin
+   Check(false,'the record layer has to be able to protect a record at all');
+   exit;
+  end;
+
+  Check(Accepts(Datagram,DatagramSize),
+        'the record which was just built has to be accepted, or nothing below means anything');
+
+  AllRefused:=true;
+
+  Move(Datagram,Damaged,DatagramSize);
+  Refuse('nothing in it at all',0);
+
+  Move(Datagram,Damaged,DatagramSize);
+  Refuse('a header cut off after four bytes',4);
+
+  // The top three bits say DTLSCiphertext. Anything else is a record this client cannot lay out.
+  Move(Datagram,Damaged,DatagramSize);
+  Damaged[0]:=Damaged[0] and not TRNLUInt8($e0);
+  Refuse('the fixed bits of the unified header cleared',DatagramSize);
+
+  // No connection id was ever negotiated, so the header length cannot be computed and guessing at
+  // it is how a parser walks off the end
+  Move(Datagram,Damaged,DatagramSize);
+  Damaged[0]:=Damaged[0] or TRNLUInt8($10);
+  Refuse('a connection id nobody negotiated',DatagramSize);
+
+  Move(Datagram,Damaged,DatagramSize);
+  Damaged[0]:=(Damaged[0] and not TRNLUInt8($03)) or TRNLUInt8((EPOCH+1) and $03);
+  Refuse('an epoch which is not the one being read',DatagramSize);
+
+  // The length field is the one which must not be believed. Two of them: one just past the end,
+  // which is the case the bounds check exists for, and one absurd. Only the first really tests it -
+  // an absurd length is caught a second time by the size of the plaintext buffer, so a missing
+  // bounds check would still look handled.
+  Move(Datagram,Damaged,DatagramSize);
+  TRNLMemoryAccess.StoreBigEndianUInt16(Damaged[3],
+                                        TRNLUInt16((DatagramSize-TRNLDTLSRecord.SentHeaderSize)+1));
+  Refuse('a length one byte past the end of the datagram',DatagramSize);
+
+  Move(Datagram,Damaged,DatagramSize);
+  Damaged[3]:=$7f;
+  Damaged[4]:=$ff;
+  Refuse('a length far larger than the datagram',DatagramSize);
+
+  Move(Datagram,Damaged,DatagramSize);
+  Damaged[3]:=0;
+  Damaged[4]:=0;
+  Refuse('a length of zero, which leaves no room for a tag',DatagramSize);
+
+  // Under sixteen bytes of ciphertext there is nothing to take the sequence number mask from
+  Move(Datagram,Damaged,DatagramSize);
+  Damaged[3]:=0;
+  Damaged[4]:=15;
+  Refuse('fifteen bytes of ciphertext, one short of a mask',TRNLSizeUInt(TRNLDTLSRecord.SentHeaderSize)+15);
+
+  // What this says, exactly: none of these is accepted. What refuses most of them is the tag rather
+  // than the check written above it, because the header is the associated data and so every one of
+  // these rewrites breaks the AEAD anyway - removing the connection id test, the fixed bits test or
+  // the epoch test leaves this check green.
+  //
+  // Those tests are therefore not about the verdict but about which bytes are read on the way to it,
+  // and a behavioural test cannot see that. It was checked separately instead, by laying a record so
+  // that it ends exactly at the border of an unreadable page: with the length bounds check the
+  // record is refused without touching the page, and without it the read faults. That probe is not
+  // in this suite because it needs mmap and would not build on Windows.
+  Check(AllRefused,'no malformed record may be accepted, whichever of the two says no');
+
+ end;
+
+ // A datagram may carry several records, which is what the length field is for
+ procedure CheckTwoRecordsInOneDatagram;
+ var Datagram:array[0..255] of TRNLUInt8;
+     Recovered:array[0..255] of TRNLUInt8;
+     Window:TRNLDTLSReplayWindow;
+     FirstSize,SecondSize,RecoveredSize,ConsumedSize,Offset:TRNLSizeUInt;
+     ContentType:TRNLUInt8;
+     SequenceNumber:TRNLUInt64;
+     Both:boolean;
+ begin
+
+  if not (TRNLDTLSRecord.Protect(Datagram[0],FirstSize,SizeOf(Datagram),Keys,
+                                 EPOCH,SEQUENCE_NUMBER,
+                                 TRNLDTLSRecord.CONTENT_TYPE_HANDSHAKE,
+                                 Content,SizeOf(Content)) and
+          TRNLDTLSRecord.Protect(Datagram[FirstSize],SecondSize,
+                                 TRNLSizeUInt(SizeOf(Datagram))-FirstSize,Keys,
+                                 EPOCH,SEQUENCE_NUMBER+1,
+                                 TRNLDTLSRecord.CONTENT_TYPE_ACK,
+                                 Content,SizeOf(Content))) then begin
+   Check(false,'two records have to fit into one datagram');
+   exit;
+  end;
+
+  Window.Initialize;
+  Both:=true;
+  Offset:=0;
+
+  if not (TRNLDTLSRecord.Unprotect(Recovered,RecoveredSize,ContentType,SequenceNumber,ConsumedSize,
+                                   SizeOf(Recovered),Keys,EPOCH,Window,
+                                   Datagram[Offset],(FirstSize+SecondSize)-Offset) and
+          (ContentType=TRNLDTLSRecord.CONTENT_TYPE_HANDSHAKE) and
+          (SequenceNumber=SEQUENCE_NUMBER) and
+          (ConsumedSize=FirstSize)) then begin
+   Both:=false;
+  end;
+  inc(Offset,ConsumedSize);
+
+  if not (TRNLDTLSRecord.Unprotect(Recovered,RecoveredSize,ContentType,SequenceNumber,ConsumedSize,
+                                   SizeOf(Recovered),Keys,EPOCH,Window,
+                                   Datagram[Offset],(FirstSize+SecondSize)-Offset) and
+          (ContentType=TRNLDTLSRecord.CONTENT_TYPE_ACK) and
+          (SequenceNumber=(SEQUENCE_NUMBER+1)) and
+          (ConsumedSize=SecondSize)) then begin
+   Both:=false;
+  end;
+
+  Check(Both,'two records packed into one datagram have to come out one after the other, each with '+
+             'its own content type and sequence number, which is what the length field is there for');
+
+ end;
+
+ // The window is what stands between the peer and a record it has already had
+ procedure CheckTheReplayWindow;
+ const WIDTH=TRNLDTLSReplayWindow.Width;
+ var Window:TRNLDTLSReplayWindow;
+     Passed:boolean;
+ begin
+
+  Window.Initialize;
+  Passed:=Window.Permits(100);
+  Window.Remember(100);
+  Passed:=Passed and not Window.Permits(100);
+
+  // Something older but still inside the window is a reordered record and has to get through once
+  Passed:=Passed and Window.Permits(90);
+  Window.Remember(90);
+  Passed:=Passed and not Window.Permits(90);
+  // and 100 must not have been forgotten in the process
+  Passed:=Passed and not Window.Permits(100);
+
+  // Older than the window is not a reordering any more, it is a replay which cannot be told apart
+  Passed:=Passed and not Window.Permits(100-WIDTH);
+  Passed:=Passed and not Window.Permits(0);
+
+  // A jump forward is normal on a lossy path and has to be taken
+  Passed:=Passed and Window.Permits(1000);
+  Window.Remember(1000);
+  Passed:=Passed and not Window.Permits(1000);
+  // and everything the jump left behind is now out of reach
+  Passed:=Passed and not Window.Permits(100);
+
+  Check(Passed,'the replay window has to take a record once, refuse it the second time, still take '+
+               'a reordered one from inside the window, and refuse everything which fell out of it');
+
+ end;
+
+ // The window is moved forward only by records the AEAD has vouched for. If a forged one moved it,
+ // anybody able to put a datagram on the path could name a sequence number far ahead and have every
+ // genuine record behind it refused as a replay - a denial of service which needs no key at all.
+ procedure CheckAForgedRecordDoesNotMoveTheWindow;
+ var Datagram,Damaged:array[0..127] of TRNLUInt8;
+     Recovered:array[0..127] of TRNLUInt8;
+     Window:TRNLDTLSReplayWindow;
+     DatagramSize,RecoveredSize,ConsumedSize:TRNLSizeUInt;
+     ContentType:TRNLUInt8;
+     SequenceNumber:TRNLUInt64;
+     Forged,Genuine:boolean;
+ begin
+
+  if not TRNLDTLSRecord.Protect(Datagram,DatagramSize,SizeOf(Datagram),Keys,
+                                EPOCH,SEQUENCE_NUMBER,
+                                TRNLDTLSRecord.CONTENT_TYPE_HANDSHAKE,
+                                Content,SizeOf(Content)) then begin
+   Check(false,'the record layer has to be able to protect a record at all');
+   exit;
+  end;
+
+  // The same sequence number, with the ciphertext turned over so that the tag will not verify
+  Move(Datagram,Damaged,DatagramSize);
+  Damaged[TRNLDTLSRecord.SentHeaderSize]:=Damaged[TRNLDTLSRecord.SentHeaderSize] xor $ff;
+
+  Window.Initialize;
+  Forged:=TRNLDTLSRecord.Unprotect(Recovered,RecoveredSize,ContentType,SequenceNumber,ConsumedSize,
+                                   SizeOf(Recovered),Keys,EPOCH,Window,Damaged,DatagramSize);
+  Genuine:=TRNLDTLSRecord.Unprotect(Recovered,RecoveredSize,ContentType,SequenceNumber,ConsumedSize,
+                                    SizeOf(Recovered),Keys,EPOCH,Window,Datagram,DatagramSize);
+
+  Check((not Forged) and Genuine,
+        'a record which fails its tag must not be remembered, so that the genuine one carrying the '+
+        'same sequence number still gets through afterwards');
+
+ end;
+
+ // Only the low bits travel, so the rest is put back from what has been seen
+ procedure CheckSequenceNumberReconstruction;
+ var Window:TRNLDTLSReplayWindow;
+     Passed:boolean;
+ begin
+
+  Window.Initialize;
+
+  // Nothing seen yet, so the number is taken as it stands
+  Passed:=Window.Reconstruct($1234,2)=$1234;
+
+  Window.Remember($fffe);
+  // The next one after $fffe is $ffff, and $0000 on the wire past it means $10000 rather than zero.
+  // Getting this wrong is a connection which dies at every wrap of the low sixteen bits.
+  Passed:=Passed and (Window.Reconstruct($ffff,2)=$ffff);
+  Passed:=Passed and (Window.Reconstruct($0000,2)=$10000);
+  Passed:=Passed and (Window.Reconstruct($0001,2)=$10001);
+  // while something a little behind is still a reordered record from this side of the wrap
+  Passed:=Passed and (Window.Reconstruct($fff0,2)=$fff0);
+
+  Window.Initialize;
+  Window.Remember($20ff);
+  // The same with a single byte on the wire, where the wrap comes round 256 times as often
+  Passed:=Passed and (Window.Reconstruct($00,1)=$2100);
+  Passed:=Passed and (Window.Reconstruct($fe,1)=$20fe);
+
+  Check(Passed,'a sequence number has to be put back as the value closest to the one expected next, '+
+               'so that the wrap of the low bits which travel is not read as a jump back to zero');
+
+ end;
+
+begin
+
+ TestBegin('the dtls record layer rejects what does not add up');
+ Watchdog:=TRNLTestWatchdog.Create('dtls record layer',60000);
+ try
+
+  for Index:=0 to SizeOf(Secret)-1 do begin
+   Secret[Index]:=TRNLUInt8((Index*29) xor $5c);
+  end;
+  for Index:=0 to SizeOf(Content)-1 do begin
+   Content[Index]:=TRNLUInt8($40+Index);
+  end;
+
+  if not Keys.DeriveFrom(Secret,SizeOf(Secret)) then begin
+   Check(false,'the traffic keys have to derive');
+  end else begin
+   CheckMalformedRecordsAreRefused;
+   CheckTwoRecordsInOneDatagram;
+   CheckTheReplayWindow;
+   CheckAForgedRecordDoesNotMoveTheWindow;
+   CheckSequenceNumberReconstruction;
+  end;
+
+ finally
+  FreeAndNil(Watchdog);
+  TestEnd;
+ end;
+
+end;
+
+// ---------------------------------------------------------------------------------------
 // Channel numbers come back
 // ---------------------------------------------------------------------------------------
 
@@ -9361,6 +9670,7 @@ begin
  TestCryptographySelfTestsPass;
  TestHashesStreamInChunksAndHMACHandlesKeyLengths;
  TestHKDFStretchesAndRefusesPastTheVectors;
+ TestDTLSRecordLayerRejectsWhatDoesNotAddUp;
 
  // Pure configuration invariants first, they are instant and their failure explains a lot of
  // what the behavioural tests below would otherwise report in a much noisier way
