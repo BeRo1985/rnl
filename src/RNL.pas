@@ -6258,6 +6258,9 @@ type PRNLVersion=^TRNLVersion;
 
      TRNLDiscoveryClient=class
       public
+       // aPort is the port answers are listened for on, and zero leaves the choice of it to the system.
+       // Zero is the one to pass unless something outside has to know the port beforehand: a named port
+       // is one no second discovery on the same machine can have at the same time.
        class function Discover(const aInstance:TRNLInstance;
                                const aNetwork:TRNLNetwork;
                                const aPort:TRNLUInt16;
@@ -34769,7 +34772,13 @@ begin
           // not seen at all
           DiscoveryAnswerPacket.Meta:=GetMeta;
 
-          ClientAddress.Port:=DiscoveryRequestPacket^.ClientPort;
+          // Answered to the port the client asked to be answered on, but only when it named one. A
+          // client that leaves it at zero is answered where the request came from instead, which is
+          // what lets it bind an ephemeral port: naming a port makes that port a shared resource, and
+          // two clients on one machine cannot then both be discovering at the same time.
+          if DiscoveryRequestPacket^.ClientPort<>0 then begin
+           ClientAddress.Port:=DiscoveryRequestPacket^.ClientPort;
+          end;
 
           fNetwork.Send(fSockets[Index],
                         @ClientAddress,
