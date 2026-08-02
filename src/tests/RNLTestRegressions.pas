@@ -3757,6 +3757,49 @@ var Watchdog:TRNLTestWatchdog;
 
  end;
 
+ // The one shot HMAC is now the shortest possible use of the streaming one, and HKDF is the reason
+ // the streaming one exists: every block it expands is the previous block, then the info, then a
+ // counter byte, which is three pieces and never one buffer. So the MAC must not depend on where
+ // the message was cut, and it must be the same MAC the one shot form gives.
+ procedure CheckHMACStreaming;
+ var OneShot,Streamed:TRNLSHA256Hash;
+     Context:TRNLHMACContext;
+     Key:array[0..15] of TRNLUInt8;
+     ChunkIndex,Position,Chunk:TRNLSizeInt;
+     AllMatched:boolean;
+ begin
+  for ChunkIndex:=0 to SizeOf(Key)-1 do begin
+   Key[ChunkIndex]:=TRNLUInt8($5a+ChunkIndex);
+  end;
+  TRNLHMACSHA256.Process(OneShot,Key,SizeOf(Key),Message_,SizeOf(Message_));
+  AllMatched:=true;
+  for ChunkIndex:=Low(CHUNK_SIZES) to High(CHUNK_SIZES) do begin
+   if not Context.Initialize(TRNLSHA256.Descriptor,Key,SizeOf(Key)) then begin
+    AllMatched:=false;
+    break;
+   end;
+   Position:=0;
+   while Position<SizeOf(Message_) do begin
+    Chunk:=CHUNK_SIZES[ChunkIndex];
+    if Chunk>(TRNLSizeInt(SizeOf(Message_))-Position) then begin
+     Chunk:=TRNLSizeInt(SizeOf(Message_))-Position;
+    end;
+    Context.Update(Message_[Position],Chunk);
+    inc(Position,Chunk);
+   end;
+   if not Context.Finalize(Streamed) then begin
+    AllMatched:=false;
+    break;
+   end;
+   if not TRNLMemory.SecureIsEqual(Streamed,OneShot,SizeOf(TRNLSHA256Hash)) then begin
+    AllMatched:=false;
+    Info('hmac-sha256 differs at a chunk size of '+TRNLRawByteString(IntToStr(CHUNK_SIZES[ChunkIndex])));
+   end;
+  end;
+  Check(AllMatched,'and hmac itself, whose message arrives in pieces as soon as hkdf is the one '+
+                   'feeding it');
+ end;
+
 begin
 
  TestBegin('the hashes stream in chunks and hmac handles every key length');
@@ -3775,6 +3818,198 @@ begin
   CheckSHA1Streaming;
   CheckMD5Streaming;
   CheckHMACKeyLengthBoundary;
+  CheckHMACStreaming;
+
+ finally
+  FreeAndNil(Watchdog);
+  TestEnd;
+ end;
+
+end;
+
+// ---------------------------------------------------------------------------------------
+// HKDF, past where the published vectors reach
+// ---------------------------------------------------------------------------------------
+
+// TRNLHKDF.SelfTest runs the three RFC 5869 cases and TRNLTLS13KeySchedule.SelfTest the RFC 8448
+// one. Those are the anchors: they say the arithmetic and the HkdfLabel wire format agree with
+// something built elsewhere. What they cannot say is anything about the lengths they do not use, and
+// there are three such places.
+//
+// The block boundary. An output is cut out of a chain of blocks of hash size, and both vector
+// lengths, 42 and 82 bytes, happen to end in the middle of a block. A copy which is one byte out at
+// a block edge, or one which writes a whole final block instead of the remainder, survives both.
+//
+// The ceiling. The counter which keeps the blocks apart is one byte starting at one, so 255 blocks
+// is the whole of what can ever be derived. One byte past it the counter would wrap and silently
+// hand out the first block a second time. The vectors stop at 82 bytes, three blocks in.
+//
+// The two length fields of HkdfLabel. The pinned vector has a seven byte label and a thirty two byte
+// context, so it holds for exactly one point of a plane.
+procedure TestHKDFStretchesAndRefusesPastTheVectors;
+const REFERENCE_SIZE=96;
+      // 255 blocks of thirty two bytes, which is everything one counter byte reaches
+      CEILING_SIZE=255*32;
+      // The six byte prefix travels inside label<7..255>, so a caller's own label ends at 249
+      MAXIMUM_LABEL_SIZE=249;
+      MAXIMUM_CONTEXT_SIZE=255;
+var Watchdog:TRNLTestWatchdog;
+    Secret:array[0..31] of TRNLUInt8;
+    InfoBytes:array[0..9] of TRNLUInt8;
+    Index:TRNLSizeInt;
+
+ // Every output length has to be the front of the longest one, because the blocks a length is cut
+ // out of do not depend on how much was asked for. The tail of the buffer is checked as well, since
+ // a final block copied whole rather than cut would run past what the caller offered.
+ procedure CheckEveryLengthIsTheFrontOfTheLongest;
+ var Reference,Shorter:array[0..REFERENCE_SIZE-1] of TRNLUInt8;
+     Size,TailIndex:TRNLSizeInt;
+     AllMatched,TailUntouched:boolean;
+ begin
+  AllMatched:=TRNLHKDF.Expand(TRNLSHA256.Descriptor,Reference,SizeOf(Reference),
+                              Secret,SizeOf(Secret),InfoBytes,SizeOf(InfoBytes));
+  if AllMatched then begin
+   for Size:=1 to REFERENCE_SIZE do begin
+    FillChar(Shorter,SizeOf(Shorter),#0);
+    if not (TRNLHKDF.Expand(TRNLSHA256.Descriptor,Shorter,Size,
+                            Secret,SizeOf(Secret),InfoBytes,SizeOf(InfoBytes)) and
+            TRNLMemory.SecureIsEqual(Shorter,Reference,Size)) then begin
+     AllMatched:=false;
+     Info('hkdf differs at an output length of '+TRNLRawByteString(IntToStr(Size)));
+    end;
+    TailUntouched:=true;
+    for TailIndex:=Size to REFERENCE_SIZE-1 do begin
+     if Shorter[TailIndex]<>0 then begin
+      TailUntouched:=false;
+     end;
+    end;
+    if not TailUntouched then begin
+     AllMatched:=false;
+     Info('hkdf wrote past the '+TRNLRawByteString(IntToStr(Size))+' bytes it was asked for');
+    end;
+   end;
+  end;
+  Check(AllMatched,'every hkdf output length from 1 to 96 bytes has to be the front of the 96 byte '+
+                   'one and has to stop where it was told to, which is what says the block '+
+                   'boundaries at 32 and 64 are cut in the right place');
+ end;
+
+ // 255 blocks is the ceiling, and past it the answer has to be no rather than a wrapped counter
+ procedure CheckTheCeilingIsWhereTheCounterEnds;
+ var AtTheCeiling:array[0..CEILING_SIZE-1] of TRNLUInt8;
+     PastIt:array[0..CEILING_SIZE] of TRNLUInt8;
+ begin
+  Check(TRNLHKDF.Expand(TRNLSHA256.Descriptor,AtTheCeiling,CEILING_SIZE,
+                        Secret,SizeOf(Secret),InfoBytes,SizeOf(InfoBytes)),
+        '255 blocks of hash size is what one counter byte reaches, so 8160 bytes still has to come '+
+        'out');
+  Check(not TRNLHKDF.Expand(TRNLSHA256.Descriptor,PastIt,CEILING_SIZE+1,
+                            Secret,SizeOf(Secret),InfoBytes,SizeOf(InfoBytes)),
+        'and one byte more has to be refused, since a counter which wrapped would quietly hand out '+
+        'the first block a second time');
+ end;
+
+ // Both length fields of HkdfLabel are one byte wide, and a length which is truncated into one is a
+ // length which then disagrees with what follows it
+ procedure CheckTheLabelAndContextBoundaries;
+ var Output:TRNLSHA256Hash;
+     ContextBytes:array[0..MAXIMUM_CONTEXT_SIZE] of TRNLUInt8;
+     LongestLabel,OneTooLong:TRNLRawByteString;
+ begin
+  FillChar(ContextBytes,SizeOf(ContextBytes),#$5a);
+  LongestLabel:=TRNLRawByteString(StringOfChar('x',MAXIMUM_LABEL_SIZE));
+  OneTooLong:=TRNLRawByteString(StringOfChar('x',MAXIMUM_LABEL_SIZE+1));
+  Check(TRNLTLS13KeySchedule.ExpandLabel(TRNLSHA256.Descriptor,Output,SizeOf(Output),
+                                         Secret,SizeOf(Secret),LongestLabel,
+                                         ContextBytes,MAXIMUM_CONTEXT_SIZE),
+        'a label of 249 bytes plus the six byte prefix fills the 255 its field holds, so that and a '+
+        'context of 255 both have to be accepted');
+  Check(not TRNLTLS13KeySchedule.ExpandLabel(TRNLSHA256.Descriptor,Output,SizeOf(Output),
+                                             Secret,SizeOf(Secret),OneTooLong,
+                                             ContextBytes,MAXIMUM_CONTEXT_SIZE),
+        'while one byte more of label has to be refused rather than truncated into a length field');
+  Check(not TRNLTLS13KeySchedule.ExpandLabel(TRNLSHA256.Descriptor,Output,SizeOf(Output),
+                                             Secret,SizeOf(Secret),LongestLabel,
+                                             ContextBytes,MAXIMUM_CONTEXT_SIZE+1),
+        'and so does one byte more of context');
+  Check(not TRNLTLS13KeySchedule.ExpandLabel(TRNLSHA256.Descriptor,Output,SizeOf(Output),
+                                             Secret,SizeOf(Secret),'',
+                                             ContextBytes,MAXIMUM_CONTEXT_SIZE),
+        'an empty label too, since the field starts at seven and the prefix alone is six');
+ end;
+
+ // The RFC 8448 vector pins one point of the plane. This walks twenty more, against the structure
+ // laid out here rather than by the library, so that a disagreement about where a length byte goes
+ // shows up somewhere other than at the one length which happens to be pinned.
+ procedure CheckTheLabelStructureAtOtherLengths;
+ const LABEL_SIZES:array[0..4] of TRNLSizeInt=(1,7,8,128,MAXIMUM_LABEL_SIZE);
+       CONTEXT_SIZES:array[0..3] of TRNLSizeInt=(0,1,32,MAXIMUM_CONTEXT_SIZE);
+       PREFIX:array[0..5] of AnsiChar=('t','l','s','1','3',' ');
+ var FromExpandLabel,FromHandBuilt:TRNLSHA256Hash;
+     HandBuilt:array[0..((2+1+255)+(1+255))-1] of TRNLUInt8;
+     ContextBytes:array[0..MAXIMUM_CONTEXT_SIZE-1] of TRNLUInt8;
+     Label_:TRNLRawByteString;
+     LabelIndex,ContextIndex,Size:TRNLSizeInt;
+     AllMatched:boolean;
+ begin
+  for Size:=0 to SizeOf(ContextBytes)-1 do begin
+   ContextBytes[Size]:=TRNLUInt8((Size*11) xor $3c);
+  end;
+  AllMatched:=true;
+  for LabelIndex:=Low(LABEL_SIZES) to High(LABEL_SIZES) do begin
+   Label_:=TRNLRawByteString(StringOfChar('q',LABEL_SIZES[LabelIndex]));
+   for ContextIndex:=Low(CONTEXT_SIZES) to High(CONTEXT_SIZES) do begin
+    // struct { uint16 length; opaque label<7..255>; opaque context<0..255>; }
+    HandBuilt[0]:=0;
+    HandBuilt[1]:=TRNLUInt8(SizeOf(TRNLSHA256Hash));
+    HandBuilt[2]:=TRNLUInt8(SizeOf(PREFIX)+LABEL_SIZES[LabelIndex]);
+    Move(PREFIX[0],HandBuilt[3],SizeOf(PREFIX));
+    Move(Label_[1],HandBuilt[3+SizeOf(PREFIX)],LABEL_SIZES[LabelIndex]);
+    Size:=(3+SizeOf(PREFIX))+LABEL_SIZES[LabelIndex];
+    HandBuilt[Size]:=TRNLUInt8(CONTEXT_SIZES[ContextIndex]);
+    inc(Size);
+    if CONTEXT_SIZES[ContextIndex]>0 then begin
+     Move(ContextBytes[0],HandBuilt[Size],CONTEXT_SIZES[ContextIndex]);
+     inc(Size,CONTEXT_SIZES[ContextIndex]);
+    end;
+    if not (TRNLTLS13KeySchedule.ExpandLabel(TRNLSHA256.Descriptor,
+                                             FromExpandLabel,SizeOf(FromExpandLabel),
+                                             Secret,SizeOf(Secret),Label_,
+                                             ContextBytes,CONTEXT_SIZES[ContextIndex]) and
+            TRNLHKDF.Expand(TRNLSHA256.Descriptor,
+                            FromHandBuilt,SizeOf(FromHandBuilt),
+                            Secret,SizeOf(Secret),HandBuilt[0],Size) and
+            TRNLMemory.SecureIsEqual(FromExpandLabel,FromHandBuilt,SizeOf(TRNLSHA256Hash))) then begin
+     AllMatched:=false;
+     Info('hkdf-expand-label differs at a label of '+
+          TRNLRawByteString(IntToStr(LABEL_SIZES[LabelIndex]))+' and a context of '+
+          TRNLRawByteString(IntToStr(CONTEXT_SIZES[ContextIndex]))+' bytes');
+    end;
+   end;
+  end;
+  Check(AllMatched,'hkdf-expand-label has to agree with the same structure laid out by hand, at '+
+                   'twenty combinations of label and context length which the one pinned vector '+
+                   'does not reach');
+ end;
+
+begin
+
+ TestBegin('hkdf stretches across its block boundary and refuses what it cannot derive');
+ Watchdog:=TRNLTestWatchdog.Create('hkdf',60000);
+ try
+
+  // Not all the same byte, so that a block landing in the wrong place shows
+  for Index:=0 to SizeOf(Secret)-1 do begin
+   Secret[Index]:=TRNLUInt8((Index*13) xor $a5);
+  end;
+  for Index:=0 to SizeOf(InfoBytes)-1 do begin
+   InfoBytes[Index]:=TRNLUInt8($f0+Index);
+  end;
+
+  CheckEveryLengthIsTheFrontOfTheLongest;
+  CheckTheCeilingIsWhereTheCounterEnds;
+  CheckTheLabelAndContextBoundaries;
+  CheckTheLabelStructureAtOtherLengths;
 
  finally
   FreeAndNil(Watchdog);
@@ -9125,6 +9360,7 @@ begin
  // because until now nothing ever checked them
  TestCryptographySelfTestsPass;
  TestHashesStreamInChunksAndHMACHandlesKeyLengths;
+ TestHKDFStretchesAndRefusesPastTheVectors;
 
  // Pure configuration invariants first, they are instant and their failure explains a lot of
  // what the behavioural tests below would otherwise report in a much noisier way

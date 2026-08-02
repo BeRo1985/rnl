@@ -1775,6 +1775,30 @@ type PRNLVersion=^TRNLVersion;
                               const aMessage;const aMessageSize:TRNLSizeUInt):boolean; static;
      end;
 
+     // The same RFC 2104, in the shape the hashes themselves already have, so that a message which
+     // is not one contiguous buffer needs no buffer built for it. HKDF wants exactly that: every
+     // block it expands is the previous block, then the info, then a counter byte, and holding a
+     // scratch area for that would put a bound on the length of the info for no reason.
+     //
+     // The key block is kept because the outer pass needs it again after the inner one has ended,
+     // and it is what makes this record the size it is. Finalize wipes; Clear does the same for a
+     // context which is abandoned instead of finished.
+     PRNLHMACContext=^TRNLHMACContext;
+     TRNLHMACContext=record
+      private
+       fDescriptor:TRNLHashDescriptor;
+       fHashContext:array[0..TRNLHashDescriptor.MaximumContextSize-1] of TRNLUInt8;
+       fKeyBlock:TRNLHMACKeyBlock;
+       fStarted:boolean;
+      public
+       // False for a descriptor which does not add up, and the context then stays inert: Update does
+       // nothing and Finalize says so rather than writing something which is not a MAC.
+       function Initialize(const aDescriptor:TRNLHashDescriptor;const aKey;const aKeySize:TRNLSizeUInt):boolean;
+       procedure Update(const aMessage;const aMessageSize:TRNLSizeUInt);
+       function Finalize(out aMAC):boolean;
+       procedure Clear;
+     end;
+
      PRNLHMACSHA256=^TRNLHMACSHA256;
      TRNLHMACSHA256=record
       public
@@ -1794,6 +1818,89 @@ type PRNLVersion=^TRNLVersion;
        class procedure SelfTest; static;
      end;
 {$ifend}
+
+     // RFC 5869, the extract-then-expand key derivation function, over any hash TRNLHMAC will take.
+     // Extract condenses whatever entropy the input keying material holds into one pseudorandom key
+     // of the hash's own size; Expand stretches that into as much output as is asked for. Neither is
+     // more than HMAC calls, and the whole of the construction sits in what is fed to them and in the
+     // counter byte which keeps the output blocks apart.
+     //
+     // This is the foundation of the TLS 1.3 key schedule of RFC 8446 section 7.1, which DTLS 1.3
+     // takes over unchanged, so everything below rests on it.
+     PRNLHKDF=^TRNLHKDF;
+     TRNLHKDF=record
+      public
+       // RFC 5869 section 2.3: the counter which distinguishes the output blocks is a single byte
+       // starting at one, so no more than 255 blocks of hash size can ever come out of Expand
+       const MaximumExpandBlocks=255;
+      public
+       // PRK = HMAC-Hash(salt, IKM). The salt is the key and the keying material the message, which
+       // is the way round it looks wrong at first glance. An absent salt is passed as size zero and
+       // needs no special case: RFC 5869 says it then stands for HashLen zero bytes, and HMAC zero
+       // pads every key shorter than a block anyway, so the two are the same thing.
+       //
+       // aPseudoRandomKey receives aDescriptor.HashSize bytes.
+       class function Extract(const aDescriptor:TRNLHashDescriptor;
+                              out aPseudoRandomKey;
+                              const aSalt;const aSaltSize:TRNLSizeUInt;
+                              const aInputKeyingMaterial;const aInputKeyingMaterialSize:TRNLSizeUInt):boolean; static;
+       // False, and nothing written, for a descriptor which does not add up or for more output than
+       // the single counter byte can reach. Everything else about it cannot fail: no allocation, and
+       // no length which is not bounded by the descriptor.
+       class function Expand(const aDescriptor:TRNLHashDescriptor;
+                             out aOutput;const aOutputSize:TRNLSizeUInt;
+                             const aPseudoRandomKey;const aPseudoRandomKeySize:TRNLSizeUInt;
+                             const aInfo;const aInfoSize:TRNLSizeUInt):boolean; static;
+       class procedure SelfTest; static;
+     end;
+
+     // struct {
+     //  uint16 length;
+     //  opaque label<7..255>;
+     //  opaque context<0..255>;
+     // } HkdfLabel;
+     //
+     // at the largest it can be, which is what ExpandLabel builds into
+     PRNLTLS13HKDFLabel=^TRNLTLS13HKDFLabel;
+     TRNLTLS13HKDFLabel=array[0..((2+1+255)+(1+255))-1] of TRNLUInt8;
+
+     // RFC 8446 section 7.1, the two operations the TLS 1.3 key schedule is written in terms of, and
+     // which RFC 9147 section 5.9 takes over for DTLS 1.3 without changing a byte, label prefix
+     // included. They are thin, and they are here rather than inlined at their call sites for one
+     // reason: HkdfLabel is a wire format. Everything which has to agree with a counter side that was
+     // not built here goes wrong in the same way, by two ends agreeing with each other and with
+     // nobody else, and a shape which exists once can be pinned against a published vector once.
+     PRNLTLS13KeySchedule=^TRNLTLS13KeySchedule;
+     TRNLTLS13KeySchedule=record
+      public
+       const // The prefix is part of the label as it travels, so with label<7..255> holding both, a
+             // caller's own label is 1 to 249 bytes long
+             LabelPrefix:array[0..5] of TRNLUInt8=
+              (
+               TRNLUInt8(Ord('t')),TRNLUInt8(Ord('l')),TRNLUInt8(Ord('s')),
+               TRNLUInt8(Ord('1')),TRNLUInt8(Ord('3')),TRNLUInt8(Ord(' '))
+              );
+             MinimumLabelSize=7;
+             MaximumLabelSize=255;
+             MaximumContextSize=255;
+      public
+       // HKDF-Expand-Label(Secret, Label, Context, Length). False, and nothing written, when the
+       // label or the context will not fit the field which carries its length, or when the output
+       // length will not fit the uint16 which announces it.
+       class function ExpandLabel(const aDescriptor:TRNLHashDescriptor;
+                                  out aOutput;const aOutputSize:TRNLSizeUInt;
+                                  const aSecret;const aSecretSize:TRNLSizeUInt;
+                                  const aLabel:TRNLRawByteString;
+                                  const aContext;const aContextSize:TRNLSizeUInt):boolean; static;
+       // Derive-Secret(Secret, Label, Messages), where the caller has already hashed the messages.
+       // aSecret receives aDescriptor.HashSize bytes.
+       class function DeriveSecret(const aDescriptor:TRNLHashDescriptor;
+                                   out aSecret;
+                                   const aParentSecret;const aParentSecretSize:TRNLSizeUInt;
+                                   const aLabel:TRNLRawByteString;
+                                   const aTranscriptHash;const aTranscriptHashSize:TRNLSizeUInt):boolean; static;
+       class procedure SelfTest; static;
+     end;
 
      PRNLBLAKE2BHash=^TRNLBLAKE2BHash;
      TRNLBLAKE2BHash=array[0..63] of TRNLUInt8;
@@ -10673,51 +10780,94 @@ class function TRNLHMAC.Process(const aDescriptor:TRNLHashDescriptor;
                                 out aMAC;
                                 const aKey;const aKeySize:TRNLSizeUInt;
                                 const aMessage;const aMessageSize:TRNLSizeUInt):boolean;
-var KeyBlock:TRNLHMACKeyBlock;
-    Context:array[0..TRNLHashDescriptor.MaximumContextSize-1] of TRNLUInt8;
-    Inner:array[0..TRNLHashDescriptor.MaximumBlockSize-1] of TRNLUInt8;
+var Context:TRNLHMACContext;
+begin
+ // The whole of RFC 2104 lives in TRNLHMACContext; a message which does arrive in one piece is
+ // just the shortest possible use of it
+ result:=Context.Initialize(aDescriptor,aKey,aKeySize);
+ if result then begin
+  Context.Update(aMessage,aMessageSize);
+  result:=Context.Finalize(aMAC);
+ end else begin
+  Context.Clear;
+ end;
+end;
+
+function TRNLHMACContext.Initialize(const aDescriptor:TRNLHashDescriptor;
+                                    const aKey;const aKeySize:TRNLSizeUInt):boolean;
+begin
+
+ fStarted:=false;
+ FillChar(fKeyBlock,SizeOf(TRNLHMACKeyBlock),#0);
+
+ if not aDescriptor.Valid then begin
+  result:=false;
+  exit;
+ end;
+
+ fDescriptor:=aDescriptor;
+
+ if aKeySize>TRNLSizeUInt(fDescriptor.BlockSize) then begin
+  // A key longer than one block stands in for its own digest, which is shorter than a block for
+  // every hash and is therefore zero padded like any short key
+  fDescriptor.Initialize(fHashContext);
+  fDescriptor.Update(fHashContext,aKey,aKeySize);
+  fDescriptor.Finalize(fHashContext,fKeyBlock[0]);
+ end else if aKeySize>0 then begin
+  Move(aKey,fKeyBlock[0],aKeySize);
+ end;
+
+ TRNLHMAC.XorKeyBlock(fKeyBlock,fDescriptor.BlockSize,TRNLHMAC.InnerPad);
+ fDescriptor.Initialize(fHashContext);
+ fDescriptor.Update(fHashContext,fKeyBlock[0],fDescriptor.BlockSize);
+
+ fStarted:=true;
+ result:=true;
+
+end;
+
+procedure TRNLHMACContext.Update(const aMessage;const aMessageSize:TRNLSizeUInt);
+begin
+ if fStarted then begin
+  fDescriptor.Update(fHashContext,aMessage,aMessageSize);
+ end;
+end;
+
+function TRNLHMACContext.Finalize(out aMAC):boolean;
+var Inner:array[0..TRNLHashDescriptor.MaximumBlockSize-1] of TRNLUInt8;
 begin
 
  result:=false;
 
- if not aDescriptor.Valid then begin
+ if not fStarted then begin
   exit;
  end;
 
- FillChar(KeyBlock,SizeOf(TRNLHMACKeyBlock),#0);
  try
 
-  if aKeySize>TRNLSizeUInt(aDescriptor.BlockSize) then begin
-   // A key longer than one block stands in for its own digest, which is shorter than a block for
-   // every hash and is therefore zero padded like any short key
-   aDescriptor.Initialize(Context);
-   aDescriptor.Update(Context,aKey,aKeySize);
-   aDescriptor.Finalize(Context,KeyBlock[0]);
-  end else if aKeySize>0 then begin
-   Move(aKey,KeyBlock[0],aKeySize);
-  end;
-
-  XorKeyBlock(KeyBlock,aDescriptor.BlockSize,InnerPad);
-  aDescriptor.Initialize(Context);
-  aDescriptor.Update(Context,KeyBlock[0],aDescriptor.BlockSize);
-  aDescriptor.Update(Context,aMessage,aMessageSize);
-  aDescriptor.Finalize(Context,Inner[0]);
+  fDescriptor.Finalize(fHashContext,Inner[0]);
 
   // From the inner pad to the outer one, so that the key block is built only once
-  XorKeyBlock(KeyBlock,aDescriptor.BlockSize,InnerPad xor OuterPad);
-  aDescriptor.Initialize(Context);
-  aDescriptor.Update(Context,KeyBlock[0],aDescriptor.BlockSize);
-  aDescriptor.Update(Context,Inner[0],aDescriptor.HashSize);
-  aDescriptor.Finalize(Context,aMAC);
+  TRNLHMAC.XorKeyBlock(fKeyBlock,fDescriptor.BlockSize,TRNLHMAC.InnerPad xor TRNLHMAC.OuterPad);
+  fDescriptor.Initialize(fHashContext);
+  fDescriptor.Update(fHashContext,fKeyBlock[0],fDescriptor.BlockSize);
+  fDescriptor.Update(fHashContext,Inner[0],fDescriptor.HashSize);
+  fDescriptor.Finalize(fHashContext,aMAC);
 
   result:=true;
 
  finally
-  FillChar(KeyBlock,SizeOf(TRNLHMACKeyBlock),#0);
-  FillChar(Context,SizeOf(Context),#0);
   FillChar(Inner,SizeOf(Inner),#0);
+  Clear;
  end;
 
+end;
+
+procedure TRNLHMACContext.Clear;
+begin
+ FillChar(fKeyBlock,SizeOf(TRNLHMACKeyBlock),#0);
+ FillChar(fHashContext,SizeOf(fHashContext),#0);
+ fStarted:=false;
 end;
 
 class procedure TRNLHMACSHA256.Process(out aMAC;
@@ -10736,6 +10886,162 @@ begin
  TRNLHMAC.Process(TRNLSHA1.Descriptor,aMAC,aKey,aKeySize,aMessage,aMessageSize);
 end;
 {$ifend}
+
+class function TRNLHKDF.Extract(const aDescriptor:TRNLHashDescriptor;
+                                out aPseudoRandomKey;
+                                const aSalt;const aSaltSize:TRNLSizeUInt;
+                                const aInputKeyingMaterial;const aInputKeyingMaterialSize:TRNLSizeUInt):boolean;
+begin
+ // RFC 5869 section 2.2, in its entirety. The salt is the key and the keying material the message,
+ // which is the point of the step: a salt the attacker does not choose turns keying material which
+ // may be structured or partly known into something uniform
+ result:=TRNLHMAC.Process(aDescriptor,
+                          aPseudoRandomKey,
+                          aSalt,aSaltSize,
+                          aInputKeyingMaterial,aInputKeyingMaterialSize);
+end;
+
+class function TRNLHKDF.Expand(const aDescriptor:TRNLHashDescriptor;
+                               out aOutput;const aOutputSize:TRNLSizeUInt;
+                               const aPseudoRandomKey;const aPseudoRandomKeySize:TRNLSizeUInt;
+                               const aInfo;const aInfoSize:TRNLSizeUInt):boolean;
+var Context:TRNLHMACContext;
+    Block:array[0..TRNLHashDescriptor.MaximumBlockSize-1] of TRNLUInt8;
+    Position,Chunk,PreviousBlockSize:TRNLSizeUInt;
+    Counter:TRNLUInt8;
+begin
+
+ result:=false;
+
+ if not aDescriptor.Valid then begin
+  exit;
+ end;
+
+ // RFC 5869 section 2.3 bounds the output at 255 blocks, because the counter which keeps the blocks
+ // apart is one byte. Refused rather than truncated: a caller which asks for more than can be
+ // derived has a wrong idea of what it is getting, and a short answer would hide that.
+ if aOutputSize>(TRNLSizeUInt(aDescriptor.HashSize)*TRNLSizeUInt(MaximumExpandBlocks)) then begin
+  exit;
+ end;
+
+ if aOutputSize=0 then begin
+  result:=true;
+  exit;
+ end;
+
+ Position:=0;
+ PreviousBlockSize:=0;
+ Counter:=1;
+
+ try
+
+  while Position<aOutputSize do begin
+
+   // T(i) = HMAC-Hash(PRK, T(i-1) | info | i), with T(0) empty, so the first block is the only one
+   // which does not carry its predecessor
+   if not Context.Initialize(aDescriptor,aPseudoRandomKey,aPseudoRandomKeySize) then begin
+    exit;
+   end;
+   if PreviousBlockSize>0 then begin
+    Context.Update(Block[0],PreviousBlockSize);
+   end;
+   if aInfoSize>0 then begin
+    Context.Update(aInfo,aInfoSize);
+   end;
+   Context.Update(Counter,SizeOf(TRNLUInt8));
+   if not Context.Finalize(Block[0]) then begin
+    exit;
+   end;
+   PreviousBlockSize:=aDescriptor.HashSize;
+
+   Chunk:=aOutputSize-Position;
+   if Chunk>PreviousBlockSize then begin
+    Chunk:=PreviousBlockSize;
+   end;
+   Move(Block[0],PRNLUInt8Array(TRNLPointer(@aOutput))^[Position],Chunk);
+   inc(Position,Chunk);
+
+   // Cannot wrap, because the output size was bounded to 255 blocks above
+   inc(Counter);
+
+  end;
+
+  result:=true;
+
+ finally
+  FillChar(Block,SizeOf(Block),#0);
+  Context.Clear;
+ end;
+
+end;
+
+class function TRNLTLS13KeySchedule.ExpandLabel(const aDescriptor:TRNLHashDescriptor;
+                                                out aOutput;const aOutputSize:TRNLSizeUInt;
+                                                const aSecret;const aSecretSize:TRNLSizeUInt;
+                                                const aLabel:TRNLRawByteString;
+                                                const aContext;const aContextSize:TRNLSizeUInt):boolean;
+var HKDFLabel:TRNLTLS13HKDFLabel;
+    LabelSize,Size:TRNLSizeUInt;
+begin
+
+ result:=false;
+
+ LabelSize:=TRNLSizeUInt(Length(aLabel))+TRNLSizeUInt(SizeOf(LabelPrefix));
+
+ // Every one of these is a field which would silently lose its top bits rather than fail, and a
+ // length field which disagrees with what follows it is how a parser on the counter side is made to
+ // read the wrong thing
+ if (aOutputSize=0) or
+    (aOutputSize>TRNLSizeUInt($ffff)) or
+    (LabelSize<TRNLSizeUInt(MinimumLabelSize)) or
+    (LabelSize>TRNLSizeUInt(MaximumLabelSize)) or
+    (aContextSize>TRNLSizeUInt(MaximumContextSize)) then begin
+  exit;
+ end;
+
+ try
+
+  TRNLMemoryAccess.StoreBigEndianUInt16(HKDFLabel[0],TRNLUInt16(aOutputSize));
+  HKDFLabel[2]:=TRNLUInt8(LabelSize);
+  Move(LabelPrefix[0],HKDFLabel[3],SizeOf(LabelPrefix));
+  if Length(aLabel)>0 then begin
+   Move(aLabel[1],HKDFLabel[3+SizeOf(LabelPrefix)],Length(aLabel));
+  end;
+  Size:=TRNLSizeUInt(3)+LabelSize;
+
+  HKDFLabel[Size]:=TRNLUInt8(aContextSize);
+  inc(Size);
+  if aContextSize>0 then begin
+   Move(aContext,HKDFLabel[Size],aContextSize);
+  end;
+  inc(Size,aContextSize);
+
+  result:=TRNLHKDF.Expand(aDescriptor,
+                          aOutput,aOutputSize,
+                          aSecret,aSecretSize,
+                          HKDFLabel[0],Size);
+
+ finally
+  FillChar(HKDFLabel,SizeOf(TRNLTLS13HKDFLabel),#0);
+ end;
+
+end;
+
+class function TRNLTLS13KeySchedule.DeriveSecret(const aDescriptor:TRNLHashDescriptor;
+                                                 out aSecret;
+                                                 const aParentSecret;const aParentSecretSize:TRNLSizeUInt;
+                                                 const aLabel:TRNLRawByteString;
+                                                 const aTranscriptHash;const aTranscriptHashSize:TRNLSizeUInt):boolean;
+begin
+ // RFC 8446 section 7.1: Derive-Secret is HKDF-Expand-Label with the transcript hash as the context
+ // and the hash's own length as the output length, and nothing else. An invalid descriptor arrives
+ // here as a hash size of zero and is refused there.
+ result:=ExpandLabel(aDescriptor,
+                     aSecret,aDescriptor.HashSize,
+                     aParentSecret,aParentSecretSize,
+                     aLabel,
+                     aTranscriptHash,aTranscriptHashSize);
+end;
 
 class procedure TRNLSHA256.SelfTest;
 const Expected0:TRNLSHA256Hash=
@@ -11250,6 +11556,227 @@ begin
 end;
 
 {$ifend}
+
+// RFC 5869 appendix A, the three SHA-256 cases. Both halves are checked separately rather than only
+// the final output, because the two can be wrong in ways which cancel: a salt handed to Extract as
+// the message instead of as the key gives a wrong pseudorandom key which Expand then stretches
+// perfectly, and only the printed intermediate says which of the two steps it was.
+class procedure TRNLHKDF.SelfTest;
+const InputKeyingMaterial1:array[0..21] of TRNLUInt8=
+       (
+        $0b,$0b,$0b,$0b,$0b,$0b,$0b,$0b,$0b,$0b,$0b,$0b,
+        $0b,$0b,$0b,$0b,$0b,$0b,$0b,$0b,$0b,$0b
+       );
+      Salt1:array[0..12] of TRNLUInt8=
+       (
+        $00,$01,$02,$03,$04,$05,$06,$07,$08,$09,$0a,$0b,
+        $0c
+       );
+      Info1:array[0..9] of TRNLUInt8=
+       (
+        $f0,$f1,$f2,$f3,$f4,$f5,$f6,$f7,$f8,$f9
+       );
+      ExpectedPseudoRandomKey1:array[0..31] of TRNLUInt8=
+       (
+        $07,$77,$09,$36,$2c,$2e,$32,$df,$0d,$dc,$3f,$0d,
+        $c4,$7b,$ba,$63,$90,$b6,$c7,$3b,$b5,$0f,$9c,$31,
+        $22,$ec,$84,$4a,$d7,$c2,$b3,$e5
+       );
+      ExpectedOutput1:array[0..41] of TRNLUInt8=
+       (
+        $3c,$b2,$5f,$25,$fa,$ac,$d5,$7a,$90,$43,$4f,$64,
+        $d0,$36,$2f,$2a,$2d,$2d,$0a,$90,$cf,$1a,$5a,$4c,
+        $5d,$b0,$2d,$56,$ec,$c4,$c5,$bf,$34,$00,$72,$08,
+        $d5,$b8,$87,$18,$58,$65
+       );
+      InputKeyingMaterial2:array[0..79] of TRNLUInt8=
+       (
+        $00,$01,$02,$03,$04,$05,$06,$07,$08,$09,$0a,$0b,
+        $0c,$0d,$0e,$0f,$10,$11,$12,$13,$14,$15,$16,$17,
+        $18,$19,$1a,$1b,$1c,$1d,$1e,$1f,$20,$21,$22,$23,
+        $24,$25,$26,$27,$28,$29,$2a,$2b,$2c,$2d,$2e,$2f,
+        $30,$31,$32,$33,$34,$35,$36,$37,$38,$39,$3a,$3b,
+        $3c,$3d,$3e,$3f,$40,$41,$42,$43,$44,$45,$46,$47,
+        $48,$49,$4a,$4b,$4c,$4d,$4e,$4f
+       );
+      Salt2:array[0..79] of TRNLUInt8=
+       (
+        $60,$61,$62,$63,$64,$65,$66,$67,$68,$69,$6a,$6b,
+        $6c,$6d,$6e,$6f,$70,$71,$72,$73,$74,$75,$76,$77,
+        $78,$79,$7a,$7b,$7c,$7d,$7e,$7f,$80,$81,$82,$83,
+        $84,$85,$86,$87,$88,$89,$8a,$8b,$8c,$8d,$8e,$8f,
+        $90,$91,$92,$93,$94,$95,$96,$97,$98,$99,$9a,$9b,
+        $9c,$9d,$9e,$9f,$a0,$a1,$a2,$a3,$a4,$a5,$a6,$a7,
+        $a8,$a9,$aa,$ab,$ac,$ad,$ae,$af
+       );
+      Info2:array[0..79] of TRNLUInt8=
+       (
+        $b0,$b1,$b2,$b3,$b4,$b5,$b6,$b7,$b8,$b9,$ba,$bb,
+        $bc,$bd,$be,$bf,$c0,$c1,$c2,$c3,$c4,$c5,$c6,$c7,
+        $c8,$c9,$ca,$cb,$cc,$cd,$ce,$cf,$d0,$d1,$d2,$d3,
+        $d4,$d5,$d6,$d7,$d8,$d9,$da,$db,$dc,$dd,$de,$df,
+        $e0,$e1,$e2,$e3,$e4,$e5,$e6,$e7,$e8,$e9,$ea,$eb,
+        $ec,$ed,$ee,$ef,$f0,$f1,$f2,$f3,$f4,$f5,$f6,$f7,
+        $f8,$f9,$fa,$fb,$fc,$fd,$fe,$ff
+       );
+      ExpectedPseudoRandomKey2:array[0..31] of TRNLUInt8=
+       (
+        $06,$a6,$b8,$8c,$58,$53,$36,$1a,$06,$10,$4c,$9c,
+        $eb,$35,$b4,$5c,$ef,$76,$00,$14,$90,$46,$71,$01,
+        $4a,$19,$3f,$40,$c1,$5f,$c2,$44
+       );
+      ExpectedOutput2:array[0..81] of TRNLUInt8=
+       (
+        $b1,$1e,$39,$8d,$c8,$03,$27,$a1,$c8,$e7,$f7,$8c,
+        $59,$6a,$49,$34,$4f,$01,$2e,$da,$2d,$4e,$fa,$d8,
+        $a0,$50,$cc,$4c,$19,$af,$a9,$7c,$59,$04,$5a,$99,
+        $ca,$c7,$82,$72,$71,$cb,$41,$c6,$5e,$59,$0e,$09,
+        $da,$32,$75,$60,$0c,$2f,$09,$b8,$36,$77,$93,$a9,
+        $ac,$a3,$db,$71,$cc,$30,$c5,$81,$79,$ec,$3e,$87,
+        $c1,$4c,$01,$d5,$c1,$f3,$43,$4f,$1d,$87
+       );
+      InputKeyingMaterial3:array[0..21] of TRNLUInt8=
+       (
+        $0b,$0b,$0b,$0b,$0b,$0b,$0b,$0b,$0b,$0b,$0b,$0b,
+        $0b,$0b,$0b,$0b,$0b,$0b,$0b,$0b,$0b,$0b
+       );
+      ExpectedPseudoRandomKey3:array[0..31] of TRNLUInt8=
+       (
+        $19,$ef,$24,$a3,$2c,$71,$7b,$16,$7f,$33,$a9,$1d,
+        $6f,$64,$8b,$df,$96,$59,$67,$76,$af,$db,$63,$77,
+        $ac,$43,$4c,$1c,$29,$3c,$cb,$04
+       );
+      ExpectedOutput3:array[0..41] of TRNLUInt8=
+       (
+        $8d,$a4,$e7,$75,$a5,$63,$c1,$8f,$71,$5f,$80,$2a,
+        $06,$3c,$5a,$31,$b8,$a1,$1f,$5c,$5e,$e1,$87,$9e,
+        $c3,$45,$4e,$5f,$3c,$73,$8d,$2d,$9d,$20,$13,$95,
+        $fa,$a4,$b6,$1a,$96,$c8
+       );
+var PseudoRandomKey:TRNLSHA256Hash;
+    Output:array[0..81] of TRNLUInt8;
+    Nothing:TRNLUInt8;
+begin
+
+ // Somewhere to point the empty salt and the empty info at. Nothing is read from it, since both are
+ // passed with a size of zero, but an untyped const parameter still wants an address.
+ Nothing:=0;
+
+ write('[HKDF-SHA256] RFC 5869 case A.1, extract ... ');
+ if Extract(TRNLSHA256.Descriptor,PseudoRandomKey,Salt1,SizeOf(Salt1),
+            InputKeyingMaterial1,SizeOf(InputKeyingMaterial1)) and
+    TRNLMemory.SecureIsEqual(PseudoRandomKey,ExpectedPseudoRandomKey1,SizeOf(TRNLSHA256Hash)) then begin
+  writeln('OK!');
+ end else begin
+  RNLSelfTestFailure;
+ end;
+ write('[HKDF-SHA256] RFC 5869 case A.1, expand to 42 bytes ... ');
+ if Expand(TRNLSHA256.Descriptor,Output,SizeOf(ExpectedOutput1),
+           PseudoRandomKey,SizeOf(TRNLSHA256Hash),Info1,SizeOf(Info1)) and
+    TRNLMemory.SecureIsEqual(Output,ExpectedOutput1,SizeOf(ExpectedOutput1)) then begin
+  writeln('OK!');
+ end else begin
+  RNLSelfTestFailure;
+ end;
+
+ write('[HKDF-SHA256] RFC 5869 case A.2, extract ... ');
+ if Extract(TRNLSHA256.Descriptor,PseudoRandomKey,Salt2,SizeOf(Salt2),
+            InputKeyingMaterial2,SizeOf(InputKeyingMaterial2)) and
+    TRNLMemory.SecureIsEqual(PseudoRandomKey,ExpectedPseudoRandomKey2,SizeOf(TRNLSHA256Hash)) then begin
+  writeln('OK!');
+ end else begin
+  RNLSelfTestFailure;
+ end;
+ // 82 bytes are three blocks of hash size and a remainder, so this is the one which says the counter
+ // advances and the last block is cut rather than rounded up to
+ write('[HKDF-SHA256] RFC 5869 case A.2, expand to 82 bytes over three blocks ... ');
+ if Expand(TRNLSHA256.Descriptor,Output,SizeOf(ExpectedOutput2),
+           PseudoRandomKey,SizeOf(TRNLSHA256Hash),Info2,SizeOf(Info2)) and
+    TRNLMemory.SecureIsEqual(Output,ExpectedOutput2,SizeOf(ExpectedOutput2)) then begin
+  writeln('OK!');
+ end else begin
+  RNLSelfTestFailure;
+ end;
+
+ // The case with neither salt nor info, which is the one the TLS 1.3 key schedule starts from
+ write('[HKDF-SHA256] RFC 5869 case A.3, extract with an empty salt ... ');
+ if Extract(TRNLSHA256.Descriptor,PseudoRandomKey,Nothing,0,
+            InputKeyingMaterial3,SizeOf(InputKeyingMaterial3)) and
+    TRNLMemory.SecureIsEqual(PseudoRandomKey,ExpectedPseudoRandomKey3,SizeOf(TRNLSHA256Hash)) then begin
+  writeln('OK!');
+ end else begin
+  RNLSelfTestFailure;
+ end;
+ write('[HKDF-SHA256] RFC 5869 case A.3, expand with an empty info ... ');
+ if Expand(TRNLSHA256.Descriptor,Output,SizeOf(ExpectedOutput3),
+           PseudoRandomKey,SizeOf(TRNLSHA256Hash),Nothing,0) and
+    TRNLMemory.SecureIsEqual(Output,ExpectedOutput3,SizeOf(ExpectedOutput3)) then begin
+  writeln('OK!');
+ end else begin
+  RNLSelfTestFailure;
+ end;
+
+end;
+
+// The first two steps of the RFC 8446 key schedule as RFC 8448 prints them for a handshake without a
+// pre shared key, which is the shape DTLS 1.3 will use here.
+//
+// This is the one vector which pins the wire format rather than the arithmetic. HkdfLabel is a
+// structure a counter side has to build identically, and every way of getting it wrong - the prefix
+// left off, the length of the label counted without the prefix, the two length fields swapped - is
+// invisible to a test which builds the label the same wrong way in order to check it. So the label
+// is not built here at all; what is compared against is a secret somebody else derived.
+class procedure TRNLTLS13KeySchedule.SelfTest;
+const Zero:array[0..31] of TRNLUInt8=
+       (
+        $00,$00,$00,$00,$00,$00,$00,$00,$00,$00,$00,$00,
+        $00,$00,$00,$00,$00,$00,$00,$00,$00,$00,$00,$00,
+        $00,$00,$00,$00,$00,$00,$00,$00
+       );
+      // The early secret of every TLS 1.3 handshake which offers no pre shared key, and therefore
+      // the most reproduced constant in the whole schedule
+      ExpectedEarlySecret:array[0..31] of TRNLUInt8=
+       (
+        $33,$ad,$0a,$1c,$60,$7e,$c0,$3b,$09,$e6,$cd,$98,
+        $93,$68,$0c,$e2,$10,$ad,$f3,$00,$aa,$1f,$26,$60,
+        $e1,$b2,$2e,$10,$f1,$70,$f9,$2a
+       );
+      ExpectedDerivedSecret:array[0..31] of TRNLUInt8=
+       (
+        $6f,$26,$15,$a1,$08,$c7,$02,$c5,$67,$8f,$54,$fc,
+        $9d,$ba,$b6,$97,$16,$c0,$76,$18,$9c,$48,$25,$0c,
+        $eb,$ea,$c3,$57,$6c,$36,$11,$ba
+       );
+var EarlySecret,DerivedSecret,EmptyTranscriptHash:TRNLSHA256Hash;
+    Nothing:TRNLUInt8;
+begin
+
+ Nothing:=0;
+
+ write('[TLS1.3-KDF] RFC 8448 early secret, extract of zeros from zeros ... ');
+ if TRNLHKDF.Extract(TRNLSHA256.Descriptor,EarlySecret,Zero,SizeOf(Zero),Zero,SizeOf(Zero)) and
+    TRNLMemory.SecureIsEqual(EarlySecret,ExpectedEarlySecret,SizeOf(TRNLSHA256Hash)) then begin
+  writeln('OK!');
+ end else begin
+  RNLSelfTestFailure;
+ end;
+
+ // Derive-Secret over the empty transcript, which is the hash of the empty message and not thirty
+ // two zero bytes - a confusion which would come out here and nowhere else
+ TRNLSHA256.Process(EmptyTranscriptHash,Nothing,0);
+
+ write('[TLS1.3-KDF] RFC 8448 derived secret, expand-label "derived" ... ');
+ if DeriveSecret(TRNLSHA256.Descriptor,DerivedSecret,
+                 EarlySecret,SizeOf(TRNLSHA256Hash),
+                 'derived',
+                 EmptyTranscriptHash,SizeOf(TRNLSHA256Hash)) and
+    TRNLMemory.SecureIsEqual(DerivedSecret,ExpectedDerivedSecret,SizeOf(TRNLSHA256Hash)) then begin
+  writeln('OK!');
+ end else begin
+  RNLSelfTestFailure;
+ end;
+
+end;
 
 class function TRNLBLAKE2BContext.RotateRight64(const aValue:TRNLUInt64;const aBits:TRNLUInt32):TRNLUInt64;
 begin
@@ -19307,6 +19834,8 @@ begin
  TRNLSHA512.SelfTest;
  TRNLSHA256.SelfTest;
  TRNLHMACSHA256.SelfTest;
+ TRNLHKDF.SelfTest;
+ TRNLTLS13KeySchedule.SelfTest;
 {$if defined(RNL_TURN_RFC5389_COMPAT)}
  TRNLSHA1.SelfTest;
  TRNLHMACSHA1.SelfTest;
