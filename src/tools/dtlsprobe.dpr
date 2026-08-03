@@ -2,35 +2,36 @@
  *                            RNL DTLS RELAY PROBE                            *
  ******************************************************************************
  *                                                                            *
- * Drives RNL's own TRNLDTLS12Client through a handshake with a real relay     *
- * over the network. It is a tool and not a test, and it lives here for the    *
- * same reason turnprobe.dpr does: it needs the internet and a relay which is  *
+ * Drives RNL's own TRNLDTLS12Client through a handshake with a real relay    *
+ * over the network. It is a tool and not a test, and it lives here for the   *
+ * same reason turnprobe.dpr does: it needs the internet and a relay which is *
  * up, so it can fail for reasons that have nothing to do with RNL.           *
  *                                                                            *
- * It is the only thing which proves interoperability at all. The suite next   *
- * door drives the client against a stub built out of RNL's own key schedule,  *
- * record layer and transcript, so a handshake completing there says the two   *
- * halves agree with each other and nothing about whether they agree with      *
- * anybody else. Here the other end is coturn.                                 *
+ * It is the only thing which proves interoperability at all. The suite next  *
+ * door drives the client against a stub built out of RNL's own key schedule, *
+ * record layer and transcript, so a handshake completing there says the two  *
+ * halves agree with each other and nothing about whether they agree with     *
+ * anybody else. Here the other end is coturn.                                *
  *                                                                            *
- * Build:                                                                      *
- *   cd src/tools && fpc -Mdelphi -O1 -Fu.. -FU. dtlsprobe.dpr                 *
+ * Build:                                                                     *
+ *   cd src/tools && fpc -Mdelphi -O1 -Fu.. -FU. dtlsprobe.dpr                *
  *                                                                            *
- * Run:                                                                        *
- *   ./dtlsprobe <host> [port] [root.der ...]                                  *
+ * Run:                                                                       *
+ *   ./dtlsprobe <host> [port] [root.der ...]                                 *
  *                                                                            *
- * Without a trust anchor the handshake is expected to stop at the certificate *
- * with "untrusted root" - which still says that the ClientHello, the cookie    *
- * exchange, the ServerHello and the chain itself were all read. With one it    *
- * should run to the end. The anchors this relay needs can be taken out of      *
- * the local store, for example                                                *
+ * Without a trust anchor the handshake is expected to stop at the            *
+ * certificate with "untrusted root" - which still says that the ClientHello, *
+ * the cookie exchange, the ServerHello and the chain itself were all read.   *
+ * With one it should run to the end. The anchors this relay needs can be     *
+ * taken out of the local store, for example                                  *
  *                                                                            *
- *   openssl x509 -in /etc/ssl/certs/ISRG_Root_X2.pem -outform der -out x2.der  *
+ *  openssl x509 -in /etc/ssl/certs/ISRG_Root_X2.pem -outform der -out x2.der *
  *                                                                            *
- * The chain it serves is ECDSA the whole way up to ISRG Root X2, which is why  *
- * RNL can check it without ever having an RSA implementation. The last entry   *
- * it sends is that root cross signed by ISRG Root X1 with RSA; nothing here    *
- * has to look at that one, because the root above it is already trusted.       *
+ * The chain it serves is ECDSA the whole way up to ISRG Root X2, which is    *
+ * why RNL can check it without ever having an RSA implementation. The last   *
+ * entry it sends is that root cross signed by ISRG Root X1 with RSA; nothing *
+ * here  has to look at that one, because the root above it is already        *
+ * trusted.                                                                   *
  *                                                                            *
  ******************************************************************************)
 program dtlsprobe;

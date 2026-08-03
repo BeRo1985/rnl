@@ -1,35 +1,35 @@
-(******************************************************************************
- *                            RNL TURN RELAY PROBE                            *
- ******************************************************************************
- *                                                                            *
- * Drives RNL's own STUN and TURN client against a real relay over the network.*
+(********************************************************************************
+ *                            RNL TURN RELAY PROBE                              *
+ ********************************************************************************
+ *                                                                              *
+ * Drives RNL's own STUN and TURN client against a real relay over the network. *
  * It is a tool and not a test, and it lives here rather than in src/tests for  *
  * one reason: it needs the internet and a relay which is up, so it can fail    *
  * for reasons that have nothing to do with RNL. The suite next door is         *
- * hermetic and has to stay that way.                                          *
- *                                                                            *
- * It is worth running all the same. iceplan.md left "no coturn in the chain"  *
+ * hermetic and has to stay that way.                                           *
+ *                                                                              *
+ * It is worth running all the same. iceplan.md left "no coturn in the chain"   *
  * open, because the test server builds its answers with the same message layer *
  * the client parses them with, so an error in that layer could be mirrored on  *
- * both sides and stay invisible. This asks a stranger instead.                *
- *                                                                            *
+ * both sides and stay invisible. This asks a stranger instead.                 *
+ *                                                                              *
  * Two defects turned up the first time it ran: an allocation which was refused *
  * reported no reason at all, and AddressGetHost returned the opposite of the   *
- * truth. Neither was reachable from the hermetic suite.                       *
- *                                                                            *
- * Build:                                                                      *
+ * truth. Neither was reachable from the hermetic suite.                        *
+ *                                                                              *
+ * Build:                                                                       *
  *   cd src/tools && fpc -Mdelphi -O1 -Fu.. -FU. turnprobe.dpr                  *
- *                                                                            *
- * Run:                                                                        *
+ *                                                                              *
+ * Run:                                                                         *
  *   ./turnprobe                     only the 401 exchange, no credentials      *
  *   ./turnprobe <user> <password>   a real allocation                          *
- *                                                                            *
+ *                                                                              *
  * Without credentials the interesting answer is which rejection comes back.    *
- * A 401 means the relay read the signed request and turned down only the        *
- * credentials, so realm, nonce and MESSAGE-INTEGRITY were all right. A 400      *
- * would mean it could not read the request at all.                            *
- *                                                                            *
- ******************************************************************************)
+ * A 401 means the relay read the signed request and turned down only the       *
+ * credentials, so realm, nonce and MESSAGE-INTEGRITY were all right. A 400     *
+ * would mean it could not read the request at all.                             *
+ *                                                                              *
+ ********************************************************************************)
 program turnprobe;
 {$mode delphi}
 {$h+}
