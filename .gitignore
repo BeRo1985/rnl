@@ -70,3 +70,13 @@ __recovery/
 /src/tests/RNLTests.exe
 /src/tests/units/
 /src/tests/units-win64/
+/src/tests/checkalignment
+
+# RNL offline tool build artifacts. The sources are tracked and the vectors they write are
+# tracked; what they compile to is not, since none of them is needed to build or test RNL.
+/src/tools/*.ppu
+/src/tools/capturedtlsvectors
+/src/tools/dtlsprobe
+/src/tools/emsprobe
+/src/tools/makechainvectors
+/src/tools/turnprobe

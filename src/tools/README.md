@@ -39,6 +39,41 @@ else. These five are where the other end is a stranger.
 
   With `-enable_server_rpk` on both sides that is RNL's RFC 7250 path against something which is not
   RNL, which is the only way it can be shown at all.
+
+  A local coturn answers the other half of the question - what a real relay does rather than what a
+  TLS library can do. Throwaway configuration, loopback only, self signed:
+
+  ```
+  openssl ecparam -name prime256v1 -genkey -noout -out key.pem
+  openssl req -new -x509 -key key.pem -out cert.pem -days 30 -subj "/CN=rnl.test" \
+              -addext "subjectAltName=DNS:rnl.test,IP:127.0.0.1"
+  cat > turnserver.conf <<'END'
+  listening-ip=127.0.0.1
+  listening-port=3478
+  tls-listening-port=5349
+  relay-ip=127.0.0.1
+  min-port=49160
+  max-port=49200
+  fingerprint
+  lt-cred-mech
+  user=rnl:secret
+  realm=rnl.test
+  cert=/absolute/path/cert.pem
+  pkey=/absolute/path/key.pem
+  no-cli
+  no-tcp-relay
+  simple-log
+  log-file=stdout
+  verbose
+  END
+  turnserver -c turnserver.conf
+  ```
+
+  Nothing in it belongs in `/etc` and nothing in it belongs in this repository - what belongs here is
+  what it was asked and what it answered, which is in `dtlsplan.md`. Measured on 2026-08-03: coturn
+  4.x does **not** negotiate RFC 7250, and `openssl s_client -dtls -enable_server_rpk` against it
+  comes back with an ordinary certificate. The `s_server` above is the positive control which shows
+  that answer is coturn's and not the probe's.
 * `capturedtlsvectors` and `emsprobe` produce the anchors no published document gives: a
   ServerKeyExchange signature over `client_random | server_random | params`, a master secret and key
   block a real server agreed with, and the RFC 7627 variant of the same, for which no vectors are

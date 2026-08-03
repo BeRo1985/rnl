@@ -667,6 +667,19 @@ const RNL_PROTOCOL_VERSION_MAJOR=1;
       // cut by a quarter per flight and ended on its floor at 13763 of 60000 bytes per second
       // available, on a path which was dropping almost nothing.
       RNL_PEER_CONGESTION_CONTROL_MINIMUM_LOSS_SAMPLE=8;
+      // How much of the standing queue may be this flow's own, in bytes, before the rate comes down
+      // - and how little before it may go up again. Bytes and not milliseconds, because the point
+      // of the whole exercise is that a delay is not attributable and a byte count is: by Little's
+      // law, what this flow has waiting in a queue is what it pushes through that queue times how
+      // long it waits in it. Everything else standing there belongs to somebody else and does not
+      // leave because this side sends less.
+      //
+      // Reading them as delays makes the self scaling visible: two packets' worth at 60000 bytes
+      // per second is 50 ms, and at 8000 bytes per second it is 375 ms. A fast path is held to a
+      // short queue, and a flow which has already been squeezed into a corner is not asked to
+      // squeeze further to fix a queue which is not its doing.
+      RNL_PEER_CONGESTION_CONTROL_HIGH_OWN_QUEUE_BYTES=3000;
+      RNL_PEER_CONGESTION_CONTROL_LOW_OWN_QUEUE_BYTES=1000;
 
       // The floor. Low enough to be out of the way of any real path, high enough that acknowledgements,
       // pings and a trickle of payload always fit through - a controller which can throttle a
@@ -41005,7 +41018,7 @@ end;
 
 procedure TRNLPeer.UpdateCongestionControl;
 var Rate,Ceiling,DeliveryCeiling,Delay,Capacity,QueuedBits:TRNLInt64;
-    LossPercent:TRNLInt64;
+    LossPercent,OwnQueuedBytes:TRNLInt64;
 begin
 
  if not fHost.fCongestionControl then begin
@@ -41039,6 +41052,14 @@ begin
   DeliveryCeiling:=0;
  end;
 
+ // This flow's own share of whatever is standing in the queue. The delay says a queue exists; it
+ // does not say whose, and with a competitor holding half the capacity a standing queue exists no
+ // matter what this side does. What sending less can actually remove is this much and no more.
+ //
+ // The same product the panic branch below already forms out of the capacity and the delay - used
+ // there to decide how far to fall, and now also to decide whether to fall at all.
+ OwnQueuedBytes:=(TRNLInt64(GetMaximumDeliveryRate)*TRNLInt64(Delay)) div 1000;
+
  // Delay first, because it is the earlier signal of the two: a queue which is filling up says so
  // before it overflows. A controller which waits for loss on a path with a deep buffer has already
  // driven the latency into the hundreds of milliseconds by the time it reacts
@@ -41070,13 +41091,20 @@ begin
   if Rate<((Capacity*RNL_PEER_CONGESTION_CONTROL_DRAIN_FLOOR_PERCENT) div 100) then begin
    Rate:=(Capacity*RNL_PEER_CONGESTION_CONTROL_DRAIN_FLOOR_PERCENT) div 100;
   end;
- end else if Delay>=RNL_PEER_CONGESTION_CONTROL_HIGH_DELAY then begin
+ end else if OwnQueuedBytes>=RNL_PEER_CONGESTION_CONTROL_HIGH_OWN_QUEUE_BYTES then begin
   dec(Rate,Rate div 8);
  end else if LossPercent>=RNL_PEER_CONGESTION_CONTROL_LOSS_PERCENT then begin
   // The second, independent reason. A path can be lossy without any queue in front of it, and a
   // purely delay based controller would never notice
   dec(Rate,Rate div 4);
- end else if Delay<=RNL_PEER_CONGESTION_CONTROL_LOW_DELAY then begin
+ end else if (OwnQueuedBytes<=RNL_PEER_CONGESTION_CONTROL_LOW_OWN_QUEUE_BYTES) and
+             (Delay<=RNL_PEER_CONGESTION_CONTROL_HIGH_DELAY) then begin
+  // Asymmetric on purpose, and this is where the asymmetry earns its keep. Shrinking is answered
+  // with the own share, because that is all shrinking can remove. Growing is answered with the
+  // absolute delay as well, because a queue somebody else is holding is still a queue, and adding
+  // to it is how a flow which has been squeezed into a corner takes a shallow buffer apart -
+  // measured at 65 ms of standing queue and 222 dropped datagrams when the growth was allowed to
+  // go by the own share alone, against 16 ms and 138 before.
   inc(Rate,Rate div 8);
   // Raising the rate beyond what the path delivers only lengthens the queue, so the ceiling bounds
   // the increase. It bounds ONLY the increase, on purpose: applied unconditionally it would drag the

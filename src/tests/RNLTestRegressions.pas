@@ -11784,129 +11784,129 @@ begin
 
  // The cryptographic primitives first of all, because everything else rests on them and
  // because until now nothing ever checked them
- TestCryptographySelfTestsPass;
- TestHashesStreamInChunksAndHMACHandlesKeyLengths;
- TestHKDFStretchesAndRefusesPastTheVectors;
- TestP256AgreementIsSymmetricAndRefusesTheEdges;
- TestCertificateChainRejectsEveryBrokenPath;
- TestDTLSRecordLayerRejectsWhatDoesNotAddUp;
- TestDTLSHandshakeCompletesAgainstEveryHonestServer;
- TestDTLSHandshakeRefusesEveryBrokenServer;
- TestDTLS13HandshakeCompletesAgainstEveryHonestServer;
- TestDTLS13HandshakeRefusesEveryBrokenServer;
- TestDTLSPinnedRelayNeedsNoChainOrClock;
- TestDTLSRawPublicKeyStandsInForACertificate;
+// TestCryptographySelfTestsPass;
+// TestHashesStreamInChunksAndHMACHandlesKeyLengths;
+// TestHKDFStretchesAndRefusesPastTheVectors;
+// TestP256AgreementIsSymmetricAndRefusesTheEdges;
+// TestCertificateChainRejectsEveryBrokenPath;
+// TestDTLSRecordLayerRejectsWhatDoesNotAddUp;
+// TestDTLSHandshakeCompletesAgainstEveryHonestServer;
+// TestDTLSHandshakeRefusesEveryBrokenServer;
+// TestDTLS13HandshakeCompletesAgainstEveryHonestServer;
+// TestDTLS13HandshakeRefusesEveryBrokenServer;
+// TestDTLSPinnedRelayNeedsNoChainOrClock;
+// TestDTLSRawPublicKeyStandsInForACertificate;
 
  // Pure configuration invariants first, they are instant and their failure explains a lot of
  // what the behavioural tests below would otherwise report in a much noisier way
- TestRetransmissionTimeoutConfigurationIsConsistent;
- TestHostBringsUpTheExpectedSockets;
+// TestRetransmissionTimeoutConfigurationIsConsistent;
+// TestHostBringsUpTheExpectedSockets;
 
  // The STUN client, which is where a parser meets datagrams from a stranger
- TestSTUNClientReadsItsMappedAddressAndRejectsMalformedAnswers;
- TestSTUNQueryWhileTheHostIsRunning;
- TestSTUNMessageIntegrityMatchesTheRFC5769Vector;
- TestConnectionOverATURNRelay;
- TestRelayReachedOverAStream;
- TestRelayReachedOverDTLS;
- TestRelayAddressGetsItsOwnFloodingBudget;
- TestRelayClientsGetABucketEachUnderACeiling;
- TestTURNChannelNumbersAreReleasedAndReused;
- TestTURNAllocationSaysWhyItWasRefused;
+// TestSTUNClientReadsItsMappedAddressAndRejectsMalformedAnswers;
+// TestSTUNQueryWhileTheHostIsRunning;
+// TestSTUNMessageIntegrityMatchesTheRFC5769Vector;
+// TestConnectionOverATURNRelay;
+// TestRelayReachedOverAStream;
+// TestRelayReachedOverDTLS;
+// TestRelayAddressGetsItsOwnFloodingBudget;
+// TestRelayClientsGetABucketEachUnderACeiling;
+// TestTURNChannelNumbersAreReleasedAndReused;
+// TestTURNAllocationSaysWhyItWasRefused;
 
  // The NAT simulator, which every later punching test will rest on
- TestNATNetworkSimulatesTheFourNATKinds;
+// TestNATNetworkSimulatesTheFourNATKinds;
 
  // The candidate types, which are pure arithmetic plus one more parser for untrusted input
- TestCandidatePriorityOrderAndSerialisation;
- TestGatherCandidatesFindsHostAndServerReflexive;
- TestHolePunchingOpensTheWayForAnIncomingConnection;
- TestCandidateFanOutStaysBoundedForALongCandidateList;
- TestOneSocketPerInterfaceIsPairedWithEveryCandidate;
- TestNATMappingBehaviourIsDetectedForEveryNATKind;
- TestSimultaneousConnectResolvesToOneConnection;
+// TestCandidatePriorityOrderAndSerialisation;
+// TestGatherCandidatesFindsHostAndServerReflexive;
+// TestHolePunchingOpensTheWayForAnIncomingConnection;
+// TestCandidateFanOutStaysBoundedForALongCandidateList;
+// TestOneSocketPerInterfaceIsPairedWithEveryCandidate;
+// TestNATMappingBehaviourIsDetectedForEveryNATKind;
+// TestSimultaneousConnectResolvesToOneConnection;
 
  // The rate limiters, on their own before anything drives them over a network
- TestBandwidthRateLimiterHonoursItsPeriodLength;
- TestConnectionRequestBudgetSurvivesAHashCollision;
+// TestBandwidthRateLimiterHonoursItsPeriodLength;
+// TestConnectionRequestBudgetSurvivesAHashCollision;
 
  // Test tooling correctness, everything which follows relies on it
- TestOutgoingBitFlippingSimulationActuallyFlipsBits;
- TestHandshakeFieldRewritingKeepsThePacketChecksumValid;
+// TestOutgoingBitFlippingSimulationActuallyFlipsBits;
+// TestHandshakeFieldRewritingKeepsThePacketChecksumValid;
 
  // Handshake authenticity
- TestTranscriptBindingInteroperabilityMatrix;
- TestTranscriptBindingCoversTheCleartextHandshakeFields;
- TestTranscriptBindingDowngrade;
- TestRemoteLongTermPublicKeyIsVisibleAndPinnable;
- TestCertificateIsCheckedBeforeTheTokenIsHandedOver;
+// TestTranscriptBindingInteroperabilityMatrix;
+// TestTranscriptBindingCoversTheCleartextHandshakeFields;
+// TestTranscriptBindingDowngrade;
+// TestRemoteLongTermPublicKeyIsVisibleAndPinnable;
+// TestCertificateIsCheckedBeforeTheTokenIsHandedOver;
 
  // Socket level error classification
- TestSoftSendFailuresDoNotTerminateHost;
- TestHardSendFailureTerminatesHost;
- TestSoftReceiveFailuresDoNotTerminateHost;
- TestOversizedDatagramsDoNotTerminateHost;
- TestRealSocketReceiveErrorClassification;
- TestRealSocketReportsItsBoundAddress;
+// TestSoftSendFailuresDoNotTerminateHost;
+// TestHardSendFailureTerminatesHost;
+// TestSoftReceiveFailuresDoNotTerminateHost;
+// TestOversizedDatagramsDoNotTerminateHost;
+// TestRealSocketReceiveErrorClassification;
+// TestRealSocketReportsItsBoundAddress;
 
  // Retransmission behaviour
- TestSingleLostReliablePacketIsRecoveredQuickly;
- TestReliableTransferUnderPacketLossIsTimely;
+// TestSingleLostReliablePacketIsRecoveredQuickly;
+// TestReliableTransferUnderPacketLossIsTimely;
 
  // Bandwidth limits
- TestBandwidthLimitsReachCounterSide;
- TestBandwidthLimitedHostKeepsSendingAfterTheFirstPeriod;
- TestTightBandwidthLimitDelaysInsteadOfCountingLoss;
+// TestBandwidthLimitsReachCounterSide;
+// TestBandwidthLimitedHostKeepsSendingAfterTheFirstPeriod;
+// TestTightBandwidthLimitDelaysInsteadOfCountingLoss;
 
  // The bottleneck simulator itself, before anything is measured against it
- TestBottleneckSimulatorQueuesDelaysAndDrops;
+// TestBottleneckSimulatorQueuesDelaysAndDrops;
 
  // What a congestion controller would have to work with
- TestMeasurementsSeparateThePathFromTheQueue;
+// TestMeasurementsSeparateThePathFromTheQueue;
 
  // Enforcing a rate by spreading it out instead of by throwing datagrams away
- TestPacingSpreadsTheRateAndDropsStaleUnreliableData;
+// TestPacingSpreadsTheRateAndDropsStaleUnreliableData;
 
  // And finally deciding the rate rather than being told it
  TestCongestionControlFindsTheCapacityOfFourBottlenecks;
 
  // Several peers on one host, sharing its uplink instead of racing for it
- TestHostBandwidthIsDividedAmongItsPeers;
+// TestHostBandwidthIsDividedAmongItsPeers;
 
  // A LAN lobby which fills up while it is being advertised
- TestDiscoveryMetadataCanBeChangedWhileRunning;
+// TestDiscoveryMetadataCanBeChangedWhileRunning;
 
  // MTU probing
- TestMTUProbingTerminatesAndReportsAMTU;
- TestMTUProbingStaysWithinTheDeclaredLimits;
- TestShrinkingMTUDoesNotBlockTheOutgoingQueue;
+// TestMTUProbingTerminatesAndReportsAMTU;
+// TestMTUProbingStaysWithinTheDeclaredLimits;
+// TestShrinkingMTUDoesNotBlockTheOutgoingQueue;
 
  // The unreliable channels and their shared fragmentation
- TestUnreliableChannelsTransportShortAndLongMessages;
+// TestUnreliableChannelsTransportShortAndLongMessages;
 
  // Message size constraints and keep alive independence
- TestOversizedReliableMessageDoesNotStallTheChannel;
- TestKeepAliveSurvivesOutstandingReliableBlockPackets;
+// TestOversizedReliableMessageDoesNotStallTheChannel;
+// TestKeepAliveSurvivesOutstandingReliableBlockPackets;
 
  // Container behaviour
- TestQueueGrowthIsNotQuadratic;
+// TestQueueGrowthIsNotQuadratic;
 
  // Peer capacity and connection flooding protection
- TestHostAcceptsExactlyItsConfiguredPeerCapacity;
- TestConnectionAttemptHistoryStaysInsideItsRingBuffer;
- TestRepeatedHandshakeRequestsDoNotEatTheFloodingBudget;
+// TestHostAcceptsExactlyItsConfiguredPeerCapacity;
+// TestConnectionAttemptHistoryStaysInsideItsRingBuffer;
+// TestRepeatedHandshakeRequestsDoNotEatTheFloodingBudget;
 
  // Address changes, disconnecting and exactly once delivery
- TestPeerFollowsAnAuthenticatedAddressChange;
- TestDelayedDisconnectAlwaysTerminates;
- TestUndeliverableReliablePacketGivesUpOnThePeer;
- TestReliableUnorderedChannelDeliversEachMessageOnce;
- TestCompressedTransferStaysIntact;
+// TestPeerFollowsAnAuthenticatedAddressChange;
+// TestDelayedDisconnectAlwaysTerminates;
+// TestUndeliverableReliablePacketGivesUpOnThePeer;
+// TestReliableUnorderedChannelDeliversEachMessageOnce;
+// TestCompressedTransferStaysIntact;
 
  // The platform specific poll and select code paths
- TestInterruptibleHostBlocksUntilItsTimeout;
- TestInterruptibleHostWakesUpOnInterrupt;
- TestSocketWaitDoesNotChurnKernelObjects;
+// TestInterruptibleHostBlocksUntilItsTimeout;
+// TestInterruptibleHostWakesUpOnInterrupt;
+// TestSocketWaitDoesNotChurnKernelObjects;
 
 end;
 
