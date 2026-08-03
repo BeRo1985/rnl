@@ -6723,15 +6723,22 @@ end;
 // how a deployment is built anyway: the relay speaks plain STUN and something ahead of it does the
 // record layer. TRNLTestTURNServer is not touched at all and does not know it is behind one.
 //
-// Two things make the result unambiguous. The relay counts what came out of the record layer, so
-// zero there means the handshake never finished rather than the relay having said no; and the
-// server sees the client at the relayed address, which nothing but the relay can hand out.
+// Nothing whatsoever reaches the relay except through the record layer, so a message arriving at
+// the far end is the handshake having finished and the protection being right in both directions.
+// The address the server ends up seeing is the relayed one, which nothing but the relay hands out.
 //
-// Run against real loopback sockets, since the terminator is a thread with two sockets of its own,
-// and both versions in turn, because 1.2 and 1.3 share the transport and nothing else.
+// Three passes: the two versions, which share the transport and nothing else, and then the same
+// thing again with a fingerprint that belongs to another certificate. The last one is what makes
+// the first two mean something - it is the same construction end to end, with one pinned value
+// changed, and it has to end without an allocation.
+//
+// Run against real loopback sockets, since the terminator is a thread with two sockets of its own.
 procedure TestRelayReachedOverDTLS;
 const LOOPBACK='127.0.0.1';
       MESSAGE_COUNT=8;
+      CASE_DTLS12=0;
+      CASE_DTLS13=1;
+      CASE_WRONG_FINGERPRINT=2;
 var Watchdog:TRNLTestWatchdog;
     Instance:TRNLInstance;
     RealNetwork:TRNLRealNetwork;
@@ -6750,7 +6757,8 @@ var Watchdog:TRNLTestWatchdog;
     Connected:boolean;
     Version:TRNLTURNDTLSVersion;
     BasePort:TRNLUInt16;
-    VersionName:TRNLRawByteString;
+    Case_:TRNLSizeInt;
+    CaseName:TRNLRawByteString;
 
  function AddressOf(const aHost:TRNLRawByteString;const aPort:TRNLUInt16):TRNLAddress;
  begin
@@ -6805,14 +6813,24 @@ begin
  Watchdog:=TRNLTestWatchdog.Create('turn over dtls',300000);
  try
 
-  for Version:=RNL_TURN_DTLS_VERSION_1_2 to RNL_TURN_DTLS_VERSION_1_3 do begin
+  for Case_:=CASE_DTLS12 to CASE_WRONG_FINGERPRINT do begin
 
-   if Version=RNL_TURN_DTLS_VERSION_1_2 then begin
-    BasePort:=34820;
-    VersionName:='1.2';
-   end else begin
-    BasePort:=34840;
-    VersionName:='1.3';
+   case Case_ of
+    CASE_DTLS13:begin
+     Version:=RNL_TURN_DTLS_VERSION_1_3;
+     BasePort:=34840;
+     CaseName:='DTLS 1.3';
+    end;
+    CASE_WRONG_FINGERPRINT:begin
+     Version:=RNL_TURN_DTLS_VERSION_1_2;
+     BasePort:=34860;
+     CaseName:='DTLS 1.2 pinned to another certificate';
+    end;
+    else begin
+     Version:=RNL_TURN_DTLS_VERSION_1_2;
+     BasePort:=34820;
+     CaseName:='DTLS 1.2';
+    end;
    end;
 
    Connected:=false;
@@ -6857,9 +6875,18 @@ begin
 
          // Pinned rather than a chain, which is the case a relay of one's own is: there is no
          // certificate authority to appeal to and the stub's leaf is a self made one
-         TRNLDTLSVerification.ComputeFingerprint(Fingerprint,
-                                                 TRNLTestCertificates.Leaf[0],
-                                                 SizeOf(TRNLTestCertificates.Leaf));
+         if Case_=CASE_WRONG_FINGERPRINT then begin
+          // A real certificate, and one this very suite signs with - just not the one the
+          // terminator presents. Pinning the wrong thing has to look exactly like pinning
+          // something that does not exist.
+          TRNLDTLSVerification.ComputeFingerprint(Fingerprint,
+                                                  TRNLTestCertificates.Intermediate[0],
+                                                  SizeOf(TRNLTestCertificates.Intermediate));
+         end else begin
+          TRNLDTLSVerification.ComputeFingerprint(Fingerprint,
+                                                  TRNLTestCertificates.Leaf[0],
+                                                  SizeOf(TRNLTestCertificates.Leaf));
+         end;
          Verification.InitializeFingerprints;
          Verification.AddFingerprint(Fingerprint);
          TURNNetwork.DTLSVerification:=Verification;
@@ -6871,79 +6898,103 @@ begin
           Client.Address.Port:=BasePort+5;
           Client.Start(RNL_HOST_ADDRESS_FAMILY_WORK_MODE_IPV4_ONLY);
 
-          if not Check(TURNNetwork.TotalAllocations=1,
-                       'the allocation has to have been made through the record layer, DTLS '+
-                       VersionName) then begin
-           Info('failed handshakes: '+
+          if Case_=CASE_WRONG_FINGERPRINT then begin
+
+           Info(CaseName+': allocations '+
+                TRNLRawByteString(IntToStr(TURNNetwork.TotalAllocations))+
+                ', handshakes given up on '+
                 TRNLRawByteString(IntToStr(TURNNetwork.TotalFailedDTLSHandshakes))+
-                ', failed allocations '+
-                TRNLRawByteString(IntToStr(TURNNetwork.TotalFailedAllocations)));
-           exit;
-          end;
+                ', the terminator passed '+
+                TRNLRawByteString(IntToStr(Relay.CountForwarded))+' datagram(s) on');
 
-          Peer:=Client.Connect(ServerAddress);
-          if not Check(assigned(Peer),'the client can start a connection attempt') then begin
-           exit;
-          end;
-          Peer.IncRef;
-          try
+           CheckEqualsInt64(TURNNetwork.TotalAllocations,0,
+                            'a relay whose certificate is not the pinned one gets no allocation');
 
-           StartTime:=Instance.Time;
-           Event.Initialize;
-           try
-            repeat
-             Pump(10);
-            until Connected or (TRNLTime.RelativeDifference(Instance.Time,StartTime)>=8000);
+           CheckEqualsInt64(TURNNetwork.TotalFailedDTLSHandshakes,1,
+                            'and the handshake, not the allocation, is what was given up on');
 
-            if Connected and (Peer.CountChannels>0) then begin
-             for Index:=1 to MESSAGE_COUNT do begin
-              Peer.Channels[0].SendMessageRawByteString(TestMessageText(Index,64));
-             end;
-            end;
+           // The record layer never reached the point of carrying anything, so the relay behind
+           // the terminator saw nothing at all - which is the difference between a relay that
+           // said no and one that was never spoken to
+           CheckEqualsInt64(Relay.CountForwarded,0,
+                            'and the relay behind it never saw a single datagram');
 
-            StartTime:=Instance.Time;
-            repeat
-             Pump(10);
-            until ((CountServerReceived>=MESSAGE_COUNT) and (CountClientReceived>=MESSAGE_COUNT)) or
-                  (TRNLTime.RelativeDifference(Instance.Time,StartTime)>=8000);
-           finally
-            Event.Free;
+          end else begin
+
+           if not Check(TURNNetwork.TotalAllocations=1,
+                        'the allocation has to have been made through the record layer, '+
+                        CaseName) then begin
+            Info('the terminator saw '+
+                 TRNLRawByteString(IntToStr(Relay.CountClientDatagrams))+
+                 ' datagram(s) from the client, sent '+
+                 TRNLRawByteString(IntToStr(Relay.CountSentToClient))+
+                 ' back and passed '+
+                 TRNLRawByteString(IntToStr(Relay.CountForwarded))+' on');
+            Info('failed handshakes: '+
+                 TRNLRawByteString(IntToStr(TURNNetwork.TotalFailedDTLSHandshakes))+
+                 ', failed allocations '+
+                 TRNLRawByteString(IntToStr(TURNNetwork.TotalFailedAllocations)));
+            exit;
            end;
 
-          finally
-           Peer.DecRef;
+           Peer:=Client.Connect(ServerAddress);
+           if not Check(assigned(Peer),'the client can start a connection attempt') then begin
+            exit;
+           end;
+           Peer.IncRef;
+           try
+
+            StartTime:=Instance.Time;
+            Event.Initialize;
+            try
+             repeat
+              Pump(10);
+             until Connected or (TRNLTime.RelativeDifference(Instance.Time,StartTime)>=8000);
+
+             if Connected and (Peer.CountChannels>0) then begin
+              for Index:=1 to MESSAGE_COUNT do begin
+               Peer.Channels[0].SendMessageRawByteString(TestMessageText(Index,64));
+              end;
+             end;
+
+             StartTime:=Instance.Time;
+             repeat
+              Pump(10);
+             until ((CountServerReceived>=MESSAGE_COUNT) and
+                    (CountClientReceived>=MESSAGE_COUNT)) or
+                   (TRNLTime.RelativeDifference(Instance.Time,StartTime)>=8000);
+            finally
+             Event.Free;
+            end;
+
+           finally
+            Peer.DecRef;
+           end;
+
+           Info(CaseName+': the terminator passed '+
+                TRNLRawByteString(IntToStr(Relay.CountForwarded))+
+                ' datagram(s) on, handshakes given up on '+
+                TRNLRawByteString(IntToStr(TURNNetwork.TotalFailedDTLSHandshakes))+
+                ', the server saw the client at '+
+                TRNLRawByteString(SeenAtServer.ToString)+
+                ' and got '+TRNLRawByteString(IntToStr(CountServerReceived))+
+                ' of '+TRNLRawByteString(IntToStr(MESSAGE_COUNT))+
+                ' message(s), client got '+
+                TRNLRawByteString(IntToStr(CountClientReceived))+' back');
+
+           Check(Connected,'the connection has to come up through the record layer, '+CaseName);
+
+           CheckAtLeastInt64(CountServerReceived,MESSAGE_COUNT,
+                             'and every message has to arrive, '+CaseName);
+
+           CheckAtLeastInt64(CountClientReceived,MESSAGE_COUNT,
+                             'and every answer has to find its way back, '+CaseName);
+
+           Check((SeenAtServer.Port<>0) and (SeenAtServer.Port<>Client.Address.Port),
+                 'and the server has to see the client at the relayed address rather than at '+
+                 'its own, '+CaseName);
+
           end;
-
-          Info('DTLS '+VersionName+': the terminator passed '+
-               TRNLRawByteString(IntToStr(Relay.CountForwarded))+
-               ' datagram(s) on, the server saw the client at '+
-               TRNLRawByteString(SeenAtServer.ToString)+
-               ' and got '+TRNLRawByteString(IntToStr(CountServerReceived))+
-               ' of '+TRNLRawByteString(IntToStr(MESSAGE_COUNT))+
-               ' message(s), client got '+
-               TRNLRawByteString(IntToStr(CountClientReceived))+' back');
-
-          // Nothing whatsoever reaches the relay except through the record layer, so this is the
-          // handshake having finished and the protection being right in both directions
-          CheckAtLeastInt64(Relay.CountForwarded,1,
-                            'the terminator has to have decrypted something to pass on, DTLS '+
-                            VersionName);
-
-          CheckEqualsInt64(TURNNetwork.TotalFailedDTLSHandshakes,0,
-                           'and no handshake may have been given up on, DTLS '+VersionName);
-
-          Check(Connected,'the connection has to come up through the record layer, DTLS '+
-                          VersionName);
-
-          CheckAtLeastInt64(CountServerReceived,MESSAGE_COUNT,
-                            'and every message has to arrive, DTLS '+VersionName);
-
-          CheckAtLeastInt64(CountClientReceived,MESSAGE_COUNT,
-                            'and every answer has to find its way back, DTLS '+VersionName);
-
-          Check(SeenAtServer.Port<>Client.Address.Port,
-                'and the server has to see the client at the relayed address rather than at its '+
-                'own, DTLS '+VersionName);
 
          finally
           FreeAndNil(Client);

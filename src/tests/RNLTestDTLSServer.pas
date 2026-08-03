@@ -437,6 +437,9 @@ type // A DTLS terminator in front of a relay, which is how a real deployment is
        fCountReturned:TRNLSizeInt;
 
        function GetCountForwarded:TRNLSizeInt;
+       function GetCountClientDatagrams:TRNLSizeInt;
+       function GetCountSentToClient:TRNLSizeInt;
+       function GetCountClientHellos:TRNLSizeInt;
        procedure Flush;
 
       protected
@@ -457,6 +460,12 @@ type // A DTLS terminator in front of a relay, which is how a real deployment is
        // How many datagrams came out of the record layer and went on to the relay. Zero means the
        // handshake never finished, which is a different failure from a relay which said no.
        property CountForwarded:TRNLSizeInt read GetCountForwarded;
+
+       // How many datagrams arrived from the client at all, which separates a handshake that went
+       // wrong from one that never started
+       property CountClientDatagrams:TRNLSizeInt read GetCountClientDatagrams;
+       property CountSentToClient:TRNLSizeInt read GetCountSentToClient;
+       property CountClientHellos:TRNLSizeInt read GetCountClientHellos;
 
      end;
 
@@ -1382,7 +1391,7 @@ begin
 end;
 
 function TRNLTestDTLSServer.TakeApplicationData(out aData;out aSize:TRNLSizeInt;
-                                             const aMaximumSize:TRNLSizeInt):boolean;
+                                                const aMaximumSize:TRNLSizeInt):boolean;
 begin
  aSize:=0;
  result:=false;
@@ -2129,7 +2138,7 @@ begin
 end;
 
 function TRNLTestDTLS13Server.TakeApplicationData(out aData;out aSize:TRNLSizeInt;
-                                             const aMaximumSize:TRNLSizeInt):boolean;
+                                                  const aMaximumSize:TRNLSizeInt):boolean;
 begin
  aSize:=0;
  result:=false;
@@ -2183,6 +2192,9 @@ begin
  Address.Port:=aListenPort;
  fListenSocket:=fNetwork.SocketCreate(RNL_SOCKET_TYPE_DATAGRAM,fFamily);
  if fListenSocket<>RNL_SOCKET_NULL then begin
+  // Without this the loop below reads one of the two sockets and stops there, because a receive
+  // from the other one has nothing to return and simply waits
+  fNetwork.SocketSetOption(fListenSocket,RNL_SOCKET_OPTION_NONBLOCK,1);
   fNetwork.SocketBind(fListenSocket,@Address,fFamily);
  end;
 
@@ -2190,6 +2202,7 @@ begin
  // comes from the client by which socket it arrived on
  fForwardSocket:=fNetwork.SocketCreate(RNL_SOCKET_TYPE_DATAGRAM,fFamily);
  if fForwardSocket<>RNL_SOCKET_NULL then begin
+  fNetwork.SocketSetOption(fForwardSocket,RNL_SOCKET_OPTION_NONBLOCK,1);
   fNetwork.SocketBind(fForwardSocket,nil,fFamily);
  end;
 
@@ -2223,6 +2236,40 @@ begin
  end;
 end;
 
+function TRNLTestDTLSRelay.GetCountClientDatagrams:TRNLSizeInt;
+begin
+ fLock.Acquire;
+ try
+  result:=fCountClientDatagrams;
+ finally
+  fLock.Release;
+ end;
+end;
+
+function TRNLTestDTLSRelay.GetCountSentToClient:TRNLSizeInt;
+begin
+ fLock.Acquire;
+ try
+  result:=fCountReturned;
+ finally
+  fLock.Release;
+ end;
+end;
+
+function TRNLTestDTLSRelay.GetCountClientHellos:TRNLSizeInt;
+begin
+ fLock.Acquire;
+ try
+  if assigned(fServer12) then begin
+   result:=fServer12.CountClientHellos;
+  end else begin
+   result:=fServer13.CountClientHellos;
+  end;
+ finally
+  fLock.Release;
+ end;
+end;
+
 procedure TRNLTestDTLSRelay.Flush;
 var Datagram:array[0..2047] of TRNLUInt8;
     DatagramSize:TRNLSizeInt;
@@ -2233,10 +2280,12 @@ begin
  if assigned(fServer12) then begin
   while fServer12.PopOutgoingDatagram(Datagram,DatagramSize,SizeOf(Datagram)) do begin
    fNetwork.Send(fListenSocket,@fClientAddress,Datagram,DatagramSize,fFamily);
+   inc(fCountReturned);
   end;
  end else begin
   while fServer13.PopOutgoingDatagram(Datagram,DatagramSize,SizeOf(Datagram)) do begin
    fNetwork.Send(fListenSocket,@fClientAddress,Datagram,DatagramSize,fFamily);
+   inc(fCountReturned);
   end;
  end;
 end;
@@ -2303,7 +2352,6 @@ begin
      fServer13.Send(Datagram,Size);
     end;
     Flush;
-    inc(fCountReturned);
    finally
     fLock.Release;
    end;
