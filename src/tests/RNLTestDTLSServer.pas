@@ -123,7 +123,12 @@ type // ECDSA over P-256 the other way round from RNL, which only ever verifies.
        // being recognised and being readable come apart
        RNL_TEST_DTLS_SERVER_RAW_PUBLIC_KEY_MALFORMED,
        // Says bare key and sends one which is a perfectly good key belonging to somebody else
-       RNL_TEST_DTLS_SERVER_RAW_PUBLIC_KEY_STRANGER
+       RNL_TEST_DTLS_SERVER_RAW_PUBLIC_KEY_STRANGER,
+       // Puts DTLS 1.0 in the record header of its HelloVerifyRequest, not only in the body of it.
+       // RFC 6347 section 4.2.1 allows exactly that, and openssl s_server does it - measured on
+       // 2026-08-03, where a client which insists on 1.2 in the header sees nothing arrive and
+       // retransmits until it gives up.
+       RNL_TEST_DTLS_SERVER_HELLO_VERIFY_REQUEST_IN_A_DTLS10_RECORD
       );
 
      TRNLTestDTLSServer=class
@@ -172,6 +177,8 @@ type // ECDSA over P-256 the other way round from RNL, which only ever verifies.
        // Whether the ClientHello named the bare key of RFC 7250 among the certificate types it
        // would accept. An honest server only picks out of that list.
        fClientOfferedRawPublicKey:boolean;
+       // Whether the plaintext records going out right now carry DTLS 1.0 in their header
+       fDTLS10RecordVersion:boolean;
 
        fSendEpoch:TRNLUInt16;
        fSendSequenceNumbers:array[0..1] of TRNLUInt64;
@@ -673,6 +680,7 @@ begin
  fServerKeys.Clear;
  fUseExtendedMasterSecret:=false;
  fClientOfferedRawPublicKey:=false;
+ fDTLS10RecordVersion:=false;
 
  fSendEpoch:=0;
  fSendSequenceNumbers[0]:=0;
@@ -750,6 +758,11 @@ begin
                                   TRNLSizeUInt(MaximumDatagramSize-fPacking.Size),
                                   0,fSendSequenceNumbers[0],aContentType,aContent,aContentSize);
   if Ok then begin
+   // Rewritten after the fact rather than parameterised, because the writer has no business
+   // offering a version it does not speak
+   if fDTLS10RecordVersion then begin
+    fPacking.Data[fPacking.Size+2]:=255;
+   end;
    inc(fSendSequenceNumbers[0]);
   end;
  end else begin
@@ -902,6 +915,10 @@ end;
 procedure TRNLTestDTLSServer.BuildHelloVerifyRequest;
 var Body:array[0..(2+1+CookieSize)-1] of TRNLUInt8;
 begin
+ // Only this one message carries it in the header, which is what a real server does: everything
+ // after the cookie exchange is 1.2 again
+ fDTLS10RecordVersion:=
+  fBehaviour=RNL_TEST_DTLS_SERVER_HELLO_VERIFY_REQUEST_IN_A_DTLS10_RECORD;
  // DTLS 1.0 in the version field whatever is about to be spoken, which is what RFC 6347 section
  // 4.2.1 asks for and what makes the field useless to check
  Body[0]:=254;
@@ -913,6 +930,7 @@ begin
  // Outside the transcript, together with the ClientHello which provoked it
  AppendMessage(TRNLDTLS12Handshake.TYPE_HELLO_VERIFY_REQUEST,Body[0],SizeOf(Body),0,false);
  EmitFlight;
+ fDTLS10RecordVersion:=false;
 end;
 
 function TRNLTestDTLSServer.SendsRawPublicKey:boolean;

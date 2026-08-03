@@ -2723,6 +2723,14 @@ type PRNLVersion=^TRNLVersion;
              // {254,253} and not {3,3}
              VersionMajor=TRNLUInt8(254);
              VersionMinor=TRNLUInt8(253);
+             // DTLS 1.0, which is not a version this client speaks and is still a version it has to
+             // read. RFC 6347 section 4.2.1 has a server put 1.0 in the HelloVerifyRequest whatever
+             // it is about to negotiate, and OpenSSL puts it in that record's header as well -
+             // measured against openssl s_server on 2026-08-03, where a strict client sees nothing
+             // arrive at all and retransmits until it gives up. Only ever accepted on the way in,
+             // and only in a plaintext record: once records are protected the version is part of
+             // what the tag covers, so there it means something.
+             VersionMinorDTLS10=TRNLUInt8(255);
              CONTENT_TYPE_CHANGE_CIPHER_SPEC=TRNLUInt8(20);
              CONTENT_TYPE_ALERT=TRNLUInt8(21);
              CONTENT_TYPE_HANDSHAKE=TRNLUInt8(22);
@@ -27204,8 +27212,10 @@ begin
 
  Datagram:=PRNLUInt8Array(TRNLPointer(@aDatagram));
 
- // A version this client does not speak is a record it cannot lay out, not one to guess at
- if (Datagram^[1]<>VersionMajor) or (Datagram^[2]<>VersionMinor) then begin
+ // A version this client does not speak is a record it cannot lay out, not one to guess at - with
+ // the one exception RFC 6347 section 4.2.1 writes into the protocol, see VersionMinorDTLS10
+ if (Datagram^[1]<>VersionMajor) or
+    ((Datagram^[2]<>VersionMinor) and (Datagram^[2]<>VersionMinorDTLS10)) then begin
   exit;
  end;
 

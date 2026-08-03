@@ -5068,6 +5068,16 @@ begin
    Expect('a server which asks for no cookie at all',
           RNL_TEST_DTLS_SERVER_WITHOUT_COOKIE_EXCHANGE,false,0);
 
+   // RFC 6347 section 4.2.1 lets a server put DTLS 1.0 in its HelloVerifyRequest whatever it is
+   // about to negotiate - and openssl s_server puts it in that record's *header* as well, not only
+   // in the message body. Measured on 2026-08-03: a client which insists on 1.2 in the header
+   // drops the datagram, sees nothing arrive, and retransmits its ClientHello until it gives up.
+   // Six datagrams out, six in, no handshake. This is the one case where the version field of a
+   // record has to be read loosely, and only here: an epoch which is protected has the version in
+   // what the tag covers.
+   Expect('a server whose HelloVerifyRequest arrives in a DTLS 1.0 record',
+          RNL_TEST_DTLS_SERVER_HELLO_VERIFY_REQUEST_IN_A_DTLS10_RECORD,false,0);
+
    // Every message of the flight cut into sixty four byte pieces and sent last one first, which is
    // both the fragment reassembly and the holding of messages whose turn has not come
    Expect('a server whose flight arrives backwards, in pieces',
