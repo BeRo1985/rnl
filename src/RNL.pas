@@ -7931,7 +7931,23 @@ type PRNLVersion=^TRNLVersion;
      TRNLTURNTransportKind=
       (
        RNL_TURN_TRANSPORT_KIND_UDP,
-       RNL_TURN_TRANSPORT_KIND_TCP
+       RNL_TURN_TRANSPORT_KIND_TCP,
+       // The same datagrams as UDP, through a DTLS record layer. A datagram stays a datagram, so
+       // none of the stream reassembly or the four byte padding of the TCP path applies - what is
+       // added is a handshake at bind time and one layer of protection on every frame after it.
+       RNL_TURN_TRANSPORT_KIND_DTLS
+      );
+
+     // Which version of DTLS to speak to the relay. The automatic order is 1.2 first and 1.3
+     // second, and that is a measurement rather than a preference: every relay reached so far
+     // answers 1.2 only, and trying 1.3 first would cost a whole handshake against each of them.
+     // The two explicit values are for a deployment which knows its relay.
+     PRNLTURNDTLSVersion=^TRNLTURNDTLSVersion;
+     TRNLTURNDTLSVersion=
+      (
+       RNL_TURN_DTLS_VERSION_AUTOMATIC,
+       RNL_TURN_DTLS_VERSION_1_2,
+       RNL_TURN_DTLS_VERSION_1_3
       );
 
      // Which address family an allocation is asked for. The default derives it from the socket and
@@ -8013,6 +8029,12 @@ type PRNLVersion=^TRNLVersion;
        // What has arrived over that stream and does not add up to a whole frame yet
        fStreamBuffer:array[0..RNL_TURN_STREAM_BUFFER_SIZE-1] of TRNLUInt8;
        fStreamBufferSize:TRNLSizeInt;
+       // Exactly one of these exists when the transport is DTLS, and neither otherwise. Two classes
+       // rather than one with a switch, because the two protocols share almost nothing below the
+       // outermost shape - and that shape is the same on purpose, so everything here can treat
+       // them alike.
+       fDTLS12:TRNLDTLS12Client;
+       fDTLS13:TRNLDTLS13Client;
        fFamily:TRNLAddressFamily;
        fServerAddress:TRNLAddress;
        fCredentials:TRNLTURNCredentials;
@@ -8040,6 +8062,19 @@ type PRNLVersion=^TRNLVersion;
                               const aLifetime:TRNLUInt32);
        procedure SignRequest(var aMessage:TRNLSTUNMessage);
        function UsesStream:boolean;
+       function UsesDTLS:boolean;
+       // Everything the client wants to put on the wire, moved to the socket. Called after every
+       // send and after every datagram fed in, because a DTLS client answers records of its own -
+       // acknowledgements, retransmissions - which nobody else would ever push out.
+       function DTLSFlush:boolean;
+       // One datagram from the relay into the record layer. False when the connection has failed,
+       // which is not the same as nothing having come out of it.
+       function DTLSFeed(const aData;const aDataSize:TRNLSizeInt):boolean;
+       function DTLSTake(out aData;const aMaximumSize:TRNLSizeInt;
+                         out aSize:TRNLSizeInt):boolean;
+       // Blocking, and only at bind time. Everything after this point is asynchronous like the
+       // rest of the relay path.
+       function DTLSHandshake(const aVersion:TRNLTURNDTLSVersion):boolean;
        // Over UDP one datagram, over TCP one frame in the stream. RFC 8656 section 12.5 wants a
        // ChannelData frame padded to a multiple of four over a stream, where over a datagram it is not;
        // a STUN message is a multiple of four either way.
@@ -8118,6 +8153,9 @@ type PRNLVersion=^TRNLVersion;
        fUsername:TRNLRawByteString;
        fPassword:TRNLRawByteString;
        fTransport:TRNLTURNTransportKind;
+       fDTLSVersion:TRNLTURNDTLSVersion;
+       fDTLSVerification:TRNLDTLSVerification;
+       fDTLSServerName:TRNLRawByteString;
        fPreferSHA256:boolean;
        fRequestedAddressFamily:TRNLTURNAddressFamilyPolicy;
        fUseChannels:boolean;
@@ -8129,6 +8167,7 @@ type PRNLVersion=^TRNLVersion;
        fLock:TCriticalSection;
        fTotalAllocations:TRNLUInt64;
        fTotalFailedAllocations:TRNLUInt64;
+       fTotalFailedDTLSHandshakes:TRNLUInt64;
        fLastFailedAllocationErrorCode:TRNLUInt32;
        fTotalRefreshes:TRNLUInt64;
        fTotalCreatedPermissions:TRNLUInt64;
@@ -8154,6 +8193,13 @@ type PRNLVersion=^TRNLVersion;
        destructor Destroy; override;
        // The address the relay forwards to that socket, which is what belongs in a relayed candidate
        function GetRelayedAddress(const aSocket:TRNLSocket;out aAddress:TRNLAddress):boolean; override;
+       // How the relay is decided to be the right relay: a certificate chain, or a pinned
+       // fingerprint for a relay one runs oneself. Without this set to something, a DTLS transport
+       // has nothing to check against and every handshake ends at the certificate.
+       //
+       // Public rather than published because it is a record, and the published table only carries
+       // what the runtime can describe.
+       property DTLSVerification:TRNLDTLSVerification read fDTLSVerification write fDTLSVerification;
        // The allocation belonging to that socket, or nil if there is none. Read only: everything on it
        // that changes state is private.
        function AllocationOf(const aSocket:TRNLSocket):TRNLTURNAllocation;
@@ -8186,6 +8232,12 @@ type PRNLVersion=^TRNLVersion;
        // the allocation is made. UDP by default, because that is what a relay is normally reached
        // over; TCP for the network which lets no UDP out at all.
        property Transport:TRNLTURNTransportKind read fTransport write fTransport;
+       // Only consulted when the transport is DTLS. Has to be set before the host binds, like the
+       // transport itself.
+       property DTLSVersion:TRNLTURNDTLSVersion read fDTLSVersion write fDTLSVersion;
+       // What goes out in the server_name extension. Empty leaves the extension out altogether,
+       // which is what a relay reached by address rather than by name wants.
+       property DTLSServerName:TRNLRawByteString read fDTLSServerName write fDTLSServerName;
        // Ask for MESSAGE-INTEGRITY-SHA256 where the server offers a choice. Off by default, because
        // the older method is what every deployed relay understands.
        property PreferSHA256:boolean read fPreferSHA256 write fPreferSHA256;
@@ -8196,6 +8248,10 @@ type PRNLVersion=^TRNLVersion;
        property CountRequestAttempts:TRNLSizeInt read fCountRequestAttempts write fCountRequestAttempts;
        property TotalAllocations:TRNLUInt64 read fTotalAllocations;
        property TotalFailedAllocations:TRNLUInt64 read fTotalFailedAllocations;
+       // Counted apart from the allocations, because the two failures are different things to do
+       // something about: a handshake which does not come off is a relay one cannot reach at all,
+       // an allocation which is refused is one which answered and said no.
+       property TotalFailedDTLSHandshakes:TRNLUInt64 read fTotalFailedDTLSHandshakes;
        // Why the last one failed, as the three digit code of the rejection, or zero if it was not
        // rejected at all but simply never answered
        property LastFailedAllocationErrorCode:TRNLUInt32 read fLastFailedAllocationErrorCode;
@@ -34531,6 +34587,8 @@ end;
 
 destructor TRNLTURNAllocation.Destroy;
 begin
+ FreeAndNil(fDTLS12);
+ FreeAndNil(fDTLS13);
  if fControlSocket<>RNL_SOCKET_NULL then begin
   fTURNNetwork.fNetwork.SocketShutdown(fControlSocket,RNL_SOCKET_SHUTDOWN_READ_WRITE);
   fTURNNetwork.fNetwork.SocketDestroy(fControlSocket);
@@ -34683,10 +34741,179 @@ begin
  result:=fControlSocket<>RNL_SOCKET_NULL;
 end;
 
+function TRNLTURNAllocation.UsesDTLS:boolean;
+begin
+ result:=assigned(fDTLS12) or assigned(fDTLS13);
+end;
+
+function TRNLTURNAllocation.DTLSFlush:boolean;
+var Datagram:array[0..TRNLSTUNMessage.MaximumSize-1] of TRNLUInt8;
+    DatagramSize:TRNLSizeInt;
+begin
+ result:=true;
+ if assigned(fDTLS12) then begin
+  while fDTLS12.PopOutgoingDatagram(Datagram,DatagramSize,SizeOf(Datagram)) do begin
+   if fTURNNetwork.fNetwork.Send(fSocket,@fServerAddress,Datagram,DatagramSize,
+                                 fFamily)<>DatagramSize then begin
+    result:=false;
+   end;
+  end;
+ end else if assigned(fDTLS13) then begin
+  while fDTLS13.PopOutgoingDatagram(Datagram,DatagramSize,SizeOf(Datagram)) do begin
+   if fTURNNetwork.fNetwork.Send(fSocket,@fServerAddress,Datagram,DatagramSize,
+                                 fFamily)<>DatagramSize then begin
+    result:=false;
+   end;
+  end;
+ end;
+end;
+
+function TRNLTURNAllocation.DTLSFeed(const aData;const aDataSize:TRNLSizeInt):boolean;
+begin
+ result:=false;
+ if assigned(fDTLS12) then begin
+  fDTLS12.ProcessDatagram(aData,aDataSize,Now_);
+  fDTLS12.Update(Now_);
+  result:=fDTLS12.State<>RNL_DTLS12_CLIENT_STATE_FAILED;
+ end else if assigned(fDTLS13) then begin
+  fDTLS13.ProcessDatagram(aData,aDataSize,Now_);
+  fDTLS13.Update(Now_);
+  result:=fDTLS13.State<>RNL_DTLS13_CLIENT_STATE_FAILED;
+ end;
+ // Whatever came of it - an acknowledgement, a retransmission, an alert - goes out now. Nobody
+ // else would ever push it.
+ DTLSFlush;
+end;
+
+function TRNLTURNAllocation.DTLSTake(out aData;const aMaximumSize:TRNLSizeInt;
+                                     out aSize:TRNLSizeInt):boolean;
+begin
+ aSize:=0;
+ if assigned(fDTLS12) then begin
+  result:=fDTLS12.PopApplicationData(aData,aSize,aMaximumSize);
+ end else if assigned(fDTLS13) then begin
+  result:=fDTLS13.PopApplicationData(aData,aSize,aMaximumSize);
+ end else begin
+  result:=false;
+ end;
+end;
+
+function TRNLTURNAllocation.DTLSHandshake(const aVersion:TRNLTURNDTLSVersion):boolean;
+var Sockets:array[0..0] of TRNLSocket;
+    WaitConditions:TRNLSocketWaitConditions;
+    Datagram:array[0..TRNLSTUNMessage.MaximumSize-1] of TRNLUInt8;
+    ReceivedAddress:TRNLAddress;
+    ReceivedSize:TRNLSizeInt;
+    Deadline:TRNLTime;
+    Finished:boolean;
+
+ // One attempt at one version, from the first ClientHello to either end of it. Blocking, and the
+ // only blocking thing on this path: it runs where the allocation already runs, before the host
+ // services anything.
+ function Attempt:boolean;
+ begin
+
+  result:=false;
+  if not DTLSFlush then begin
+   exit;
+  end;
+
+  // Long enough for the client's own backoff to run out first, so that giving up is its decision
+  // and not a second timer racing it
+  Deadline:=Now_+60000;
+
+  repeat
+
+   if assigned(fDTLS12) then begin
+    Finished:=fDTLS12.State in [RNL_DTLS12_CLIENT_STATE_ESTABLISHED,
+                                RNL_DTLS12_CLIENT_STATE_FAILED];
+   end else begin
+    Finished:=fDTLS13.State in [RNL_DTLS13_CLIENT_STATE_ESTABLISHED,
+                                RNL_DTLS13_CLIENT_STATE_FAILED];
+   end;
+   if Finished then begin
+    break;
+   end;
+
+   WaitConditions:=[RNL_SOCKET_WAIT_CONDITION_IO_RECEIVE];
+   if fTURNNetwork.fNetwork.SocketWait(Sockets,WaitConditions,
+                                       Max(0,TRNLTime.RelativeDifference(Deadline,Now_)),
+                                       nil) and
+      (RNL_SOCKET_WAIT_CONDITION_IO_RECEIVE in WaitConditions) then begin
+    ReceivedSize:=fTURNNetwork.fNetwork.Receive(fSocket,@ReceivedAddress,Datagram,
+                                                SizeOf(Datagram),fFamily);
+    if (ReceivedSize>0) and ReceivedAddress.Equals(fServerAddress) then begin
+     DTLSFeed(Datagram,ReceivedSize);
+    end;
+   end else begin
+    // Nothing arrived within the window. The client's own timer is what retransmits, so it is
+    // given a tick and the loop goes round again until the deadline.
+    if assigned(fDTLS12) then begin
+     fDTLS12.Update(Now_);
+    end else begin
+     fDTLS13.Update(Now_);
+    end;
+    DTLSFlush;
+   end;
+
+  until Now_>=Deadline;
+
+  if assigned(fDTLS12) then begin
+   result:=fDTLS12.State=RNL_DTLS12_CLIENT_STATE_ESTABLISHED;
+  end else if assigned(fDTLS13) then begin
+   result:=fDTLS13.State=RNL_DTLS13_CLIENT_STATE_ESTABLISHED;
+  end;
+
+ end;
+
+begin
+
+ result:=false;
+ Sockets[0]:=fSocket;
+
+ if (aVersion=RNL_TURN_DTLS_VERSION_1_2) or (aVersion=RNL_TURN_DTLS_VERSION_AUTOMATIC) then begin
+  fDTLS12:=TRNLDTLS12Client.Create(fTURNNetwork.fRandomGenerator,
+                                   fTURNNetwork.fDTLSServerName,
+                                   fTURNNetwork.fDTLSVerification);
+  fDTLS12.Start(Now_);
+  result:=Attempt;
+  if result then begin
+   exit;
+  end;
+  FreeAndNil(fDTLS12);
+  if aVersion=RNL_TURN_DTLS_VERSION_1_2 then begin
+   exit;
+  end;
+ end;
+
+ // Either 1.3 was asked for, or 1.2 was tried and did not answer. A second handshake costs a round
+ // trip; the alternative is one ClientHello which offers both, and that is a merged client rather
+ // than two - worth doing the day a relay is found which needs it.
+ fDTLS13:=TRNLDTLS13Client.Create(fTURNNetwork.fRandomGenerator,
+                                  fTURNNetwork.fDTLSServerName,
+                                  fTURNNetwork.fDTLSVerification);
+ fDTLS13.Start(Now_);
+ result:=Attempt;
+ if not result then begin
+  FreeAndNil(fDTLS13);
+ end;
+
+end;
+
 function TRNLTURNAllocation.SendFrame(const aData;const aDataSize:TRNLSizeInt):boolean;
 var Padded:TRNLSizeInt;
     Buffer:array[0..3] of TRNLUInt8;
 begin
+ if UsesDTLS then begin
+  // A datagram stays a datagram; it only goes through the record layer on the way out
+  if assigned(fDTLS12) then begin
+   result:=fDTLS12.Send(aData,aDataSize);
+  end else begin
+   result:=fDTLS13.Send(aData,aDataSize);
+  end;
+  result:=DTLSFlush and result;
+  exit;
+ end;
  if not UsesStream then begin
   result:=fTURNNetwork.fNetwork.Send(fSocket,@fServerAddress,aData,aDataSize,fFamily)=aDataSize;
   exit;
@@ -34945,6 +35172,22 @@ begin
          aResponse.HasSameTransactionID(aRequest.TransactionID) then begin
        result:=true;
        exit;
+      end;
+     end;
+    end else if UsesDTLS then begin
+     // The datagram off the socket is a record and not an answer; the answer, if there is one, is
+     // what the record layer hands back
+     ReceivedSize:=fTURNNetwork.fNetwork.Receive(fSocket,@ReceivedAddress,Buffer,SizeOf(Buffer),fFamily);
+     if (ReceivedSize>0) and ReceivedAddress.Equals(fServerAddress) then begin
+      if not DTLSFeed(Buffer,ReceivedSize) then begin
+       exit;
+      end;
+      while DTLSTake(Buffer,SizeOf(Buffer),ReceivedSize) do begin
+       if aResponse.Assign(Buffer,ReceivedSize) and
+          aResponse.HasSameTransactionID(aRequest.TransactionID) then begin
+        result:=true;
+        exit;
+       end;
       end;
      end;
     end else begin
@@ -35401,6 +35644,12 @@ begin
  fUsername:=aUsername;
  fPassword:=aPassword;
  fTransport:=RNL_TURN_TRANSPORT_KIND_UDP;
+ fDTLSVersion:=RNL_TURN_DTLS_VERSION_AUTOMATIC;
+ fDTLSServerName:='';
+ // Chain mode with nothing trusted, which refuses every relay until the application says how it
+ // wants them recognised. Silence here has to mean no, not yes.
+ FillChar(fDTLSVerification,SizeOf(TRNLDTLSVerification),#0);
+ fDTLSVerification.Mode:=RNL_DTLS_VERIFICATION_CHAIN;
  fPreferSHA256:=false;
  fRequestedAddressFamily:=RNL_TURN_ADDRESS_FAMILY_POLICY_FROM_SOCKET;
  fUseChannels:=true;
@@ -35412,6 +35661,7 @@ begin
  fLock:=TCriticalSection.Create;
  fTotalAllocations:=0;
  fTotalFailedAllocations:=0;
+ fTotalFailedDTLSHandshakes:=0;
  fLastFailedAllocationErrorCode:=0;
  fTotalRefreshes:=0;
  fTotalCreatedPermissions:=0;
@@ -35529,6 +35779,17 @@ begin
     inc(fTotalFailedAllocations);
     exit;
    end;
+  end;
+
+  // The handshake belongs here for the same reason the allocation does: the socket exists, it has
+  // a source address, and nothing is in flight yet. It is also the one place on this path where
+  // blocking is allowed.
+  if (fTransport=RNL_TURN_TRANSPORT_KIND_DTLS) and
+     not Allocation.DTLSHandshake(fDTLSVersion) then begin
+   FreeAndNil(Allocation);
+   inc(fTotalFailedAllocations);
+   inc(fTotalFailedDTLSHandshakes);
+   exit;
   end;
 
   if Allocation.Establish then begin
@@ -35711,6 +35972,25 @@ begin
     exit;
    end;
    FromServer:=ReceivedAddress.Equals(Allocation.ServerAddress);
+   // A datagram from the relay over a DTLS transport is a record. What comes out of it may be
+   // nothing at all - an acknowledgement, a retransmission, an alert - and then there is simply
+   // nothing to hand on and the loop goes round for the next datagram.
+   if FromServer and Allocation.UsesDTLS then begin
+    fLock.Acquire;
+    try
+     if not Allocation.DTLSFeed(Buffer,ReceivedSize) then begin
+      inc(fTotalDroppedFromServer);
+      result:=-1;
+      exit;
+     end;
+     FromServer:=Allocation.DTLSTake(Buffer,SizeOf(Buffer),ReceivedSize);
+    finally
+     fLock.Release;
+    end;
+    if not FromServer then begin
+     continue;
+    end;
+   end;
   end;
 
   if not FromServer then begin
