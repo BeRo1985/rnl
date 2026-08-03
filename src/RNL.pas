@@ -2483,7 +2483,11 @@ type PRNLVersion=^TRNLVersion;
        RNL_X509_VERDICT_NO_CLOCK,
        RNL_X509_VERDICT_UNTRUSTED_ROOT,
        RNL_X509_VERDICT_WRONG_HOST_NAME,
-       RNL_X509_VERDICT_NOT_A_SERVER_CERTIFICATE
+       RNL_X509_VERDICT_NOT_A_SERVER_CERTIFICATE,
+       // Not a chain failure at all: the peer presented something whose fingerprint is not one of
+       // the pinned ones. It sits here because a caller wants one answer to "may I talk to this
+       // peer", whichever way that was decided.
+       RNL_X509_VERDICT_FINGERPRINT_MISMATCH
       );
 
      PRNLX509ChainEntry=^TRNLX509ChainEntry;
@@ -2537,6 +2541,68 @@ type PRNLVersion=^TRNLVersion;
                                   const aHostName:TRNLRawByteString;
                                   const aNowSecondsSinceUnixEpoch:TRNLInt64;
                                   out aLeaf:TRNLX509Certificate):TRNLX509Verdict; static;
+       class procedure SelfTest; static;
+     end;
+
+     PRNLDTLSVerificationMode=^TRNLDTLSVerificationMode;
+     TRNLDTLSVerificationMode=
+      (
+       // The full path of RFC 5280: signatures, issuer names, constraints, validity, host name.
+       // What a public relay with a certificate authority behind it needs.
+       RNL_DTLS_VERIFICATION_CHAIN,
+       // The SHA-256 of the leaf's own bytes against a configured value, and nothing else.
+       RNL_DTLS_VERIFICATION_FINGERPRINT
+      );
+
+     // How a peer is decided to be the right peer. One record for both, because a caller wants a
+     // single answer to "may I talk to this" and the two ways of arriving at it are a
+     // configuration choice, not two different questions.
+     //
+     // What pinning does NOT save is the certificate parser. The signature over the key exchange
+     // has to be checked with the peer's public key, and that key sits inside the certificate in
+     // DER whichever way the peer was recognised. Pinning replaces the chain, the clock and the
+     // host name - not the reader.
+     //
+     // And that is exactly its use: a relay which belongs to whoever runs the client. There is no
+     // certificate authority to appeal to, often no trustworthy clock, and the host name is
+     // whatever DNS happens to say today. A fingerprint answers all three at once, and it is the
+     // same model RNL already uses for its own long term keys.
+     PRNLDTLSVerification=^TRNLDTLSVerification;
+     TRNLDTLSVerification=record
+      public
+       const MaximumFingerprints=8;
+             FingerprintSize=32;
+      public
+       type TFingerprint=array[0..FingerprintSize-1] of TRNLUInt8;
+      public
+       Mode:TRNLDTLSVerificationMode;
+       // Only consulted in chain mode. In fingerprint mode a certificate for another name, or one
+       // whose validity ran out, is still the certificate which was pinned - and refusing it would
+       // be answering a question nobody asked.
+       HostName:TRNLRawByteString;
+       NowSecondsSinceUnixEpoch:TRNLInt64;
+       TrustedRoots:TRNLX509.TChainEntries;
+       CountTrustedRoots:TRNLSizeInt;
+       Fingerprints:array[0..MaximumFingerprints-1] of TFingerprint;
+       CountFingerprints:TRNLSizeInt;
+      public
+       procedure InitializeChain(const aHostName:TRNLRawByteString;
+                                 const aTrustedRoots:TRNLX509.TChainEntries;
+                                 const aCountTrustedRoots:TRNLSizeInt;
+                                 const aNowSecondsSinceUnixEpoch:TRNLInt64);
+       // More than one, because a certificate is replaced eventually and both have to be accepted
+       // for as long as the changeover lasts
+       procedure InitializeFingerprints;
+       function AddFingerprint(const aFingerprint):boolean;
+       // The fingerprint of a certificate's own bytes, which is what an operator reads off their
+       // own server with a command line tool
+       class procedure ComputeFingerprint(out aFingerprint;
+                                          const aCertificate;
+                                          const aCertificateSize:TRNLSizeInt); static;
+       // What the peer presented, judged. aLeaf comes back with its key fields filled in either
+       // way, because that is what the signature check above needs.
+       function VerifyLeaf(const aChain:TRNLX509.TChainEntries;const aChainLength:TRNLSizeInt;
+                           out aLeaf:TRNLX509Certificate):TRNLX509Verdict;
        class procedure SelfTest; static;
      end;
 
@@ -3032,14 +3098,12 @@ type PRNLVersion=^TRNLVersion;
 
        fRandomGenerator:TRNLRandomGenerator;
 
+       // What goes out in the server_name extension, which is not the same question as which
+       // peer is acceptable: in fingerprint mode nothing is checked against it, and a relay may
+       // still want to know which of its names was asked for.
        fServerName:TRNLRawByteString;
 
-       fTrustedRoots:TRNLX509.TChainEntries;
-       fCountTrustedRoots:TRNLSizeInt;
-
-       // Supplied rather than read from the operating system, the same way TRNLX509.VerifyChain
-       // takes it. Zero means no clock, and then a certificate with a validity period is refused.
-       fNowSecondsSinceUnixEpoch:TRNLInt64;
+       fVerification:TRNLDTLSVerification;
 
        fState:TRNLDTLS12ClientState;
        fFailure:TRNLDTLS12ClientFailure;
@@ -3148,9 +3212,7 @@ type PRNLVersion=^TRNLVersion;
        // certificate validity is judged against.
        constructor Create(const aRandomGenerator:TRNLRandomGenerator;
                           const aServerName:TRNLRawByteString;
-                          const aTrustedRoots:TRNLX509.TChainEntries;
-                          const aCountTrustedRoots:TRNLSizeInt;
-                          const aNowSecondsSinceUnixEpoch:TRNLInt64); reintroduce;
+                          const aVerification:TRNLDTLSVerification); reintroduce;
        destructor Destroy; override;
 
        // Queues the first flight. Everything after this is driven by ProcessDatagram and Update.
@@ -3662,9 +3724,7 @@ type PRNLVersion=^TRNLVersion;
 
        fRandomGenerator:TRNLRandomGenerator;
        fServerName:TRNLRawByteString;
-       fTrustedRoots:TRNLX509.TChainEntries;
-       fCountTrustedRoots:TRNLSizeInt;
-       fNowSecondsSinceUnixEpoch:TRNLInt64;
+       fVerification:TRNLDTLSVerification;
 
        fState:TRNLDTLS13ClientState;
        fFailure:TRNLDTLS12ClientFailure;
@@ -3755,9 +3815,7 @@ type PRNLVersion=^TRNLVersion;
 
        constructor Create(const aRandomGenerator:TRNLRandomGenerator;
                           const aServerName:TRNLRawByteString;
-                          const aTrustedRoots:TRNLX509.TChainEntries;
-                          const aCountTrustedRoots:TRNLSizeInt;
-                          const aNowSecondsSinceUnixEpoch:TRNLInt64); reintroduce;
+                          const aVerification:TRNLDTLSVerification); reintroduce;
        destructor Destroy; override;
 
        procedure Start(const aNow:TRNLTime);
@@ -14547,6 +14605,125 @@ begin
 
 end;
 
+// Pinning against the same real certificate the X.509 tests use, and against a fingerprint
+// computed apart from this code with a command line tool.
+//
+// The point of the two modes living in one record is that a caller asks one question. What the
+// test has to show is that the answers really are different where they should be: the same
+// certificate which the chain refuses - wrong name, expired, nobody trusted above it - is
+// accepted on its fingerprint, because a pin says "this one" and not "one issued properly".
+class procedure TRNLDTLSVerification.SelfTest;
+const // SHA-256 of the certificate bytes below, from
+      //   openssl x509 -in leaf.der -inform der -fingerprint -sha256 -noout
+      ExpectedFingerprint:array[0..31] of TRNLUInt8=
+       (
+        $1e,$7e,$79,$b8,$f0,$d2,$69,$d6,$61,$dc,$53,$cd,
+        $79,$d1,$73,$d1,$1f,$48,$f7,$2e,$f6,$14,$e1,$de,
+        $77,$f5,$3c,$de,$ee,$5c,$ef,$40
+       );
+var Verification:TRNLDTLSVerification;
+    Chain:TRNLX509.TChainEntries;
+    Leaf:TRNLX509Certificate;
+    Fingerprint:TRNLDTLSVerification.TFingerprint;
+    Other:TRNLDTLSVerification.TFingerprint;
+    Index:TRNLSizeInt;
+begin
+
+ FillChar(Chain,SizeOf(TRNLX509.TChainEntries),#0);
+ Chain[0].Data:=PRNLUInt8Array(TRNLPointer(@RNLX509SelfTestLeaf[0]));
+ Chain[0].Size:=SizeOf(RNLX509SelfTestLeaf);
+
+ RNLSelfTestBegin('[DTLS-PIN] the fingerprint of a real certificate is what openssl prints ... ');
+ ComputeFingerprint(Fingerprint,RNLX509SelfTestLeaf,SizeOf(RNLX509SelfTestLeaf));
+ if TRNLMemory.SecureIsEqual(Fingerprint,ExpectedFingerprint,SizeOf(ExpectedFingerprint)) then begin
+  RNLSelfTestSucceeded;
+ end else begin
+  RNLSelfTestFailure;
+ end;
+
+ // The certificate is a real one from a public relay: no root of its issuer is configured here,
+ // its name is not asked about, and the clock is zero. In chain mode every one of those is a
+ // refusal; on its fingerprint it is the peer that was meant.
+ RNLSelfTestBegin('[DTLS-PIN] a pinned certificate is accepted with no root, name or clock ... ');
+ Verification.InitializeFingerprints;
+ if Verification.AddFingerprint(Fingerprint) and
+    (Verification.VerifyLeaf(Chain,1,Leaf)=RNL_X509_VERDICT_ACCEPTED) and
+    (Leaf.PublicKeyCurve=RNL_X509_PUBLIC_KEY_CURVE_P256) and
+    (Leaf.PublicKeySize=TRNLP256.PointSize) then begin
+  RNLSelfTestSucceeded;
+ end else begin
+  RNLSelfTestFailure;
+ end;
+
+ // Which is the whole point: the key comes out of the certificate either way, because the
+ // signature over the key exchange has to be checked with it
+ RNLSelfTestBegin('[DTLS-PIN] and the same chain without a pin is refused, not waved through ... ');
+ Verification.InitializeFingerprints;
+ if Verification.VerifyLeaf(Chain,1,Leaf)=RNL_X509_VERDICT_FINGERPRINT_MISMATCH then begin
+  RNLSelfTestSucceeded;
+ end else begin
+  RNLSelfTestFailure;
+ end;
+
+ RNLSelfTestBegin('[DTLS-PIN] one wrong bit in the pin is a mismatch ... ');
+ Verification.InitializeFingerprints;
+ Move(Fingerprint,Other,SizeOf(Other));
+ Other[31]:=Other[31] xor 1;
+ if Verification.AddFingerprint(Other) and
+    (Verification.VerifyLeaf(Chain,1,Leaf)=RNL_X509_VERDICT_FINGERPRINT_MISMATCH) then begin
+  RNLSelfTestSucceeded;
+ end else begin
+  RNLSelfTestFailure;
+ end;
+
+ // More than one pin has to work, because a certificate is replaced eventually and both have to
+ // be accepted while the changeover lasts
+ RNLSelfTestBegin('[DTLS-PIN] a second pin alongside a wrong one still matches ... ');
+ Verification.InitializeFingerprints;
+ if Verification.AddFingerprint(Other) and
+    Verification.AddFingerprint(Fingerprint) and
+    (Verification.VerifyLeaf(Chain,1,Leaf)=RNL_X509_VERDICT_ACCEPTED) then begin
+  RNLSelfTestSucceeded;
+ end else begin
+  RNLSelfTestFailure;
+ end;
+
+ RNLSelfTestBegin('[DTLS-PIN] the store fills up rather than overflowing ... ');
+ Verification.InitializeFingerprints;
+ for Index:=0 to TRNLDTLSVerification.MaximumFingerprints-1 do begin
+  if not Verification.AddFingerprint(Other) then begin
+   RNLSelfTestFailure;
+   exit;
+  end;
+ end;
+ if not Verification.AddFingerprint(Fingerprint) then begin
+  RNLSelfTestSucceeded;
+ end else begin
+  RNLSelfTestFailure;
+ end;
+
+ // A pin which matches bytes that will not parse is still no use: the key has to come out of them
+ RNLSelfTestBegin('[DTLS-PIN] a pinned certificate which will not parse is still refused ... ');
+ Verification.InitializeFingerprints;
+ Chain[0].Size:=SizeOf(RNLX509SelfTestLeaf)-32;
+ ComputeFingerprint(Fingerprint,RNLX509SelfTestLeaf,Chain[0].Size);
+ if Verification.AddFingerprint(Fingerprint) and
+    (Verification.VerifyLeaf(Chain,1,Leaf)=RNL_X509_VERDICT_MALFORMED) then begin
+  RNLSelfTestSucceeded;
+ end else begin
+  RNLSelfTestFailure;
+ end;
+
+ RNLSelfTestBegin('[DTLS-PIN] and an empty chain is refused in either mode ... ');
+ Verification.InitializeFingerprints;
+ if Verification.VerifyLeaf(Chain,0,Leaf)=RNL_X509_VERDICT_EMPTY_CHAIN then begin
+  RNLSelfTestSucceeded;
+ end else begin
+  RNLSelfTestFailure;
+ end;
+
+end;
+
 class procedure TRNLSHA384.SelfTest;
 const ExpectedEmpty:TRNLSHA384Hash=
        (
@@ -22873,6 +23050,105 @@ begin
 
 end;
 
+procedure TRNLDTLSVerification.InitializeChain(const aHostName:TRNLRawByteString;
+                                               const aTrustedRoots:TRNLX509.TChainEntries;
+                                               const aCountTrustedRoots:TRNLSizeInt;
+                                               const aNowSecondsSinceUnixEpoch:TRNLInt64);
+begin
+ FillChar(Fingerprints,SizeOf(Fingerprints),#0);
+ CountFingerprints:=0;
+ Mode:=RNL_DTLS_VERIFICATION_CHAIN;
+ HostName:=aHostName;
+ TrustedRoots:=aTrustedRoots;
+ CountTrustedRoots:=aCountTrustedRoots;
+ NowSecondsSinceUnixEpoch:=aNowSecondsSinceUnixEpoch;
+end;
+
+procedure TRNLDTLSVerification.InitializeFingerprints;
+begin
+ FillChar(TrustedRoots,SizeOf(TRNLX509.TChainEntries),#0);
+ CountTrustedRoots:=0;
+ FillChar(Fingerprints,SizeOf(Fingerprints),#0);
+ CountFingerprints:=0;
+ Mode:=RNL_DTLS_VERIFICATION_FINGERPRINT;
+ HostName:='';
+ NowSecondsSinceUnixEpoch:=0;
+end;
+
+function TRNLDTLSVerification.AddFingerprint(const aFingerprint):boolean;
+begin
+ result:=CountFingerprints<MaximumFingerprints;
+ if result then begin
+  Move(aFingerprint,Fingerprints[CountFingerprints,0],FingerprintSize);
+  inc(CountFingerprints);
+ end;
+end;
+
+class procedure TRNLDTLSVerification.ComputeFingerprint(out aFingerprint;
+                                                        const aCertificate;
+                                                        const aCertificateSize:TRNLSizeInt);
+var Context:TRNLSHA256Context;
+begin
+ // Over the certificate exactly as it arrived, which is what openssl x509 -fingerprint -sha256
+ // prints and therefore what an operator can read off their own server
+ Context.Initialize;
+ if aCertificateSize>0 then begin
+  Context.Update(aCertificate,aCertificateSize);
+ end;
+ Context.Finalize(aFingerprint);
+end;
+
+function TRNLDTLSVerification.VerifyLeaf(const aChain:TRNLX509.TChainEntries;
+                                         const aChainLength:TRNLSizeInt;
+                                         out aLeaf:TRNLX509Certificate):TRNLX509Verdict;
+var Fingerprint:TFingerprint;
+    Index:TRNLSizeInt;
+    Matched:boolean;
+begin
+
+ FillChar(aLeaf,SizeOf(TRNLX509Certificate),#0);
+
+ if aChainLength<1 then begin
+  result:=RNL_X509_VERDICT_EMPTY_CHAIN;
+  exit;
+ end;
+
+ if Mode=RNL_DTLS_VERIFICATION_CHAIN then begin
+  result:=TRNLX509.VerifyChain(aChain,aChainLength,TrustedRoots,CountTrustedRoots,
+                               HostName,NowSecondsSinceUnixEpoch,aLeaf);
+  exit;
+ end;
+
+ // Fingerprint mode. Nothing above the leaf is looked at: a peer may send a chain out of habit,
+ // and the entries above the one which was pinned say nothing about it.
+ ComputeFingerprint(Fingerprint,aChain[0].Data^[0],aChain[0].Size);
+
+ Matched:=false;
+ for Index:=0 to CountFingerprints-1 do begin
+  // Compared without a branch on the data, like every other secret comparison here. A pin is not
+  // a secret, but the habit is worth more than the exception.
+  if TRNLMemory.SecureIsEqual(Fingerprint,Fingerprints[Index,0],FingerprintSize) then begin
+   Matched:=true;
+  end;
+ end;
+ if not Matched then begin
+  result:=RNL_X509_VERDICT_FINGERPRINT_MISMATCH;
+  exit;
+ end;
+
+ // The bytes are the right bytes. What is still needed from them is the public key, and it is in
+ // DER whichever way the peer was recognised - so the reader runs, and a certificate which will
+ // not parse is refused even when its fingerprint matches. Something which cannot be read cannot
+ // be used, however well it was recognised.
+ if not aLeaf.Parse(aChain[0].Data^[0],TRNLSizeUInt(aChain[0].Size)) then begin
+  result:=RNL_X509_VERDICT_MALFORMED;
+  exit;
+ end;
+
+ result:=RNL_X509_VERDICT_ACCEPTED;
+
+end;
+
 class function TRNLX509.MatchesHostName(const aCertificate:TRNLX509Certificate;
                                         const aHostName:TRNLRawByteString):boolean;
 var Names:TRNLASN1Reader;
@@ -24121,9 +24397,7 @@ end;
 
 constructor TRNLDTLS13Client.Create(const aRandomGenerator:TRNLRandomGenerator;
                                     const aServerName:TRNLRawByteString;
-                                    const aTrustedRoots:TRNLX509.TChainEntries;
-                                    const aCountTrustedRoots:TRNLSizeInt;
-                                    const aNowSecondsSinceUnixEpoch:TRNLInt64);
+                                    const aVerification:TRNLDTLSVerification);
 var Index:TRNLSizeInt;
 begin
 
@@ -24131,9 +24405,7 @@ begin
 
  fRandomGenerator:=aRandomGenerator;
  fServerName:=aServerName;
- fTrustedRoots:=aTrustedRoots;
- fCountTrustedRoots:=aCountTrustedRoots;
- fNowSecondsSinceUnixEpoch:=aNowSecondsSinceUnixEpoch;
+ fVerification:=aVerification;
 
  fState:=RNL_DTLS13_CLIENT_STATE_IDLE;
  fFailure:=RNL_DTLS12_CLIENT_FAILURE_NONE;
@@ -24660,10 +24932,8 @@ begin
   exit;
  end;
 
- fCertificateVerdict:=TRNLX509.VerifyChain(Certificate.Chain,Certificate.ChainLength,
-                                           fTrustedRoots,fCountTrustedRoots,
-                                           fServerName,fNowSecondsSinceUnixEpoch,
-                                           fLeafCertificate);
+ fCertificateVerdict:=fVerification.VerifyLeaf(Certificate.Chain,Certificate.ChainLength,
+                                               fLeafCertificate);
  if fCertificateVerdict<>RNL_X509_VERDICT_ACCEPTED then begin
   Fail(RNL_DTLS12_CLIENT_FAILURE_BAD_CERTIFICATE,ALERT_BAD_CERTIFICATE);
   exit;
@@ -25274,18 +25544,14 @@ end;
 
 constructor TRNLDTLS12Client.Create(const aRandomGenerator:TRNLRandomGenerator;
                                     const aServerName:TRNLRawByteString;
-                                    const aTrustedRoots:TRNLX509.TChainEntries;
-                                    const aCountTrustedRoots:TRNLSizeInt;
-                                    const aNowSecondsSinceUnixEpoch:TRNLInt64);
+                                    const aVerification:TRNLDTLSVerification);
 begin
 
  inherited Create;
 
  fRandomGenerator:=aRandomGenerator;
  fServerName:=aServerName;
- fTrustedRoots:=aTrustedRoots;
- fCountTrustedRoots:=aCountTrustedRoots;
- fNowSecondsSinceUnixEpoch:=aNowSecondsSinceUnixEpoch;
+ fVerification:=aVerification;
 
  fState:=RNL_DTLS12_CLIENT_STATE_IDLE;
  fFailure:=RNL_DTLS12_CLIENT_FAILURE_NONE;
@@ -26036,10 +26302,7 @@ begin
 
  // Checked here and not once the flight is complete, because the buffer the chain sits in belongs
  // to the reassembler and the next message writes over it
- fCertificateVerdict:=TRNLX509.VerifyChain(Chain,CountChain,
-                                           fTrustedRoots,fCountTrustedRoots,
-                                           fServerName,fNowSecondsSinceUnixEpoch,
-                                           fLeafCertificate);
+ fCertificateVerdict:=fVerification.VerifyLeaf(Chain,CountChain,fLeafCertificate);
  if fCertificateVerdict<>RNL_X509_VERDICT_ACCEPTED then begin
   Fail(RNL_DTLS12_CLIENT_FAILURE_BAD_CERTIFICATE,ALERT_BAD_CERTIFICATE);
   exit;
@@ -30890,6 +31153,7 @@ begin
     TRNLDTLS13Certificate.SelfTest;
     TRNLDTLS13CertificateVerify.SelfTest;
     TRNLDTLS13ACK.SelfTest;
+    TRNLDTLSVerification.SelfTest;
    end;
   end;
  finally

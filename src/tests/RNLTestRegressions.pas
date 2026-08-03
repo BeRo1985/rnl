@@ -4843,6 +4843,7 @@ procedure TestDTLSHandshakeCompletesAgainstEveryHonestServer;
 var Watchdog:TRNLTestWatchdog;
     RandomGenerator:TRNLRandomGenerator;
     Roots:TRNLX509.TChainEntries;
+    Verification:TRNLDTLSVerification;
 
  procedure Entry(out aEntry:TRNLX509ChainEntry;const aData;const aSize:TRNLSizeInt);
  begin
@@ -5016,7 +5017,7 @@ var Watchdog:TRNLTestWatchdog;
   Server:=TRNLTestDTLSServer.Create(aBehaviour,aExtendedMasterSecret);
   try
    Client:=TRNLDTLS12Client.Create(RandomGenerator,RNL_TEST_CERTIFICATE_HOST_NAME,
-                                   Roots,1,RNL_TEST_CERTIFICATE_NOW);
+                                   Verification);
    try
     if Check(Drive(Client,Server,Elapsed),
              aWhat+' has to end in a finished handshake, and ended as "'+
@@ -5048,6 +5049,7 @@ begin
 
    FillChar(Roots,SizeOf(TRNLX509.TChainEntries),#0);
    Entry(Roots[0],TRNLTestCertificates.Root,SizeOf(TRNLTestCertificates.Root));
+   Verification.InitializeChain(RNL_TEST_CERTIFICATE_HOST_NAME,Roots,1,RNL_TEST_CERTIFICATE_NOW);
 
    CheckTheStubsSignerAgainstItsVector;
    CheckTheStubsKeyBelongsToItsCertificate;
@@ -5108,6 +5110,7 @@ procedure TestDTLSHandshakeRefusesEveryBrokenServer;
 var Watchdog:TRNLTestWatchdog;
     RandomGenerator:TRNLRandomGenerator;
     Roots:TRNLX509.TChainEntries;
+    Verification:TRNLDTLSVerification;
 
  procedure Entry(out aEntry:TRNLX509ChainEntry;const aData;const aSize:TRNLSizeInt);
  begin
@@ -5167,7 +5170,7 @@ var Watchdog:TRNLTestWatchdog;
   Server:=TRNLTestDTLSServer.Create(aBehaviour,false);
   try
    Client:=TRNLDTLS12Client.Create(RandomGenerator,RNL_TEST_CERTIFICATE_HOST_NAME,
-                                   Roots,1,RNL_TEST_CERTIFICATE_NOW);
+                                   Verification);
    try
     Elapsed:=Drive(Client,Server);
     CheckEqualsInt64(TRNLInt64(Elapsed),TRNLInt64(aExpectedElapsed),
@@ -5203,6 +5206,7 @@ begin
 
    FillChar(Roots,SizeOf(TRNLX509.TChainEntries),#0);
    Entry(Roots[0],TRNLTestCertificates.Root,SizeOf(TRNLTestCertificates.Root));
+   Verification.InitializeChain(RNL_TEST_CERTIFICATE_HOST_NAME,Roots,1,RNL_TEST_CERTIFICATE_NOW);
 
    // Six transmissions and no answer to any of them. No alert: there is nobody to send one to.
    //
@@ -5284,6 +5288,7 @@ procedure TestDTLS13HandshakeCompletesAgainstEveryHonestServer;
 var Watchdog:TRNLTestWatchdog;
     RandomGenerator:TRNLRandomGenerator;
     Roots:TRNLX509.TChainEntries;
+    Verification:TRNLDTLSVerification;
 
  procedure Entry(out aEntry:TRNLX509ChainEntry;const aData;const aSize:TRNLSizeInt);
  begin
@@ -5366,7 +5371,7 @@ var Watchdog:TRNLTestWatchdog;
   Server:=TRNLTestDTLS13Server.Create(aBehaviour);
   try
    Client:=TRNLDTLS13Client.Create(RandomGenerator,RNL_TEST_CERTIFICATE_HOST_NAME,
-                                   Roots,1,RNL_TEST_CERTIFICATE_NOW);
+                                   Verification);
    try
     if Check(Drive(Client,Server,Elapsed),
              aWhat+' has to end in a finished handshake, and ended as "'+
@@ -5395,6 +5400,7 @@ begin
 
    FillChar(Roots,SizeOf(TRNLX509.TChainEntries),#0);
    Entry(Roots[0],TRNLTestCertificates.Root,SizeOf(TRNLTestCertificates.Root));
+   Verification.InitializeChain(RNL_TEST_CERTIFICATE_HOST_NAME,Roots,1,RNL_TEST_CERTIFICATE_NOW);
 
    // One round trip, and the whole handshake finished in it
    Expect('a server which does everything right over x25519',
@@ -5431,6 +5437,7 @@ procedure TestDTLS13HandshakeRefusesEveryBrokenServer;
 var Watchdog:TRNLTestWatchdog;
     RandomGenerator:TRNLRandomGenerator;
     Roots:TRNLX509.TChainEntries;
+    Verification:TRNLDTLSVerification;
 
  procedure Entry(out aEntry:TRNLX509ChainEntry;const aData;const aSize:TRNLSizeInt);
  begin
@@ -5486,7 +5493,7 @@ var Watchdog:TRNLTestWatchdog;
   Server:=TRNLTestDTLS13Server.Create(aBehaviour);
   try
    Client:=TRNLDTLS13Client.Create(RandomGenerator,RNL_TEST_CERTIFICATE_HOST_NAME,
-                                   Roots,1,RNL_TEST_CERTIFICATE_NOW);
+                                   Verification);
    try
     Elapsed:=Drive(Client,Server);
     CheckEqualsInt64(TRNLInt64(Elapsed),TRNLInt64(aExpectedElapsed),
@@ -5514,6 +5521,7 @@ begin
 
    FillChar(Roots,SizeOf(TRNLX509.TChainEntries),#0);
    Entry(Roots[0],TRNLTestCertificates.Root,SizeOf(TRNLTestCertificates.Root));
+   Verification.InitializeChain(RNL_TEST_CERTIFICATE_HOST_NAME,Roots,1,RNL_TEST_CERTIFICATE_NOW);
 
    // The same backoff schedule as 1.2, and the same forty seven seconds
    Expect('a server which never answers',
@@ -5559,6 +5567,131 @@ begin
 
    Expect('a server which answers with a fatal alert',
           RNL_TEST_DTLS13_SERVER_FATAL_ALERT,RNL_DTLS12_CLIENT_FAILURE_ALERT);
+
+  finally
+   FreeAndNil(RandomGenerator);
+  end;
+ finally
+  FreeAndNil(Watchdog);
+ end;
+ TestEnd;
+
+end;
+
+// ---------------------------------------------------------------------------------------
+// A relay one owns oneself: pinning instead of a chain
+// ---------------------------------------------------------------------------------------
+
+// The case pinning exists for, driven all the way through a real handshake: a relay with no
+// certificate authority above it, no trustworthy clock, and a name which is whatever DNS says
+// today. Nothing is configured but the fingerprint of the certificate it presents.
+//
+// The sharpest of the three below is the expired one. In chain mode that certificate is refused
+// outright and the test one page up says so; pinned, the same bytes are the peer that was meant,
+// and the clock is never consulted. If pinning did quietly keep any of the chain checks, that
+// case would fail - which is what makes it worth having rather than only the happy path.
+procedure TestDTLSPinnedRelayNeedsNoChainOrClock;
+var Watchdog:TRNLTestWatchdog;
+    RandomGenerator:TRNLRandomGenerator;
+
+ function Drive(const aClient:TRNLDTLS12Client;const aServer:TRNLTestDTLSServer):boolean;
+ const GUARD=1024;
+ var Datagram:array[0..2047] of TRNLUInt8;
+     DatagramSize:TRNLSizeInt;
+     Now_:TRNLUInt64;
+     Rounds:TRNLSizeInt;
+     Moved:boolean;
+ begin
+  Now_:=1000;
+  aClient.Start(Now_);
+  Rounds:=0;
+  repeat
+   Moved:=false;
+   while aClient.PopOutgoingDatagram(Datagram,DatagramSize,SizeOf(Datagram)) do begin
+    aServer.ProcessDatagram(Datagram,DatagramSize);
+    Moved:=true;
+   end;
+   while aServer.PopOutgoingDatagram(Datagram,DatagramSize,SizeOf(Datagram)) do begin
+    aClient.ProcessDatagram(Datagram,DatagramSize,Now_);
+    Moved:=true;
+   end;
+   if not Moved then begin
+    inc(Now_,1000);
+    aClient.Update(Now_);
+   end;
+   inc(Rounds);
+  until (aClient.State=RNL_DTLS12_CLIENT_STATE_ESTABLISHED) or
+        (aClient.State=RNL_DTLS12_CLIENT_STATE_FAILED) or
+        (Rounds>=GUARD);
+  result:=aClient.State=RNL_DTLS12_CLIENT_STATE_ESTABLISHED;
+ end;
+
+ procedure Expect(const aWhat:TRNLRawByteString;
+                  const aBehaviour:TRNLTestDTLSServerBehaviour;
+                  const aVerification:TRNLDTLSVerification;
+                  const aWanted:boolean;
+                  const aWantedVerdict:TRNLX509Verdict);
+ var Client:TRNLDTLS12Client;
+     Server:TRNLTestDTLSServer;
+ begin
+  Server:=TRNLTestDTLSServer.Create(aBehaviour,false);
+  try
+   // The name given here is what goes out in server_name and is deliberately one nothing checks
+   // against: in fingerprint mode the peer is decided by its bytes and not by what it is called
+   Client:=TRNLDTLS12Client.Create(RandomGenerator,'whatever.example',aVerification);
+   try
+    if aWanted then begin
+     Check(Drive(Client,Server),aWhat+' has to end in a finished handshake');
+    end else begin
+     Check(not Drive(Client,Server),aWhat+' must not end in a finished handshake');
+    end;
+    if not aWanted then begin
+     Check(Client.CertificateVerdict=aWantedVerdict,
+           aWhat+': and the verdict has to say which way it failed');
+    end;
+   finally
+    FreeAndNil(Client);
+   end;
+  finally
+   FreeAndNil(Server);
+  end;
+ end;
+
+var Verification:TRNLDTLSVerification;
+    Fingerprint:TRNLDTLSVerification.TFingerprint;
+    Wrong:TRNLDTLSVerification.TFingerprint;
+begin
+
+ TestBegin('a pinned relay needs no chain, no clock and no name');
+ Watchdog:=TRNLTestWatchdog.Create('DTLS pinning',60000);
+ try
+  RandomGenerator:=TRNLRandomGenerator.Create;
+  try
+
+   // Nothing but the fingerprint of the certificate the stub presents
+   TRNLDTLSVerification.ComputeFingerprint(Fingerprint,TRNLTestCertificates.Leaf,
+                                           SizeOf(TRNLTestCertificates.Leaf));
+   Verification.InitializeFingerprints;
+   Check(Verification.AddFingerprint(Fingerprint),'the pin has to go in');
+   Expect('a relay pinned by its certificate',RNL_TEST_DTLS_SERVER_CORRECT,
+          Verification,true,RNL_X509_VERDICT_ACCEPTED);
+
+   // The same relay, one bit of the pin different
+   Move(Fingerprint,Wrong,SizeOf(Wrong));
+   Wrong[0]:=Wrong[0] xor 1;
+   Verification.InitializeFingerprints;
+   Check(Verification.AddFingerprint(Wrong),'the wrong pin has to go in too');
+   Expect('a relay whose certificate is not the pinned one',RNL_TEST_DTLS_SERVER_CORRECT,
+          Verification,false,RNL_X509_VERDICT_FINGERPRINT_MISMATCH);
+
+   // And the one which makes the difference visible: a certificate whose validity ran out long
+   // before the clock this suite uses. The chain test refuses it; pinned it is simply the peer.
+   TRNLDTLSVerification.ComputeFingerprint(Fingerprint,TRNLTestCertificates.LeafExpired,
+                                           SizeOf(TRNLTestCertificates.LeafExpired));
+   Verification.InitializeFingerprints;
+   Check(Verification.AddFingerprint(Fingerprint),'the pin of the expired one has to go in');
+   Expect('a relay whose pinned certificate expired',RNL_TEST_DTLS_SERVER_EXPIRED_CERTIFICATE,
+          Verification,true,RNL_X509_VERDICT_ACCEPTED);
 
   finally
    FreeAndNil(RandomGenerator);
@@ -10963,6 +11096,7 @@ begin
  TestDTLSHandshakeRefusesEveryBrokenServer;
  TestDTLS13HandshakeCompletesAgainstEveryHonestServer;
  TestDTLS13HandshakeRefusesEveryBrokenServer;
+ TestDTLSPinnedRelayNeedsNoChainOrClock;
 
  // Pure configuration invariants first, they are instant and their failure explains a lot of
  // what the behavioural tests below would otherwise report in a much noisier way
