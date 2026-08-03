@@ -10892,6 +10892,12 @@ function CongestionControlRun(const aInstance:TRNLInstance;
                               out aBaselineRoundTripTime:TRNLUInt32;
                               // What the path lets a queue grow to, as the peer estimates it
                               out aQueueDepthEstimate:TRNLUInt32;
+                              // What the controller believes the path delivers, which is what
+                              // bounds its growth
+                              out aDeliveryRateEstimate:TRNLUInt32;
+                              // The whole trajectory, not a summary of it
+                              out aTrace:TRNLRawByteString;
+                              out aControllerRuns:TRNLUInt32;
                               out aPeersGivenUpOn:TRNLUInt64;
                               out aArrivedMessages:TRNLSizeInt;
                               out aElapsedMilliseconds:TRNLInt64;
@@ -10922,6 +10928,9 @@ begin
  aFlightLostPackets:=0;
  aBaselineRoundTripTime:=0;
  aQueueDepthEstimate:=0;
+ aDeliveryRateEstimate:=0;
+ aTrace:='';
+ aControllerRuns:=0;
  aPeersGivenUpOn:=0;
  aArrivedMessages:=0;
  aElapsedMilliseconds:=0;
@@ -10973,6 +10982,10 @@ begin
        exit;
       end;
       Sampled:=HostPair.ClientPeer.CongestionControlRate;
+      if Length(aTrace)>0 then begin
+       aTrace:=aTrace+' ';
+      end;
+      aTrace:=aTrace+TRNLRawByteString(IntToStr(Sampled div 8));
       if (CountSamples=0) or (Sampled<aLowestRateBitsPerSecond) then begin
        aLowestRateBitsPerSecond:=Sampled;
       end;
@@ -10993,6 +11006,8 @@ begin
     end;
     aBaselineRoundTripTime:=HostPair.ClientPeer.MinimumRoundTripTime;
     aQueueDepthEstimate:=HostPair.ClientPeer.QueueDepth;
+    aDeliveryRateEstimate:=HostPair.ClientPeer.MaximumDeliveryRate;
+    aControllerRuns:=HostPair.ClientPeer.CountCongestionControlRuns;
     aFlightResolvedPackets:=HostPair.ClientPeer.CountLastFlightResolvedPackets;
     aFlightLostPackets:=HostPair.ClientPeer.CountLastFlightLostPackets;
     aElapsedMilliseconds:=TRNLTime.RelativeDifference(aInstance.Time,StartTime);
@@ -11041,6 +11056,9 @@ var Instance:TRNLInstance;
     Arrived,MessageSize,BandwidthLimitsEvents:TRNLSizeInt;
     Delivered:TRNLUInt64;
     LowestRate,MeanRate,FlightResolved,FlightLost,Baseline,DepthEstimate:TRNLUInt32;
+    DeliveryEstimate:TRNLUInt32;
+    Trace:TRNLRawByteString;
+    ControllerRuns:TRNLUInt32;
     Elapsed:TRNLInt64;
     AvailableBytesPerSecond,ThroughputBytesPerSecond:TRNLInt64;
     Watchdog:TRNLTestWatchdog;
@@ -11071,6 +11089,9 @@ begin
                                       FlightLost,
                                       Baseline,
                                       DepthEstimate,
+                                      DeliveryEstimate,
+                                      Trace,
+                                      ControllerRuns,
                                       GivenUpOn,
                                       Arrived,
                                       Elapsed,
@@ -11098,13 +11119,16 @@ begin
          ' ms over a baseline of '+TRNLRawByteString(IntToStr(Baseline))+
          ' ms in a queue '+TRNLRawByteString(IntToStr(CASES[Index].QueueDepthMilliseconds))+
          ' ms deep and estimated at '+TRNLRawByteString(IntToStr(DepthEstimate))+
-         ' ms, dropped '+TRNLRawByteString(IntToStr(Dropped))+
+         ' ms, delivery believed '+TRNLRawByteString(IntToStr(DeliveryEstimate))+
+         ', dropped '+TRNLRawByteString(IntToStr(Dropped))+
          ', the link carried '+TRNLRawByteString(IntToStr(Delivered))+
          ', arrived '+TRNLRawByteString(IntToStr(Arrived))+
          ', last flight '+TRNLRawByteString(IntToStr(FlightLost))+
          ' lost of '+TRNLRawByteString(IntToStr(FlightResolved))+
          ' settled, given up on '+
-         TRNLRawByteString(IntToStr(GivenUpOn))+', rate reported '+
+         TRNLRawByteString(IntToStr(GivenUpOn))+', trajectory '+Trace+
+         ', controller ran '+TRNLRawByteString(IntToStr(ControllerRuns))+
+         ' times, rate reported '+
          TRNLRawByteString(IntToStr(BandwidthLimitsEvents))+' times');
 
     // The one thing which must hold in every shape of bottleneck: the connection survives. A
@@ -11340,6 +11364,8 @@ var Instance:TRNLInstance;
     HostPair:TRNLTestHostPair;
     ServerAddress:TRNLAddress;
     LinkIndex,Index:TRNLSizeInt;
+    MostResolvedInAFlight:TRNLUInt32;
+    Pumped:boolean;
     Watchdog:TRNLTestWatchdog;
 begin
 
@@ -11381,8 +11407,24 @@ begin
        HostPair.ClientPeer.Channels[RNL_TEST_HOST_PAIR_CHANNEL_RELIABLE_ORDERED].SendMessageRawByteString(TestMessageText(Index,MESSAGE_SIZE));
       end;
 
-      if not Check(HostPair.Pump(PUMP_MILLISECONDS),
-                   'no host service error while the link is being overrun') then begin
+      // Pumped in slices so that the flight accounting can be watched while it happens. A window
+      // which settled nothing publishes a sample of zero - that is what it means for a ratio to
+      // have no sample - so reading the counter once at the end asks whether the last window
+      // happened to contain anything, which is a question about timing and not about accounting.
+      MostResolvedInAFlight:=0;
+      Pumped:=true;
+      for Index:=1 to 10 do begin
+       Pumped:=Pumped and HostPair.Pump(PUMP_MILLISECONDS div 10);
+       if not Pumped then begin
+        break;
+       end;
+       if HostPair.ClientPeer.CountLastFlightResolvedPackets>MostResolvedInAFlight then begin
+        MostResolvedInAFlight:=HostPair.ClientPeer.CountLastFlightResolvedPackets;
+       end;
+      end;
+      // Asked once and not ten times: ten identical assertions are one assertion and nine bits of
+      // noise in the count
+      if not Check(Pumped,'no host service error while the link is being overrun') then begin
        exit;
       end;
 
@@ -11433,9 +11475,9 @@ begin
       CheckAtMostInt64(HostPair.ClientPeer.DeliveryRate,(DRAIN_RATE_BYTES_PER_SECOND*3) div 2,
                        'and must not report more than the link can carry');
 
-      CheckAtLeastInt64(HostPair.ClientPeer.CountLastFlightResolvedPackets,1,
-                        'and a flight has to have been accounted for, otherwise the loss figure '+
-                       'below says nothing');
+      CheckAtLeastInt64(MostResolvedInAFlight,1,
+                        'and a flight has to have been accounted for somewhere along the way, '+
+                        'otherwise the loss figure says nothing');
 
      finally
       FreeAndNil(HostPair);

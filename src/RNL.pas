@@ -648,6 +648,10 @@ const RNL_PROTOCOL_VERSION_MAJOR=1;
       // accounting into noise, since a flight of two milliseconds holds one or two packets and its
       // loss ratio is therefore either zero or fifty percent
       RNL_PEER_MINIMUM_FLIGHT_INTERVAL=20;
+      // The other end of the same bound. See UpdateFlightStatistics for why it exists at all: the
+      // retransmission timeout grows with the queue, so without a ceiling the controller slows
+      // down as the path gets worse.
+      RNL_PEER_MAXIMUM_FLIGHT_INTERVAL=200;
 
       // Pacing keeps its departure schedule in microseconds although TRNLTime counts milliseconds:
       // at eight megabits per second a datagram occupies the link for well under a millisecond, and
@@ -6631,6 +6635,10 @@ type PRNLVersion=^TRNLVersion;
        fCountFlightLostPackets:TRNLUInt32;
        fCountLastFlightResolvedPackets:TRNLUInt32;
        fCountLastFlightLostPackets:TRNLUInt32;
+       // How often the controller has run at all. A policy which adjusts once per flight can only
+       // ever be as quick as flights are, and on a congested path with a deep buffer a flight is
+       // a smoothed round trip time of hundreds of milliseconds.
+       fCountCongestionControlRuns:TRNLUInt32;
 
        // Bytes which the counter side actually acknowledged, per second. What was put on the wire
        // is already tracked by fOutgoingBandwidthRateTracker, and the difference between the two is
@@ -6924,6 +6932,7 @@ type PRNLVersion=^TRNLVersion;
        // lost. Not how many were sent: a packet still in flight has not said anything yet, and
        // counting it would put a pending outcome into the denominator of a ratio about outcomes.
        property CountLastFlightResolvedPackets:TRNLUInt32 read fCountLastFlightResolvedPackets;
+       property CountCongestionControlRuns:TRNLUInt32 read fCountCongestionControlRuns;
        property CountLastFlightLostPackets:TRNLUInt32 read fCountLastFlightLostPackets;
        // The rate the congestion controller has settled on, in bits per second, or zero while it is
        // switched off. What is actually enforced is the smaller of this and whatever the counter side
@@ -40710,6 +40719,7 @@ begin
  fCountFlightLostPackets:=0;
  fCountLastFlightResolvedPackets:=0;
  fCountLastFlightLostPackets:=0;
+ fCountCongestionControlRuns:=0;
 
  fDeliveryRateTracker.Reset;
 
@@ -41108,14 +41118,16 @@ begin
 
  Rate:=fCongestionControlRate;
 
+ inc(fCountCongestionControlRuns);
+
  Delay:=GetQueueingDelay;
 
  // What this path is willing to hold, and therefore what counts as too much standing in it
  HighDelay:=(TRNLInt64(GetQueueDepth)*RNL_PEER_CONGESTION_CONTROL_QUEUE_DEPTH_PERCENT) div 100;
  if HighDelay<RNL_PEER_CONGESTION_CONTROL_LOW_DELAY then begin
   HighDelay:=RNL_PEER_CONGESTION_CONTROL_LOW_DELAY;
- end else if HighDelay>(RNL_PEER_CONGESTION_CONTROL_HIGH_DELAY*2) then begin
-  HighDelay:=RNL_PEER_CONGESTION_CONTROL_HIGH_DELAY*2;
+ end else if HighDelay>(RNL_PEER_CONGESTION_CONTROL_HIGH_DELAY div 2) then begin
+  HighDelay:=RNL_PEER_CONGESTION_CONTROL_HIGH_DELAY div 2;
  end;
 
  if fCountLastFlightResolvedPackets>=RNL_PEER_CONGESTION_CONTROL_MINIMUM_LOSS_SAMPLE then begin
@@ -41168,8 +41180,34 @@ begin
   // The second, independent reason. A path can be lossy without any queue in front of it, and a
   // purely delay based controller would never notice
   dec(Rate,Rate div 4);
- end else if Delay<=RNL_PEER_CONGESTION_CONTROL_LOW_DELAY then begin
-  inc(Rate,Rate div 8);
+ end else if (Delay<=RNL_PEER_CONGESTION_CONTROL_LOW_DELAY) or
+             ((DeliveryCeiling>0) and (Rate<DeliveryCeiling) and
+              (Delay<=fPreviousQueueingDelay)) then begin
+  // Two ways in, and the second one is what keeps a floor from becoming a destination. An empty
+  // path is the ordinary reason to push harder. The other is this: sending less than the path is
+  // handing over, while the queue is not growing. Neither of those can be this side's doing, so
+  // there is room to look for - and without this a flow which was once driven down can never find
+  // out that it has any, because the absolute threshold it would have to fall below is a delay a
+  // path with a competitor on it never reaches.
+  //
+  // Measured before this: 123046 for three samples, then 8000 for the remaining seven, on a path
+  // offering 30000. Not an oscillation - a plateau, a fall and a floor which was the rest of the
+  // connection's life.
+  //
+  // Self limiting, and that is why it is safe: growing lengthens the queue, the delay stops
+  // falling, and the second way in closes on its own.
+  //
+  // Half the distance to what the path delivers, where that is far above where this side is, and
+  // an eighth otherwise. Not a second brake in reverse: the emergency brake falls to a quarter of
+  // the capacity in ONE step, and a recovery which only ever adds an eighth cannot answer that on
+  // a path whose flights are seconds long - measured at two controller runs in six seconds, where
+  // eighths add up to nothing at all. What may be lost in one step has to be findable in a few.
+  if (DeliveryCeiling>0) and (Rate<(DeliveryCeiling div 2)) and
+     (Delay<=fPreviousQueueingDelay) then begin
+   inc(Rate,(DeliveryCeiling-Rate) div 2);
+  end else begin
+   inc(Rate,Rate div 8);
+  end;
   // Raising the rate beyond what the path delivers only lengthens the queue, so the ceiling bounds
   // the increase. It bounds ONLY the increase, on purpose: applied unconditionally it would drag the
   // rate down whenever the delivery rate happens to be low, which lowers the rate further, which
@@ -41240,6 +41278,19 @@ begin
  // One flight is one smoothed round trip time, floored so that a path with no measurable delay does
  // not close a flight on every single dispatching round
  FlightInterval:=Max(fRetransmissionTimeout shr 32,RNL_PEER_MINIMUM_FLIGHT_INTERVAL);
+ // And bounded above, which matters more than the bound below. The retransmission timeout is the
+ // smoothed round trip time plus four variances, and on a path whose queue is the problem both of
+ // those are inflated by exactly that queue - so the controller is called least often precisely
+ // when it has the most to do. Measured at six runs in six seconds on the deep buffer with a
+ // competitor, against sixty three, a hundred and three and fifty nine in the other three; an
+ // eighth per second is not a policy.
+ //
+ // Bounded and not replaced: a flight is still meant to be a round trip of feedback, and running
+ // faster than feedback arrives would act on what has not come back yet. This only says that
+ // waiting longer than this for it is waiting on a number the congestion wrote.
+ if FlightInterval>RNL_PEER_MAXIMUM_FLIGHT_INTERVAL then begin
+  FlightInterval:=RNL_PEER_MAXIMUM_FLIGHT_INTERVAL;
+ end;
 
  if TRNLTime.RelativeDifference(fHost.fTime,fFlightStartTime)>=FlightInterval then begin
   // Published whatever it holds, including nothing. That reads oddly against "a flight which
