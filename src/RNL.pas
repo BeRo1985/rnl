@@ -3275,6 +3275,509 @@ type PRNLVersion=^TRNLVersion;
        class procedure SelfTest; static;
      end;
 
+     // RFC 8446 section 7.1, the ladder itself. Stage one pinned the two operations it is written
+     // in; this is what they build, and RFC 9147 section 5.9 takes it over for DTLS 1.3 without
+     // changing anything but the record layer underneath.
+     //
+     //             0
+     //             |
+     //             v
+     //   PSK ->  HKDF-Extract = Early Secret
+     //             |
+     //             +-> Derive-Secret(., "derived", "")
+     //             v
+     //   (EC)DHE -> HKDF-Extract = Handshake Secret
+     //             |
+     //             +-> Derive-Secret(., "c hs traffic", ClientHello..ServerHello)
+     //             +-> Derive-Secret(., "s hs traffic", ClientHello..ServerHello)
+     //             |
+     //             +-> Derive-Secret(., "derived", "")
+     //             v
+     //   0 ->    HKDF-Extract = Master Secret
+     //             |
+     //             +-> Derive-Secret(., "c ap traffic", ClientHello..server Finished)
+     //             +-> Derive-Secret(., "s ap traffic", ClientHello..server Finished)
+     //
+     // No pre shared key anywhere: this client does not resume, so the first extract takes zeros
+     // both as its salt and as its input, and there is no binder to compute. Where the schedule
+     // says "0" it means a run of Hash.length zero bytes and not an empty string - the two give
+     // different results and only one of them is right.
+     //
+     // Every secret is the width of the hash, which is why there is no length anywhere below: the
+     // descriptor decides it once.
+     PRNLDTLS13KeySchedule=^TRNLDTLS13KeySchedule;
+     TRNLDTLS13KeySchedule=record
+      public
+       const // SHA-384 would need all of it; the one cipher suite here uses SHA-256
+             MaximumSecretSize=64;
+      public
+       Descriptor:TRNLHashDescriptor;
+       EarlySecret:array[0..MaximumSecretSize-1] of TRNLUInt8;
+       HandshakeSecret:array[0..MaximumSecretSize-1] of TRNLUInt8;
+       MasterSecret:array[0..MaximumSecretSize-1] of TRNLUInt8;
+       ClientHandshakeTrafficSecret:array[0..MaximumSecretSize-1] of TRNLUInt8;
+       ServerHandshakeTrafficSecret:array[0..MaximumSecretSize-1] of TRNLUInt8;
+       ClientApplicationTrafficSecret:array[0..MaximumSecretSize-1] of TRNLUInt8;
+       ServerApplicationTrafficSecret:array[0..MaximumSecretSize-1] of TRNLUInt8;
+      private
+       // Derive-Secret(secret, "derived", ""), which is the rung between every two extracts. The
+       // empty string is hashed, not passed as nothing: Derive-Secret takes a transcript hash, and
+       // the hash of no messages is a hash and not an absence.
+       function DerivedFrom(out aDerived;
+                            const aSecret;const aSecretSize:TRNLSizeUInt):boolean;
+      public
+       // The early secret, which without a pre shared key is a constant of the whole protocol
+       function Initialize(const aDescriptor:TRNLHashDescriptor):boolean;
+       // Handshake Secret = Extract(Derive-Secret(Early, "derived", ""), shared secret)
+       function DeriveHandshakeSecret(const aSharedSecret;
+                                      const aSharedSecretSize:TRNLSizeUInt):boolean;
+       // Both directions at once, because they come from the same secret and the same transcript
+       // and separating them only makes it possible to pass one of the two
+       function DeriveHandshakeTrafficSecrets(const aTranscriptHash;
+                                              const aTranscriptHashSize:TRNLSizeUInt):boolean;
+       // Master Secret = Extract(Derive-Secret(Handshake, "derived", ""), 0)
+       function DeriveMasterSecret:boolean;
+       function DeriveApplicationTrafficSecrets(const aTranscriptHash;
+                                                const aTranscriptHashSize:TRNLSizeUInt):boolean;
+       // RFC 8446 section 4.4.4:
+       //   finished_key = HKDF-Expand-Label(traffic secret, "finished", "", Hash.length)
+       //   verify_data  = HMAC(finished_key, Transcript-Hash(...))
+       // Not Derive-Secret, and not a hash of the key with the transcript: an HMAC whose key is a
+       // secret nobody watching the wire has.
+       //
+       // The two halves are separate so that the first one can be held against a published value.
+       // Rolled into one call the finished key never appears, and a wrong context or a wrong label
+       // would only show up as a verify data which disagrees - with no way to say which of the two
+       // steps was wrong.
+       class function DeriveFinishedKey(const aDescriptor:TRNLHashDescriptor;
+                                        out aFinishedKey;
+                                        const aTrafficSecret;
+                                        const aTrafficSecretSize:TRNLSizeUInt):boolean; static;
+       class function ComputeVerifyData(const aDescriptor:TRNLHashDescriptor;
+                                        out aVerifyData;
+                                        const aTrafficSecret;const aTrafficSecretSize:TRNLSizeUInt;
+                                        const aTranscriptHash;
+                                        const aTranscriptHashSize:TRNLSizeUInt):boolean; static;
+       procedure Clear;
+       class procedure SelfTest; static;
+     end;
+
+     // The running hash of the handshake, which both Finished messages, the CertificateVerify and
+     // half the key schedule are computed over.
+     //
+     // RFC 9147 section 5.2 is the trap, and it is the **opposite** of the DTLS 1.2 one. There
+     // every message goes in with its full twelve byte header, as if it had arrived in a single
+     // fragment. Here `message_seq`, `fragment_offset` and `fragment_length` are left out
+     // altogether: what is hashed is the four byte TLS 1.3 header - a type and a uint24 length -
+     // and the body behind it, exactly as TLS over a stream would have written it.
+     //
+     // Two versions of one protocol family with two opposite rules. Getting either of them wrong
+     // produces a Finished which the other side rejects without saying why, which is why the
+     // message sequence number is not even a parameter here: there is no way to pass it by mistake.
+     PRNLDTLS13Transcript=^TRNLDTLS13Transcript;
+     TRNLDTLS13Transcript=record
+      public
+       const // RFC 8446 section 4.4.1, the synthetic message type which replaces a first
+             // ClientHello once a HelloRetryRequest has been answered
+             TYPE_MESSAGE_HASH=TRNLUInt8(254);
+      private
+       fContext:TRNLSHA256Context;
+      public
+       procedure Initialize;
+       // Starts again from a transcript which consists of one synthetic message carrying the hash
+       // of the ClientHello that came before. RFC 8446 section 4.4.1: after a HelloRetryRequest the
+       // first ClientHello is not hashed as itself, because the server has to be able to compute
+       // the same transcript without having kept it.
+       procedure InitializeWithMessageHash(const aClientHelloHash;
+                                           const aClientHelloHashSize:TRNLSizeInt);
+       procedure AddMessage(const aMessageType:TRNLUInt8;
+                            const aBody;const aBodySize:TRNLSizeInt);
+       // The hash as it stands, without disturbing the running one - the schedule takes snapshots
+       // at four different points of the same transcript
+       procedure Snapshot(out aHash);
+       class procedure SelfTest; static;
+     end;
+
+     // The one cipher suite, the two groups and the two signature schemes this client offers over
+     // DTLS 1.3. As in 1.2 there is nothing to negotiate: a server which cannot do these is one
+     // this client cannot talk to, and saying so in the ClientHello beats finding out four
+     // messages later.
+     PRNLDTLS13ClientHello=^TRNLDTLS13ClientHello;
+     TRNLDTLS13ClientHello=record
+      public
+       const RandomSize=32;
+             // RFC 8446 appendix B.4
+             CIPHER_SUITE_CHACHA20_POLY1305_SHA256=TRNLUInt16($1303);
+             // RFC 9147 section 5.3: DTLS 1.3 is 0xfefc in supported_versions, and legacy_version
+             // stays at DTLS 1.2 so that anything in the path which only understands the old
+             // header still sees something it recognises
+             VERSION_DTLS12=TRNLUInt16($fefd);
+             VERSION_DTLS13=TRNLUInt16($fefc);
+             GROUP_X25519=TRNLUInt16($001d);
+             GROUP_SECP256R1=TRNLUInt16($0017);
+             // Only what the certificate reader can actually check. ed25519 would be one line
+             // more in the offer and a handshake this client has to abort in the middle: an
+             // Ed25519 public key in a certificate is a different SubjectPublicKeyInfo algorithm,
+             // and TRNLX509Certificate knows EC keys on these two curves and nothing else.
+             SIGNATURE_ECDSA_SECP256R1_SHA256=TRNLUInt16($0403);
+             SIGNATURE_ECDSA_SECP384R1_SHA384=TRNLUInt16($0503);
+             EXTENSION_SERVER_NAME=TRNLUInt16(0);
+             EXTENSION_SUPPORTED_GROUPS=TRNLUInt16(10);
+             EXTENSION_SIGNATURE_ALGORITHMS=TRNLUInt16(13);
+             EXTENSION_SUPPORTED_VERSIONS=TRNLUInt16(43);
+             EXTENSION_COOKIE=TRNLUInt16(44);
+             EXTENSION_KEY_SHARE=TRNLUInt16(51);
+      public
+       // Both shares go out together: x25519 because it is what TLS 1.3 deployments prefer, and
+       // secp256r1 because it is what the relays measured so far insist on. Offering one and being
+       // told to try the other costs a whole round trip through a HelloRetryRequest.
+       class function Write_(out aBody;out aBodySize:TRNLSizeInt;
+                             const aMaximumBodySize:TRNLSizeInt;
+                             const aRandom;
+                             const aX25519PublicKey;
+                             const aSecp256r1PublicKey;const aSecp256r1PublicKeySize:TRNLSizeInt;
+                             const aCookie;const aCookieSize:TRNLSizeInt;
+                             const aServerName:TRNLRawByteString):boolean; static;
+     end;
+
+     // What a ServerHello says, taken apart without judging it. Which version, which suite and
+     // which group are acceptable is the client's business and not the reader's: folding the two
+     // together leaves a caller unable to tell "these bytes make no sense" from "I cannot do
+     // that", which are a broken peer and a peer this build was not made for.
+     PRNLDTLS13ServerHello=^TRNLDTLS13ServerHello;
+     TRNLDTLS13ServerHello=record
+      public
+       const // RFC 8446 section 4.1.3. A HelloRetryRequest is a ServerHello whose random is this
+             // fixed value, which is SHA-256 of "HelloRetryRequest" - so that a client which does
+             // not know about them treats it as an ordinary ServerHello and fails cleanly.
+             HelloRetryRequestRandom:array[0..31] of TRNLUInt8=
+              (
+               $cf,$21,$ad,$74,$e5,$9a,$61,$11,$be,$1d,$8c,$02,
+               $1e,$65,$b8,$91,$c2,$a2,$11,$16,$7a,$bb,$8c,$5e,
+               $07,$9e,$09,$e2,$c8,$a8,$33,$9c
+              );
+             MaximumKeyShareSize=TRNLP384.PointSize;
+             MaximumCookieSize=256;
+      public
+       LegacyVersion:TRNLUInt16;
+       Random_:array[0..TRNLDTLS13ClientHello.RandomSize-1] of TRNLUInt8;
+       CipherSuite:TRNLUInt16;
+       LegacyCompressionMethod:TRNLUInt8;
+       HasSupportedVersions:boolean;
+       SelectedVersion:TRNLUInt16;
+       HasKeyShare:boolean;
+       KeyShareGroup:TRNLUInt16;
+       KeyShare:array[0..MaximumKeyShareSize-1] of TRNLUInt8;
+       KeyShareSize:TRNLSizeInt;
+       HasCookie:boolean;
+       Cookie:array[0..MaximumCookieSize-1] of TRNLUInt8;
+       CookieSize:TRNLSizeInt;
+       IsHelloRetryRequest:boolean;
+       function Parse(const aData;const aDataSize:TRNLSizeInt):boolean;
+       class procedure SelfTest; static;
+     end;
+
+     // RFC 8446 section 4.4.2. The 1.3 Certificate message is not the 1.2 one: a request context
+     // in front, and every entry carries its own extension list behind the certificate.
+     //
+     //   struct {
+     //    opaque certificate_request_context<0..255>;
+     //    CertificateEntry certificate_list<0..2^24-1>;
+     //   } Certificate;
+     //
+     //   struct {
+     //    opaque cert_data<1..2^24-1>;
+     //    Extension extensions<0..2^16-1>;
+     //   } CertificateEntry;
+     //
+     // The extensions are read past and nothing else. The only one defined for a server entry is
+     // status_request, and a client which does not ask for stapled revocation cannot be sent one.
+     PRNLDTLS13Certificate=^TRNLDTLS13Certificate;
+     TRNLDTLS13Certificate=record
+      public
+       ChainLength:TRNLSizeInt;
+       Chain:TRNLX509.TChainEntries;
+       // False for anything which does not add up, and for a request context this client never
+       // asked for: a server sends one back only in answer to a CertificateRequest, and this
+       // client never sends one.
+       function Parse(const aData;const aDataSize:TRNLSizeInt):boolean;
+       class procedure SelfTest; static;
+     end;
+
+     // RFC 8446 section 4.4.3, and the part worth getting right is not the parsing but what the
+     // signature is computed over:
+     //
+     //   64 spaces | context string | 0x00 | Transcript-Hash(...)
+     //
+     // The spaces are there so that a signature made here cannot be replayed as one made over
+     // something else, and the zero byte keeps the context from running into the hash. A verifier
+     // which signed the bare transcript would accept a signature from a TLS 1.2 server, and one
+     // which used the client context string would accept the peer's own signature back.
+     PRNLDTLS13CertificateVerify=^TRNLDTLS13CertificateVerify;
+     TRNLDTLS13CertificateVerify=record
+      public
+       const PrefixSize=64;
+             ServerContext=TRNLRawByteString('TLS 1.3, server CertificateVerify');
+             ClientContext=TRNLRawByteString('TLS 1.3, client CertificateVerify');
+             // The longest context above, a zero byte, and a SHA-384 transcript
+             MaximumSignedContentSize=64+64+1+64;
+             MaximumSignatureSize=512;
+      public
+       Algorithm:TRNLUInt16;
+       Signature:array[0..MaximumSignatureSize-1] of TRNLUInt8;
+       SignatureSize:TRNLSizeInt;
+       function Parse(const aData;const aDataSize:TRNLSizeInt):boolean;
+       // The bytes the signature covers, built once so that both the verifier and any future
+       // signer see the same shape
+       class function BuildSignedContent(out aContent;out aContentSize:TRNLSizeInt;
+                                         const aMaximumContentSize:TRNLSizeInt;
+                                         const aContext:TRNLRawByteString;
+                                         const aTranscriptHash;
+                                         const aTranscriptHashSize:TRNLSizeInt):boolean; static;
+       // ecdsa_secp256r1_sha256 and ed25519, which are the two this client offers. The key comes
+       // out of the certificate the peer presented, and the curve of that key has to agree with
+       // the algorithm the peer named - a P-384 key with ecdsa_secp256r1_sha256 is a mismatch and
+       // not a detail.
+       function VerifyWith(const aCertificate:TRNLX509Certificate;
+                           const aTranscriptHash;
+                           const aTranscriptHashSize:TRNLSizeInt):boolean;
+       class procedure SelfTest; static;
+     end;
+
+     // RFC 9147 section 7, and DTLS 1.2 has nothing like it. There, a lost record is discovered by
+     // the sender's timer running out and answered by sending the whole flight again. Here the
+     // receiver says which record numbers it actually got, so only what is missing is repeated.
+     //
+     //   struct {
+     //    RecordNumber record_numbers<0..2^16-1>;
+     //   } ACK;
+     //
+     //   struct {
+     //    uint64 epoch;
+     //    uint64 sequence_number;
+     //   } RecordNumber;
+     //
+     // Sixteen bytes per record, which is why the list is bounded here rather than believed: a peer
+     // which says it acknowledges four thousand records is a peer asking for sixty four kilobytes
+     // of parsing.
+     //
+     // An ACK is not a handshake message. It has its own content type, it is never fragmented, and
+     // it never appears in the transcript - which is what lets it be sent at any point, including
+     // for records of an epoch whose keys are already gone.
+     PRNLDTLS13ACK=^TRNLDTLS13ACK;
+     TRNLDTLS13ACK=record
+      public
+       const RecordNumberSize=16;
+             // More than any flight of this client's exchange can produce, and small enough that
+             // the whole message still fits one datagram
+             MaximumRecordNumbers=64;
+      public
+       type PRecordNumbers=^TRecordNumbers;
+            TRecordNumbers=array[0..MaximumRecordNumbers-1] of record
+             Epoch:TRNLUInt64;
+             SequenceNumber:TRNLUInt64;
+            end;
+      public
+       Numbers:TRecordNumbers;
+       Count:TRNLSizeInt;
+       procedure Initialize;
+       // False when the list is full, so that a caller which drops one knows it did
+       function Add(const aEpoch,aSequenceNumber:TRNLUInt64):boolean;
+       function Write_(out aBody;out aBodySize:TRNLSizeInt;
+                       const aMaximumBodySize:TRNLSizeInt):boolean;
+       // False for a length which is not a multiple of sixteen, for one which does not fit what
+       // arrived, and for more record numbers than this will hold
+       function Parse(const aData;const aDataSize:TRNLSizeInt):boolean;
+       class procedure SelfTest; static;
+     end;
+
+     PRNLDTLS13ClientState=^TRNLDTLS13ClientState;
+     TRNLDTLS13ClientState=
+      (
+       RNL_DTLS13_CLIENT_STATE_IDLE,
+       RNL_DTLS13_CLIENT_STATE_AWAITING_SERVER_HELLO,
+       RNL_DTLS13_CLIENT_STATE_AWAITING_ENCRYPTED_EXTENSIONS,
+       RNL_DTLS13_CLIENT_STATE_AWAITING_CERTIFICATE,
+       RNL_DTLS13_CLIENT_STATE_AWAITING_CERTIFICATE_VERIFY,
+       RNL_DTLS13_CLIENT_STATE_AWAITING_SERVER_FINISHED,
+       RNL_DTLS13_CLIENT_STATE_ESTABLISHED,
+       RNL_DTLS13_CLIENT_STATE_FAILED
+      );
+
+     // The client half of a DTLS 1.3 handshake. The same shape as TRNLDTLS12Client next to it -
+     // no socket, no clock, datagrams in and out - so that whichever version a relay turns out to
+     // speak, the caller above drives it the same way.
+     //
+     // What is different from 1.2, and it is most of the protocol:
+     //
+     //   * one round trip instead of two, and no cookie exchange at all - both key shares go out
+     //     in the first ClientHello, which leaves a HelloRetryRequest nothing to ask for
+     //   * everything from EncryptedExtensions onwards is already encrypted, so the handshake is
+     //     read through the record layer of an epoch whose keys were derived halfway through it
+     //   * epochs are numbered: 0 in the clear, 2 for the handshake, 3 for application data. One
+     //     is early data, which this client does not send.
+     //   * the transcript leaves the DTLS header fields out, where 1.2 requires them
+     //   * a lost record is answered with an ACK naming what did arrive, instead of only by the
+     //     sender's timer running out
+     TRNLDTLS13Client=class
+      public
+       const MaximumDatagramSize=1200;
+             MaximumFlightSize=2048;
+             MaximumFlightEntries=4;
+             MaximumQueuedDatagrams=4;
+             MaximumDeferredSize=8192;
+             InitialRetransmissionTimeout=1000;
+             MaximumRetransmissionTimeout=16000;
+             MaximumRetransmissions=5;
+             EpochInitial=0;
+             EpochHandshake=2;
+             EpochApplication=3;
+             ALERT_LEVEL_FATAL=TRNLUInt8(2);
+             ALERT_UNEXPECTED_MESSAGE=TRNLUInt8(10);
+             ALERT_HANDSHAKE_FAILURE=TRNLUInt8(40);
+             ALERT_BAD_CERTIFICATE=TRNLUInt8(42);
+             ALERT_DECODE_ERROR=TRNLUInt8(50);
+             ALERT_DECRYPT_ERROR=TRNLUInt8(51);
+             ALERT_ILLEGAL_PARAMETER=TRNLUInt8(47);
+             ALERT_INTERNAL_ERROR=TRNLUInt8(80);
+             TYPE_CLIENT_HELLO=TRNLUInt8(1);
+             TYPE_SERVER_HELLO=TRNLUInt8(2);
+             TYPE_ENCRYPTED_EXTENSIONS=TRNLUInt8(8);
+             TYPE_CERTIFICATE=TRNLUInt8(11);
+             TYPE_CERTIFICATE_REQUEST=TRNLUInt8(13);
+             TYPE_CERTIFICATE_VERIFY=TRNLUInt8(15);
+             TYPE_FINISHED=TRNLUInt8(20);
+      private
+       type TRNLDTLS13ClientDatagram=record
+             Data:array[0..MaximumDatagramSize-1] of TRNLUInt8;
+             Size:TRNLSizeInt;
+            end;
+            TRNLDTLS13ClientFlightEntry=record
+             Offset:TRNLSizeInt;
+             Size:TRNLSizeInt;
+             ContentType:TRNLUInt8;
+             Epoch:TRNLUInt64;
+            end;
+      private
+
+       fRandomGenerator:TRNLRandomGenerator;
+       fServerName:TRNLRawByteString;
+       fTrustedRoots:TRNLX509.TChainEntries;
+       fCountTrustedRoots:TRNLSizeInt;
+       fNowSecondsSinceUnixEpoch:TRNLInt64;
+
+       fState:TRNLDTLS13ClientState;
+       fFailure:TRNLDTLS12ClientFailure;
+       fAlertDescription:TRNLUInt8;
+       fCertificateVerdict:TRNLX509Verdict;
+
+       fClientRandom:array[0..TRNLDTLS13ClientHello.RandomSize-1] of TRNLUInt8;
+
+       // Both key exchanges are offered, so both private keys exist until the server picks one
+       fX25519PublicKey:TRNLKey;
+       fX25519PrivateKey:TRNLKey;
+       fSecp256r1PrivateKey:array[0..TRNLP256.ElementSize-1] of TRNLUInt8;
+       fSecp256r1PublicKey:array[0..TRNLP256.PointSize-1] of TRNLUInt8;
+
+       fTranscript:TRNLDTLS13Transcript;
+       fKeySchedule:TRNLDTLS13KeySchedule;
+       fClientHandshakeKeys:TRNLDTLSTrafficKeys;
+       fServerHandshakeKeys:TRNLDTLSTrafficKeys;
+       fClientApplicationKeys:TRNLDTLSTrafficKeys;
+       fServerApplicationKeys:TRNLDTLSTrafficKeys;
+
+       fLeafCertificate:TRNLX509Certificate;
+       // The transcript as it stood before the CertificateVerify, which is what that signature
+       // covers - taken when the Certificate went in, because by the time the signature arrives
+       // the transcript has already moved on
+       fTranscriptBeforeCertificateVerify:TRNLSHA256Hash;
+       fTranscriptBeforeServerFinished:TRNLSHA256Hash;
+
+       fSendEpoch:TRNLUInt64;
+       fSendSequenceNumbers:array[0..3] of TRNLUInt64;
+       fReceiveEpoch:TRNLUInt64;
+       fReplayWindows:array[0..3] of TRNLDTLSReplayWindow;
+
+       fFlight:array[0..MaximumFlightSize-1] of TRNLUInt8;
+       fFlightSize:TRNLSizeInt;
+       fFlightEntries:array[0..MaximumFlightEntries-1] of TRNLDTLS13ClientFlightEntry;
+       fCountFlightEntries:TRNLSizeInt;
+       fFlightPending:boolean;
+       fRetransmissionTimeout:TRNLUInt64;
+       fRetransmitAt:TRNLTime;
+       fCountRetransmissions:TRNLSizeInt;
+
+       fOutgoing:array[0..MaximumQueuedDatagrams-1] of TRNLDTLS13ClientDatagram;
+       fOutgoingHead:TRNLSizeInt;
+       fCountOutgoing:TRNLSizeInt;
+
+       fApplicationData:array[0..MaximumQueuedDatagrams-1] of TRNLDTLS13ClientDatagram;
+       fApplicationDataHead:TRNLSizeInt;
+       fCountApplicationData:TRNLSizeInt;
+
+       fReassembler:TRNLDTLS12Reassembler;
+       fDeferred:array[0..MaximumDeferredSize-1] of TRNLUInt8;
+       fDeferredSize:TRNLSizeInt;
+       fExpectedReceiveMessageSequence:TRNLUInt16;
+       fNextSendMessageSequence:TRNLUInt16;
+
+       fPendingACK:TRNLDTLS13ACK;
+       fRecordBuffer:array[0..TRNLDTLSRecord.MaximumContentSize-1] of TRNLUInt8;
+
+       procedure Fail(const aFailure:TRNLDTLS12ClientFailure;const aAlertDescription:TRNLUInt8);
+       function QueueOutgoing(const aData;const aDataSize:TRNLSizeInt):boolean;
+       procedure BeginFlight;
+       function AppendHandshakeMessage(const aMessageType:TRNLUInt8;
+                                       const aBody;const aBodySize:TRNLSizeInt;
+                                       const aEpoch:TRNLUInt64):boolean;
+       function TransmitFlight(const aNow:TRNLTime):boolean;
+       function BuildClientHello(const aNow:TRNLTime):boolean;
+       function DeriveHandshakeKeys:boolean;
+       function BuildClientFinished(const aNow:TRNLTime):boolean;
+       procedure SendPendingACK;
+       procedure HandleRecord(const aContentType:TRNLUInt8;
+                              const aContent;const aContentSize:TRNLSizeInt;
+                              const aEpoch,aSequenceNumber:TRNLUInt64;
+                              const aNow:TRNLTime);
+       procedure HandleHandshakeFragments(const aContent;const aContentSize:TRNLSizeInt;
+                                          const aNow:TRNLTime);
+       procedure HandleMessage(const aNow:TRNLTime);
+       procedure DeferFragment(const aData;const aDataSize:TRNLSizeInt);
+       procedure ReplayDeferredFragments(const aNow:TRNLTime);
+       function HandleServerHello(const aBody;const aBodySize:TRNLSizeInt;
+                                  const aNow:TRNLTime):boolean;
+       function HandleCertificate(const aBody;const aBodySize:TRNLSizeInt):boolean;
+       function HandleCertificateVerify(const aBody;const aBodySize:TRNLSizeInt):boolean;
+       function HandleServerFinished(const aBody;const aBodySize:TRNLSizeInt;
+                                     const aNow:TRNLTime):boolean;
+
+      public
+
+       constructor Create(const aRandomGenerator:TRNLRandomGenerator;
+                          const aServerName:TRNLRawByteString;
+                          const aTrustedRoots:TRNLX509.TChainEntries;
+                          const aCountTrustedRoots:TRNLSizeInt;
+                          const aNowSecondsSinceUnixEpoch:TRNLInt64); reintroduce;
+       destructor Destroy; override;
+
+       procedure Start(const aNow:TRNLTime);
+       procedure ProcessDatagram(const aData;const aDataSize:TRNLSizeInt;const aNow:TRNLTime);
+       procedure Update(const aNow:TRNLTime);
+       function PopOutgoingDatagram(out aData;out aDataSize:TRNLSizeInt;
+                                    const aMaximumDataSize:TRNLSizeInt):boolean;
+       function Send(const aData;const aDataSize:TRNLSizeInt):boolean;
+       function PopApplicationData(out aData;out aDataSize:TRNLSizeInt;
+                                   const aMaximumDataSize:TRNLSizeInt):boolean;
+
+       property State:TRNLDTLS13ClientState read fState;
+       // The same failure names as the 1.2 client, because the caller above wants one answer to
+       // "why did this not work" and not two lists which mostly overlap
+       property Failure:TRNLDTLS12ClientFailure read fFailure;
+       property AlertDescription:TRNLUInt8 read fAlertDescription;
+       property CertificateVerdict:TRNLX509Verdict read fCertificateVerdict;
+
+     end;
+
      PRNLBLAKE2BHash=^TRNLBLAKE2BHash;
      TRNLBLAKE2BHash=array[0..63] of TRNLUInt8;
 
@@ -15434,6 +15937,717 @@ begin
 
 end;
 
+// The whole RFC 8446 key schedule as RFC 8448 section 3 prints it for a handshake without a pre
+// shared key. Every rung is there, and every one of them is compared against a number somebody else
+// derived - which is the only way to catch the mistakes this ladder invites, because each step
+// produces a perfectly random looking secret whatever it was fed.
+//
+// The two which cannot be told apart by shape are the ones worth naming. In the extract that makes
+// the handshake secret, the shared secret is the input keying material and the derived secret the
+// salt; swapping them yields a secret of the right width which no counter side reaches. And where
+// the schedule says "0" it means Hash.length zero bytes, not an empty string - for the salt the two
+// agree by accident, because HMAC zero pads a short key, and for the input they do not.
+class procedure TRNLDTLS13KeySchedule.SelfTest;
+const // The x25519 shared secret of the handshake in RFC 8448 section 3
+      SharedSecret:array[0..31] of TRNLUInt8=
+       (
+        $8b,$d4,$05,$4f,$b5,$5b,$9d,$63,$fd,$fb,$ac,$f9,
+        $f0,$4b,$9f,$0d,$35,$e6,$d6,$3f,$53,$75,$63,$ef,
+        $d4,$62,$72,$90,$0f,$89,$49,$2d
+       );
+      ExpectedEarlySecret:array[0..31] of TRNLUInt8=
+       (
+        $33,$ad,$0a,$1c,$60,$7e,$c0,$3b,$09,$e6,$cd,$98,
+        $93,$68,$0c,$e2,$10,$ad,$f3,$00,$aa,$1f,$26,$60,
+        $e1,$b2,$2e,$10,$f1,$70,$f9,$2a
+       );
+      ExpectedHandshakeSecret:array[0..31] of TRNLUInt8=
+       (
+        $1d,$c8,$26,$e9,$36,$06,$aa,$6f,$dc,$0a,$ad,$c1,
+        $2f,$74,$1b,$01,$04,$6a,$a6,$b9,$9f,$69,$1e,$d2,
+        $21,$a9,$f0,$ca,$04,$3f,$be,$ac
+       );
+      // Transcript-Hash(ClientHello..ServerHello)
+      TranscriptAfterServerHello:array[0..31] of TRNLUInt8=
+       (
+        $86,$0c,$06,$ed,$c0,$78,$58,$ee,$8e,$78,$f0,$e7,
+        $42,$8c,$58,$ed,$d6,$b4,$3f,$2c,$a3,$e6,$e9,$5f,
+        $02,$ed,$06,$3c,$f0,$e1,$ca,$d8
+       );
+      ExpectedClientHandshakeTraffic:array[0..31] of TRNLUInt8=
+       (
+        $b3,$ed,$db,$12,$6e,$06,$7f,$35,$a7,$80,$b3,$ab,
+        $f4,$5e,$2d,$8f,$3b,$1a,$95,$07,$38,$f5,$2e,$96,
+        $00,$74,$6a,$0e,$27,$a5,$5a,$21
+       );
+      ExpectedServerHandshakeTraffic:array[0..31] of TRNLUInt8=
+       (
+        $b6,$7b,$7d,$69,$0c,$c1,$6c,$4e,$75,$e5,$42,$13,
+        $cb,$2d,$37,$b4,$e9,$c9,$12,$bc,$de,$d9,$10,$5d,
+        $42,$be,$fd,$59,$d3,$91,$ad,$38
+       );
+      ExpectedMasterSecret:array[0..31] of TRNLUInt8=
+       (
+        $18,$df,$06,$84,$3d,$13,$a0,$8b,$f2,$a4,$49,$84,
+        $4c,$5f,$8a,$47,$80,$01,$bc,$4d,$4c,$62,$79,$84,
+        $d5,$a4,$1d,$a8,$d0,$40,$29,$19
+       );
+      // Transcript-Hash(ClientHello..server Finished)
+      TranscriptAfterServerFinished:array[0..31] of TRNLUInt8=
+       (
+        $96,$08,$10,$2a,$0f,$1c,$cc,$6d,$b6,$25,$0b,$7b,
+        $7e,$41,$7b,$1a,$00,$0e,$aa,$da,$3d,$aa,$e4,$77,
+        $7a,$76,$86,$c9,$ff,$83,$df,$13
+       );
+      ExpectedClientApplicationTraffic:array[0..31] of TRNLUInt8=
+       (
+        $9e,$40,$64,$6c,$e7,$9a,$7f,$9d,$c0,$5a,$f8,$88,
+        $9b,$ce,$65,$52,$87,$5a,$fa,$0b,$06,$df,$00,$87,
+        $f7,$92,$eb,$b7,$c1,$75,$04,$a5
+       );
+      ExpectedServerApplicationTraffic:array[0..31] of TRNLUInt8=
+       (
+        $a1,$1a,$f9,$f0,$55,$31,$f8,$56,$ad,$47,$11,$6b,
+        $45,$a9,$50,$32,$82,$04,$b4,$f4,$4b,$fb,$6b,$3a,
+        $4b,$4f,$1f,$3f,$cb,$63,$16,$43
+       );
+      // HKDF-Expand-Label(server handshake traffic secret, "finished", "", 32)
+      ExpectedServerFinishedKey:array[0..31] of TRNLUInt8=
+       (
+        $00,$8d,$3b,$66,$f8,$16,$ea,$55,$9f,$96,$b5,$37,
+        $e8,$85,$c3,$1f,$c0,$68,$bf,$49,$2c,$65,$2f,$01,
+        $f2,$88,$a1,$d8,$cd,$c1,$9f,$c8
+       );
+      ExpectedClientFinishedKey:array[0..31] of TRNLUInt8=
+       (
+        $b8,$0a,$d0,$10,$15,$fb,$2f,$0b,$d6,$5f,$f7,$d4,
+        $da,$5d,$6b,$f8,$3f,$84,$82,$1d,$1f,$87,$fd,$c7,
+        $d3,$c7,$5b,$5a,$7b,$42,$d9,$c4
+       );
+var Schedule:TRNLDTLS13KeySchedule;
+    FinishedKey,OtherFinishedKey:TRNLSHA256Hash;
+    VerifyData,OtherVerifyData:TRNLSHA256Hash;
+begin
+
+ RNLSelfTestBegin('[DTLS1.3-KDF] RFC 8448 early secret ... ');
+ if Schedule.Initialize(TRNLSHA256.Descriptor) and
+    TRNLMemory.SecureIsEqual(Schedule.EarlySecret,ExpectedEarlySecret,
+                             SizeOf(ExpectedEarlySecret)) then begin
+  RNLSelfTestSucceeded;
+ end else begin
+  RNLSelfTestFailure;
+ end;
+
+ // The rung which two implementations most often disagree about, because both arguments are the
+ // width of the hash and neither order looks wrong
+ RNLSelfTestBegin('[DTLS1.3-KDF] and the handshake secret out of the x25519 shared secret ... ');
+ if Schedule.DeriveHandshakeSecret(SharedSecret,SizeOf(SharedSecret)) and
+    TRNLMemory.SecureIsEqual(Schedule.HandshakeSecret,ExpectedHandshakeSecret,
+                             SizeOf(ExpectedHandshakeSecret)) then begin
+  RNLSelfTestSucceeded;
+ end else begin
+  RNLSelfTestFailure;
+ end;
+
+ RNLSelfTestBegin('[DTLS1.3-KDF] both handshake traffic secrets over the same transcript ... ');
+ if Schedule.DeriveHandshakeTrafficSecrets(TranscriptAfterServerHello,
+                                           SizeOf(TranscriptAfterServerHello)) and
+    TRNLMemory.SecureIsEqual(Schedule.ClientHandshakeTrafficSecret,
+                             ExpectedClientHandshakeTraffic,
+                             SizeOf(ExpectedClientHandshakeTraffic)) and
+    TRNLMemory.SecureIsEqual(Schedule.ServerHandshakeTrafficSecret,
+                             ExpectedServerHandshakeTraffic,
+                             SizeOf(ExpectedServerHandshakeTraffic)) then begin
+  RNLSelfTestSucceeded;
+ end else begin
+  RNLSelfTestFailure;
+ end;
+
+ // Nothing but zeros go into this extract, so it is a function of the rung above it alone
+ RNLSelfTestBegin('[DTLS1.3-KDF] the master secret above it ... ');
+ if Schedule.DeriveMasterSecret and
+    TRNLMemory.SecureIsEqual(Schedule.MasterSecret,ExpectedMasterSecret,
+                             SizeOf(ExpectedMasterSecret)) then begin
+  RNLSelfTestSucceeded;
+ end else begin
+  RNLSelfTestFailure;
+ end;
+
+ RNLSelfTestBegin('[DTLS1.3-KDF] and both application traffic secrets ... ');
+ if Schedule.DeriveApplicationTrafficSecrets(TranscriptAfterServerFinished,
+                                             SizeOf(TranscriptAfterServerFinished)) and
+    TRNLMemory.SecureIsEqual(Schedule.ClientApplicationTrafficSecret,
+                             ExpectedClientApplicationTraffic,
+                             SizeOf(ExpectedClientApplicationTraffic)) and
+    TRNLMemory.SecureIsEqual(Schedule.ServerApplicationTrafficSecret,
+                             ExpectedServerApplicationTraffic,
+                             SizeOf(ExpectedServerApplicationTraffic)) then begin
+  RNLSelfTestSucceeded;
+ end else begin
+  RNLSelfTestFailure;
+ end;
+
+ // The one label in the schedule whose context is empty. A "finished" key derived over the
+ // transcript instead would be a key both ends could still agree on, and useless.
+ RNLSelfTestBegin('[DTLS1.3-KDF] the finished key of both directions ... ');
+ if DeriveFinishedKey(TRNLSHA256.Descriptor,FinishedKey,
+                      Schedule.ServerHandshakeTrafficSecret,SizeOf(TRNLSHA256Hash)) and
+    TRNLMemory.SecureIsEqual(FinishedKey,ExpectedServerFinishedKey,
+                             SizeOf(ExpectedServerFinishedKey)) and
+    DeriveFinishedKey(TRNLSHA256.Descriptor,OtherFinishedKey,
+                      Schedule.ClientHandshakeTrafficSecret,SizeOf(TRNLSHA256Hash)) and
+    TRNLMemory.SecureIsEqual(OtherFinishedKey,ExpectedClientFinishedKey,
+                             SizeOf(ExpectedClientFinishedKey)) then begin
+  RNLSelfTestSucceeded;
+ end else begin
+  RNLSelfTestFailure;
+ end;
+
+ // Which says the two directions cannot be confused, and that a Finished cannot be reflected back
+ // at its sender
+ RNLSelfTestBegin('[DTLS1.3-KDF] the two directions of the verify data differ ... ');
+ if ComputeVerifyData(TRNLSHA256.Descriptor,VerifyData,
+                      Schedule.ServerHandshakeTrafficSecret,SizeOf(TRNLSHA256Hash),
+                      TranscriptAfterServerHello,SizeOf(TranscriptAfterServerHello)) and
+    ComputeVerifyData(TRNLSHA256.Descriptor,OtherVerifyData,
+                      Schedule.ClientHandshakeTrafficSecret,SizeOf(TRNLSHA256Hash),
+                      TranscriptAfterServerHello,SizeOf(TranscriptAfterServerHello)) and
+    (not TRNLMemory.SecureIsEqual(VerifyData,OtherVerifyData,SizeOf(TRNLSHA256Hash))) then begin
+  RNLSelfTestSucceeded;
+ end else begin
+  RNLSelfTestFailure;
+ end;
+
+ Schedule.Clear;
+
+end;
+// The transcript of the RFC 8448 handshake, as far as its ServerHello, against the hash that RFC
+// prints for exactly that point. The two messages below are the real ones out of section 3.
+//
+// This is the one vector which pins the **framing** rather than the arithmetic, and it is the whole
+// reason for hashing something published rather than something built here. A transcript which put
+// the DTLS twelve byte header in - which is what DTLS 1.2 requires two hundred lines further up -
+// produces a perfectly good hash that no TLS 1.3 peer arrives at, and nothing about the shape of
+// the result would say so.
+class procedure TRNLDTLS13Transcript.SelfTest;
+const
+      RFC8448ClientHelloBody:array[0..191] of TRNLUInt8=
+       (
+        $03,$03,$cb,$34,$ec,$b1,$e7,$81,$63,$ba,$1c,$38,
+        $c6,$da,$cb,$19,$6a,$6d,$ff,$a2,$1a,$8d,$99,$12,
+        $ec,$18,$a2,$ef,$62,$83,$02,$4d,$ec,$e7,$00,$00,
+        $06,$13,$01,$13,$03,$13,$02,$01,$00,$00,$91,$00,
+        $00,$00,$0b,$00,$09,$00,$00,$06,$73,$65,$72,$76,
+        $65,$72,$ff,$01,$00,$01,$00,$00,$0a,$00,$14,$00,
+        $12,$00,$1d,$00,$17,$00,$18,$00,$19,$01,$00,$01,
+        $01,$01,$02,$01,$03,$01,$04,$00,$23,$00,$00,$00,
+        $33,$00,$26,$00,$24,$00,$1d,$00,$20,$99,$38,$1d,
+        $e5,$60,$e4,$bd,$43,$d2,$3d,$8e,$43,$5a,$7d,$ba,
+        $fe,$b3,$c0,$6e,$51,$c1,$3c,$ae,$4d,$54,$13,$69,
+        $1e,$52,$9a,$af,$2c,$00,$2b,$00,$03,$02,$03,$04,
+        $00,$0d,$00,$20,$00,$1e,$04,$03,$05,$03,$06,$03,
+        $02,$03,$08,$04,$08,$05,$08,$06,$04,$01,$05,$01,
+        $06,$01,$02,$01,$04,$02,$05,$02,$06,$02,$02,$02,
+        $00,$2d,$00,$02,$01,$01,$00,$1c,$00,$02,$40,$01
+       );
+      RFC8448ServerHelloBody:array[0..85] of TRNLUInt8=
+       (
+        $03,$03,$a6,$af,$06,$a4,$12,$18,$60,$dc,$5e,$6e,
+        $60,$24,$9c,$d3,$4c,$95,$93,$0c,$8a,$c5,$cb,$14,
+        $34,$da,$c1,$55,$77,$2e,$d3,$e2,$69,$28,$00,$13,
+        $01,$00,$00,$2e,$00,$33,$00,$24,$00,$1d,$00,$20,
+        $c9,$82,$88,$76,$11,$20,$95,$fe,$66,$76,$2b,$db,
+        $f7,$c6,$72,$e1,$56,$d6,$cc,$25,$3b,$83,$3d,$f1,
+        $dd,$69,$b1,$b0,$4e,$75,$1f,$0f,$00,$2b,$00,$02,
+        $03,$04
+       );
+      // Transcript-Hash(ClientHello..ServerHello) of that handshake
+      ExpectedTranscript:array[0..31] of TRNLUInt8=
+       (
+        $86,$0c,$06,$ed,$c0,$78,$58,$ee,$8e,$78,$f0,$e7,
+        $42,$8c,$58,$ed,$d6,$b4,$3f,$2c,$a3,$e6,$e9,$5f,
+        $02,$ed,$06,$3c,$f0,$e1,$ca,$d8
+       );
+      // SHA-256 of the synthetic message that replaces the first ClientHello after a
+      // HelloRetryRequest: the type 254, a uint24 length of thirty two, and the hash of that
+      // ClientHello. Computed apart from this code, so that a restart which simply carried the
+      // bare hash forward is told from one which frames it.
+      ExpectedAfterMessageHash:array[0..31] of TRNLUInt8=
+       (
+        $ff,$11,$35,$ed,$87,$83,$22,$e2,$96,$99,$da,$3e,
+        $45,$1d,$2f,$08,$bf,$11,$fc,$69,$30,$38,$76,$99,
+        $78,$e7,$5b,$b6,$33,$04,$a2,$25
+       );
+var Transcript:TRNLDTLS13Transcript;
+    Hash,Again:TRNLSHA256Hash;
+begin
+
+ RNLSelfTestBegin('[DTLS1.3] the transcript of the RFC 8448 ClientHello and ServerHello ... ');
+ Transcript.Initialize;
+ Transcript.AddMessage(1,RFC8448ClientHelloBody,SizeOf(RFC8448ClientHelloBody));
+ Transcript.AddMessage(2,RFC8448ServerHelloBody,SizeOf(RFC8448ServerHelloBody));
+ Transcript.Snapshot(Hash);
+ if TRNLMemory.SecureIsEqual(Hash,ExpectedTranscript,SizeOf(TRNLSHA256Hash)) then begin
+  RNLSelfTestSucceeded;
+ end else begin
+  RNLSelfTestFailure;
+ end;
+
+ // And a snapshot must not disturb what comes after it, because the schedule takes four of them
+ // from the same running hash
+ RNLSelfTestBegin('[DTLS1.3] a transcript snapshot does not disturb what follows it ... ');
+ Transcript.Snapshot(Again);
+ if TRNLMemory.SecureIsEqual(Hash,Again,SizeOf(TRNLSHA256Hash)) then begin
+  Transcript.AddMessage(8,RFC8448ServerHelloBody,SizeOf(RFC8448ServerHelloBody));
+  Transcript.Snapshot(Again);
+  if not TRNLMemory.SecureIsEqual(Hash,Again,SizeOf(TRNLSHA256Hash)) then begin
+   RNLSelfTestSucceeded;
+  end else begin
+   RNLSelfTestFailure;
+  end;
+ end else begin
+  RNLSelfTestFailure;
+ end;
+
+ // RFC 8446 section 4.4.1. A synthetic message_hash is not the hash it carries: it is a handshake
+ // message with a four byte header like any other, and a transcript which simply started from the
+ // bare hash would agree with nobody.
+ RNLSelfTestBegin('[DTLS1.3] a message_hash restart is a framed message, not a bare hash ... ');
+ Transcript.Initialize;
+ Transcript.AddMessage(1,RFC8448ClientHelloBody,SizeOf(RFC8448ClientHelloBody));
+ Transcript.Snapshot(Hash);
+ Transcript.InitializeWithMessageHash(Hash,SizeOf(TRNLSHA256Hash));
+ Transcript.Snapshot(Again);
+ if TRNLMemory.SecureIsEqual(Again,ExpectedAfterMessageHash,SizeOf(TRNLSHA256Hash)) then begin
+  RNLSelfTestSucceeded;
+ end else begin
+  RNLSelfTestFailure;
+ end;
+
+end;
+
+// The genuine ServerHello of RFC 8448 section 3 and the genuine HelloRetryRequest of section 5,
+// read back field by field. Both are TLS 1.3 and not DTLS, and that is on purpose: the structure is
+// identical and the two version numbers are the only difference. A reader which refused them over
+// that would be a reader making policy - which version, which suite and which group are acceptable
+// is the client's business, and here it is only asserted that the bytes were understood.
+//
+// The eighty six bytes of the ServerHello are the same ones the transcript test above hashes, where
+// SHA-256 over them and the ClientHello reproduces the transcript hash the RFC prints. That is what
+// says they were transcribed correctly.
+class procedure TRNLDTLS13ServerHello.SelfTest;
+const
+      RFC8448ServerHello:array[0..85] of TRNLUInt8=
+       (
+        $03,$03,$a6,$af,$06,$a4,$12,$18,$60,$dc,$5e,$6e,
+        $60,$24,$9c,$d3,$4c,$95,$93,$0c,$8a,$c5,$cb,$14,
+        $34,$da,$c1,$55,$77,$2e,$d3,$e2,$69,$28,$00,$13,
+        $01,$00,$00,$2e,$00,$33,$00,$24,$00,$1d,$00,$20,
+        $c9,$82,$88,$76,$11,$20,$95,$fe,$66,$76,$2b,$db,
+        $f7,$c6,$72,$e1,$56,$d6,$cc,$25,$3b,$83,$3d,$f1,
+        $dd,$69,$b1,$b0,$4e,$75,$1f,$0f,$00,$2b,$00,$02,
+        $03,$04
+       );
+      RFC8448HelloRetryRequest:array[0..171] of TRNLUInt8=
+       (
+        $03,$03,$cf,$21,$ad,$74,$e5,$9a,$61,$11,$be,$1d,
+        $8c,$02,$1e,$65,$b8,$91,$c2,$a2,$11,$16,$7a,$bb,
+        $8c,$5e,$07,$9e,$09,$e2,$c8,$a8,$33,$9c,$00,$13,
+        $01,$00,$00,$84,$00,$33,$00,$02,$00,$17,$00,$2c,
+        $00,$74,$00,$72,$71,$dc,$d0,$4b,$b8,$8b,$c3,$18,
+        $91,$19,$39,$8a,$00,$00,$00,$00,$ee,$fa,$fc,$76,
+        $c1,$46,$b8,$23,$b0,$96,$f8,$aa,$ca,$d3,$65,$dd,
+        $00,$30,$95,$3f,$4e,$df,$62,$56,$36,$e5,$f2,$1b,
+        $b2,$e2,$3f,$cc,$65,$4b,$1b,$5b,$40,$31,$8d,$10,
+        $d1,$37,$ab,$cb,$b8,$75,$74,$e3,$6e,$8a,$1f,$02,
+        $5f,$7d,$fa,$5d,$6e,$50,$78,$1b,$5e,$da,$4a,$a1,
+        $5b,$0c,$8b,$e7,$78,$25,$7d,$16,$aa,$30,$30,$e9,
+        $e7,$84,$1d,$d9,$e4,$c0,$34,$22,$67,$e8,$ca,$0c,
+        $af,$57,$1f,$b2,$b7,$cf,$f0,$f9,$34,$b0,$00,$2b,
+        $00,$02,$03,$04
+       );
+      ExpectedKeyShare:array[0..31] of TRNLUInt8=
+       (
+        $c9,$82,$88,$76,$11,$20,$95,$fe,$66,$76,$2b,$db,
+        $f7,$c6,$72,$e1,$56,$d6,$cc,$25,$3b,$83,$3d,$f1,
+        $dd,$69,$b1,$b0,$4e,$75,$1f,$0f
+       );
+var ServerHello:TRNLDTLS13ServerHello;
+    Damaged:array[0..SizeOf(RFC8448HelloRetryRequest)-1] of TRNLUInt8;
+begin
+
+ RNLSelfTestBegin('[DTLS1.3] the RFC 8448 ServerHello reads back field by field ... ');
+ if ServerHello.Parse(RFC8448ServerHello,SizeOf(RFC8448ServerHello)) and
+    (ServerHello.LegacyVersion=$0303) and
+    (ServerHello.CipherSuite=$1301) and
+    (ServerHello.LegacyCompressionMethod=0) and
+    ServerHello.HasSupportedVersions and
+    (ServerHello.SelectedVersion=$0304) and
+    ServerHello.HasKeyShare and
+    (ServerHello.KeyShareGroup=TRNLDTLS13ClientHello.GROUP_X25519) and
+    (ServerHello.KeyShareSize=SizeOf(TRNLKey)) and
+    TRNLMemory.SecureIsEqual(ServerHello.KeyShare,ExpectedKeyShare,SizeOf(ExpectedKeyShare)) and
+    (not ServerHello.IsHelloRetryRequest) and
+    (not ServerHello.HasCookie) then begin
+  RNLSelfTestSucceeded;
+ end else begin
+  RNLSelfTestFailure;
+ end;
+
+ // The reader does not judge, so the suite it read is one this client does not offer. That is the
+ // point of the split: a suite nobody offered and a ServerHello full of noise are different
+ // answers, and only the client can give the right one.
+ RNLSelfTestBegin('[DTLS1.3] and the suite it names is passed through, not refused ... ');
+ if ServerHello.CipherSuite<>TRNLDTLS13ClientHello.CIPHER_SUITE_CHACHA20_POLY1305_SHA256 then begin
+  RNLSelfTestSucceeded;
+ end else begin
+  RNLSelfTestFailure;
+ end;
+
+ // A HelloRetryRequest is a ServerHello whose random is one published constant, and whose key
+ // share names a group without carrying one. Both halves are here, from a real one.
+ RNLSelfTestBegin('[DTLS1.3] the RFC 8448 HelloRetryRequest, random, group and cookie ... ');
+ if ServerHello.Parse(RFC8448HelloRetryRequest,SizeOf(RFC8448HelloRetryRequest)) and
+    ServerHello.IsHelloRetryRequest and
+    ServerHello.HasKeyShare and
+    (ServerHello.KeyShareGroup=TRNLDTLS13ClientHello.GROUP_SECP256R1) and
+    (ServerHello.KeyShareSize=0) and
+    ServerHello.HasCookie and
+    (ServerHello.CookieSize=114) and
+    ServerHello.HasSupportedVersions and
+    (ServerHello.SelectedVersion=$0304) then begin
+  RNLSelfTestSucceeded;
+ end else begin
+  RNLSelfTestFailure;
+ end;
+
+ // A retry which does carry a share is not one. Without this the two shapes could be confused, and
+ // a client would try to complete a key exchange against a group the server only asked it to use.
+ RNLSelfTestBegin('[DTLS1.3] a HelloRetryRequest carrying a share is refused ... ');
+ Move(RFC8448ServerHello,Damaged,SizeOf(RFC8448ServerHello));
+ Move(HelloRetryRequestRandom,Damaged[2],SizeOf(HelloRetryRequestRandom));
+ if not ServerHello.Parse(Damaged,SizeOf(RFC8448ServerHello)) then begin
+  RNLSelfTestSucceeded;
+ end else begin
+  RNLSelfTestFailure;
+ end;
+
+ // A ServerHello followed by anything at all is not a ServerHello. Without this case the check
+ // for it stays green when it is deleted: every truncation below cuts the front, so the reader
+ // runs out of bytes long before it ever reaches the end.
+ RNLSelfTestBegin('[DTLS1.3] one byte too many at the end is refused ... ');
+ Move(RFC8448ServerHello,Damaged,SizeOf(RFC8448ServerHello));
+ Damaged[SizeOf(RFC8448ServerHello)]:=$00;
+ if ServerHello.Parse(Damaged,SizeOf(RFC8448ServerHello)) and
+    (not ServerHello.Parse(Damaged,SizeOf(RFC8448ServerHello)+1)) then begin
+  RNLSelfTestSucceeded;
+ end else begin
+  RNLSelfTestFailure;
+ end;
+
+ // Every truncation has to come back false rather than read past the end
+ RNLSelfTestBegin('[DTLS1.3] and every truncation of either is refused ... ');
+ if (not ServerHello.Parse(RFC8448ServerHello,0)) and
+    (not ServerHello.Parse(RFC8448ServerHello,2)) and
+    (not ServerHello.Parse(RFC8448ServerHello,34)) and
+    (not ServerHello.Parse(RFC8448ServerHello,SizeOf(RFC8448ServerHello)-1)) and
+    (not ServerHello.Parse(RFC8448ServerHello,SizeOf(RFC8448ServerHello)-20)) and
+    (not ServerHello.Parse(RFC8448HelloRetryRequest,SizeOf(RFC8448HelloRetryRequest)-1)) and
+    (not ServerHello.Parse(RFC8448HelloRetryRequest,40)) then begin
+  RNLSelfTestSucceeded;
+ end else begin
+  RNLSelfTestFailure;
+ end;
+
+end;
+
+// What the CertificateVerify signature covers, against a blob computed apart from this code. The
+// shape is sixty four spaces, a context string, a zero byte and the transcript hash, and every one
+// of those four parts exists to stop a signature being taken for one it is not: the spaces keep a
+// TLS 1.3 signature from being replayed as a pre-1.3 one, the context keeps the server's from
+// being reflected back as the client's, and the zero byte keeps the two from running together.
+//
+// The signature check on top of this is not pinned here and cannot be: it needs a private key, and
+// this library has none - a client presents no certificate. What holds it is the handshake against
+// the server stub, which does sign.
+// The 1.3 Certificate message is a container and nothing more: this reader splits it into spans
+// and never looks inside one, so what it is held to here is the framing. The certificates below
+// are therefore short blobs and not real ones - a real certificate would test TRNLX509Certificate,
+// which has its own vectors and a real captured chain.
+//
+// The shape is the whole difference from the 1.2 message: a request context in front, and an
+// extension list behind every entry. A reader written for 1.2 and pointed at a 1.3 message reads
+// the context length as the first byte of a certificate and is lost from there on.
+class procedure TRNLDTLS13Certificate.SelfTest;
+const // Empty request context, a list of two entries, each with an empty extension list
+      TwoEntries:array[0..22] of TRNLUInt8=
+       (
+        $00,                          // certificate_request_context, empty
+        $00,$00,$13,                  // certificate_list, nineteen bytes
+        $00,$00,$04,$a0,$a1,$a2,$a3,  // cert_data of four
+        $00,$00,                      // extensions, empty
+        $00,$00,$05,$b0,$b1,$b2,$b3,$b4,
+        $00,$00
+       );
+      // The same, except that the server answered with a request context nobody asked for
+      WithContext:array[0..11] of TRNLUInt8=
+       (
+        $01,$ff,
+        $00,$00,$07,
+        $00,$00,$02,$c0,$c1,
+        $00,$00
+       );
+      // An empty list, which is a server presenting nothing at all
+      EmptyList:array[0..3] of TRNLUInt8=
+       (
+        $00,$00,$00,$00
+       );
+      // A certificate of length zero, which cert_data<1..2^24-1> does not allow
+      EmptyCertificate:array[0..8] of TRNLUInt8=
+       (
+        $00,$00,$00,$05,$00,$00,$00,$00,$00
+       );
+var Certificate:TRNLDTLS13Certificate;
+begin
+
+ RNLSelfTestBegin('[DTLS1.3] the Certificate message splits into its entries ... ');
+ if Certificate.Parse(TwoEntries,SizeOf(TwoEntries)) and
+    (Certificate.ChainLength=2) and
+    (Certificate.Chain[0].Size=4) and
+    (Certificate.Chain[0].Data^[0]=$a0) and
+    (Certificate.Chain[0].Data^[3]=$a3) and
+    (Certificate.Chain[1].Size=5) and
+    (Certificate.Chain[1].Data^[0]=$b0) and
+    (Certificate.Chain[1].Data^[4]=$b4) then begin
+  RNLSelfTestSucceeded;
+ end else begin
+  RNLSelfTestFailure;
+ end;
+
+ // A request context comes back only in answer to a CertificateRequest, and this client never
+ // sends one. A server which puts something there is answering a question nobody asked.
+ RNLSelfTestBegin('[DTLS1.3] a request context nobody asked for is refused ... ');
+ if not Certificate.Parse(WithContext,SizeOf(WithContext)) then begin
+  RNLSelfTestSucceeded;
+ end else begin
+  RNLSelfTestFailure;
+ end;
+
+ RNLSelfTestBegin('[DTLS1.3] an empty list and a zero length certificate are refused ... ');
+ if (not Certificate.Parse(EmptyList,SizeOf(EmptyList))) and
+    (not Certificate.Parse(EmptyCertificate,SizeOf(EmptyCertificate))) then begin
+  RNLSelfTestSucceeded;
+ end else begin
+  RNLSelfTestFailure;
+ end;
+
+ // Every truncation, and one byte too many at the end - the second of which is the case the
+ // trailing check exists for and which no truncation would ever reach
+ RNLSelfTestBegin('[DTLS1.3] and every truncation, and one byte too many, are refused ... ');
+ if (not Certificate.Parse(TwoEntries,0)) and
+    (not Certificate.Parse(TwoEntries,1)) and
+    (not Certificate.Parse(TwoEntries,4)) and
+    (not Certificate.Parse(TwoEntries,10)) and
+    (not Certificate.Parse(TwoEntries,SizeOf(TwoEntries)-1)) and
+    Certificate.Parse(TwoEntries,SizeOf(TwoEntries)) then begin
+  RNLSelfTestSucceeded;
+ end else begin
+  RNLSelfTestFailure;
+ end;
+
+end;
+
+class procedure TRNLDTLS13CertificateVerify.SelfTest;
+const TranscriptHash:array[0..31] of TRNLUInt8=
+       (
+        $86,$0c,$06,$ed,$c0,$78,$58,$ee,$8e,$78,$f0,$e7,
+        $42,$8c,$58,$ed,$d6,$b4,$3f,$2c,$a3,$e6,$e9,$5f,
+        $02,$ed,$06,$3c,$f0,$e1,$ca,$d8
+       );
+      ExpectedSignedContent:array[0..129] of TRNLUInt8=
+       (
+        $20,$20,$20,$20,$20,$20,$20,$20,$20,$20,$20,$20,
+        $20,$20,$20,$20,$20,$20,$20,$20,$20,$20,$20,$20,
+        $20,$20,$20,$20,$20,$20,$20,$20,$20,$20,$20,$20,
+        $20,$20,$20,$20,$20,$20,$20,$20,$20,$20,$20,$20,
+        $20,$20,$20,$20,$20,$20,$20,$20,$20,$20,$20,$20,
+        $20,$20,$20,$20,$54,$4c,$53,$20,$31,$2e,$33,$2c,
+        $20,$73,$65,$72,$76,$65,$72,$20,$43,$65,$72,$74,
+        $69,$66,$69,$63,$61,$74,$65,$56,$65,$72,$69,$66,
+        $79,$00,$86,$0c,$06,$ed,$c0,$78,$58,$ee,$8e,$78,
+        $f0,$e7,$42,$8c,$58,$ed,$d6,$b4,$3f,$2c,$a3,$e6,
+        $e9,$5f,$02,$ed,$06,$3c,$f0,$e1,$ca,$d8
+       );
+var Content,Other:array[0..MaximumSignedContentSize-1] of TRNLUInt8;
+    ContentSize,OtherSize:TRNLSizeInt;
+    Verify:TRNLDTLS13CertificateVerify;
+    Message_:array[0..79] of TRNLUInt8;
+    Index:TRNLSizeInt;
+begin
+
+ RNLSelfTestBegin('[DTLS1.3] the CertificateVerify signed content, byte for byte ... ');
+ if BuildSignedContent(Content,ContentSize,SizeOf(Content),ServerContext,
+                       TranscriptHash,SizeOf(TranscriptHash)) and
+    (ContentSize=SizeOf(ExpectedSignedContent)) and
+    TRNLMemory.SecureIsEqual(Content,ExpectedSignedContent,SizeOf(ExpectedSignedContent)) then begin
+  RNLSelfTestSucceeded;
+ end else begin
+  RNLSelfTestFailure;
+ end;
+
+ // Which is the whole reason the context string is a parameter: the two directions must not
+ // produce the same bytes, or a peer could hand back the signature it was given
+ RNLSelfTestBegin('[DTLS1.3] and the client context gives different bytes ... ');
+ if BuildSignedContent(Other,OtherSize,SizeOf(Other),ClientContext,
+                       TranscriptHash,SizeOf(TranscriptHash)) and
+    (OtherSize=ContentSize) and
+    (not TRNLMemory.SecureIsEqual(Content,Other,ContentSize)) then begin
+  RNLSelfTestSucceeded;
+ end else begin
+  RNLSelfTestFailure;
+ end;
+
+ // A buffer which cannot hold it is refused rather than filled as far as it goes
+ RNLSelfTestBegin('[DTLS1.3] a buffer one byte short is refused ... ');
+ if not BuildSignedContent(Content,ContentSize,SizeOf(ExpectedSignedContent)-1,ServerContext,
+                           TranscriptHash,SizeOf(TranscriptHash)) then begin
+  RNLSelfTestSucceeded;
+ end else begin
+  RNLSelfTestFailure;
+ end;
+
+ // The message itself: an algorithm and a signature, and nothing after it
+ RNLSelfTestBegin('[DTLS1.3] the CertificateVerify message reads back, and its edges do not ... ');
+ Message_[0]:=$04;
+ Message_[1]:=$03;
+ Message_[2]:=0;
+ Message_[3]:=8;
+ for Index:=0 to 7 do begin
+  Message_[4+Index]:=TRNLUInt8($a0+Index);
+ end;
+ if Verify.Parse(Message_,12) and
+    (Verify.Algorithm=TRNLDTLS13ClientHello.SIGNATURE_ECDSA_SECP256R1_SHA256) and
+    (Verify.SignatureSize=8) and
+    (Verify.Signature[0]=$a0) and
+    (Verify.Signature[7]=$a7) and
+    (not Verify.Parse(Message_,11)) and
+    (not Verify.Parse(Message_,13)) and
+    (not Verify.Parse(Message_,3)) and
+    (not Verify.Parse(Message_,0)) then begin
+  RNLSelfTestSucceeded;
+ end else begin
+  RNLSelfTestFailure;
+ end;
+
+ // An empty signature is not a signature
+ RNLSelfTestBegin('[DTLS1.3] and a CertificateVerify with no signature in it is refused ... ');
+ Message_[2]:=0;
+ Message_[3]:=0;
+ if not Verify.Parse(Message_,4) then begin
+  RNLSelfTestSucceeded;
+ end else begin
+  RNLSelfTestFailure;
+ end;
+
+end;
+
+// The ACK message, which DTLS 1.2 has no equivalent of. There a lost record is found by a timer
+// and answered with the whole flight again; here the receiver names the record numbers it actually
+// got, and only what is missing comes back.
+//
+// The vector below is written by hand rather than round tripped, because a round trip through this
+// record's own writer and reader would agree with itself about any layout at all - including one
+// which put the sequence number first, or the epoch in four bytes.
+class procedure TRNLDTLS13ACK.SelfTest;
+const // Two record numbers: epoch 2 sequence 1, and epoch 3 sequence 0. Thirty four bytes: the
+      // uint16 length of thirty two, then two sixteen byte pairs of uint64s.
+      TwoNumbers:array[0..33] of TRNLUInt8=
+       (
+        $00,$20,
+        $00,$00,$00,$00,$00,$00,$00,$02,
+        $00,$00,$00,$00,$00,$00,$00,$01,
+        $00,$00,$00,$00,$00,$00,$00,$03,
+        $00,$00,$00,$00,$00,$00,$00,$00
+       );
+      // An empty one, which is what a receiver sends when it has nothing to acknowledge yet
+      Empty:array[0..1] of TRNLUInt8=
+       (
+        $00,$00
+       );
+      // A length which is not a whole number of record numbers
+      Ragged:array[0..9] of TRNLUInt8=
+       (
+        $00,$08,$00,$00,$00,$00,$00,$00,$00,$02
+       );
+var ACK:TRNLDTLS13ACK;
+    Body:array[0..255] of TRNLUInt8;
+    Longer:array[0..SizeOf(TwoNumbers)] of TRNLUInt8;
+    BodySize,Index:TRNLSizeInt;
+begin
+
+ RNLSelfTestBegin('[DTLS1.3] the ACK message is written exactly as RFC 9147 lays it out ... ');
+ ACK.Initialize;
+ if ACK.Add(2,1) and ACK.Add(3,0) and
+    ACK.Write_(Body,BodySize,SizeOf(Body)) and
+    (BodySize=SizeOf(TwoNumbers)) and
+    TRNLMemory.SecureIsEqual(Body,TwoNumbers,SizeOf(TwoNumbers)) then begin
+  RNLSelfTestSucceeded;
+ end else begin
+  RNLSelfTestFailure;
+ end;
+
+ RNLSelfTestBegin('[DTLS1.3] and read back with both numbers in the order they went in ... ');
+ if ACK.Parse(TwoNumbers,SizeOf(TwoNumbers)) and
+    (ACK.Count=2) and
+    (ACK.Numbers[0].Epoch=2) and (ACK.Numbers[0].SequenceNumber=1) and
+    (ACK.Numbers[1].Epoch=3) and (ACK.Numbers[1].SequenceNumber=0) then begin
+  RNLSelfTestSucceeded;
+ end else begin
+  RNLSelfTestFailure;
+ end;
+
+ // An empty ACK is a legitimate message and not an error: it says "nothing yet"
+ RNLSelfTestBegin('[DTLS1.3] an empty ACK is a message and not a fault ... ');
+ ACK.Initialize;
+ if ACK.Write_(Body,BodySize,SizeOf(Body)) and
+    (BodySize=2) and
+    TRNLMemory.SecureIsEqual(Body,Empty,SizeOf(Empty)) and
+    ACK.Parse(Empty,SizeOf(Empty)) and
+    (ACK.Count=0) then begin
+  RNLSelfTestSucceeded;
+ end else begin
+  RNLSelfTestFailure;
+ end;
+
+ // Sixteen bytes too few is still a multiple of sixteen, so the two checks are not the same one
+ RNLSelfTestBegin('[DTLS1.3] a ragged length, a wrong one and a full list are refused ... ');
+ ACK.Initialize;
+ for Index:=0 to TRNLDTLS13ACK.MaximumRecordNumbers-1 do begin
+  if not ACK.Add(2,Index) then begin
+   RNLSelfTestFailure;
+   exit;
+  end;
+ end;
+ Move(TwoNumbers,Longer,SizeOf(TwoNumbers));
+ Longer[SizeOf(TwoNumbers)]:=$00;
+ // The full list first, because Parse starts a new one and would empty it
+ if (not ACK.Add(2,999)) and
+    (not ACK.Write_(Body,BodySize,17)) and
+    (not ACK.Parse(Ragged,SizeOf(Ragged))) and
+    (not ACK.Parse(TwoNumbers,SizeOf(TwoNumbers)-16)) and
+    (not ACK.Parse(TwoNumbers,SizeOf(TwoNumbers)-1)) and
+    (not ACK.Parse(TwoNumbers,1)) and
+    // And one byte too many, which is the other direction and the one no truncation reaches: the
+    // length has to be what arrived and not merely fit inside it
+    (not ACK.Parse(Longer,SizeOf(Longer))) then begin
+  RNLSelfTestSucceeded;
+ end else begin
+  RNLSelfTestFailure;
+ end;
+
+end;
+
+
 class function TRNLBLAKE2BContext.RotateRight64(const aValue:TRNLUInt64;const aBits:TRNLUInt32):TRNLUInt64;
 begin
 {$ifdef fpc}
@@ -22386,6 +23600,1499 @@ begin
 
 end;
 
+procedure TRNLDTLS13Transcript.Initialize;
+begin
+ fContext.Initialize;
+end;
+
+procedure TRNLDTLS13Transcript.InitializeWithMessageHash(const aClientHelloHash;
+                                                         const aClientHelloHashSize:TRNLSizeInt);
+var Header:array[0..3] of TRNLUInt8;
+begin
+ fContext.Initialize;
+ // message_hash, a uint24 length, and the hash itself. Everything which came before is gone: that
+ // is the point of it, so that a server which kept no state can arrive at the same transcript.
+ Header[0]:=TYPE_MESSAGE_HASH;
+ Header[1]:=0;
+ Header[2]:=TRNLUInt8((aClientHelloHashSize shr 8) and $ff);
+ Header[3]:=TRNLUInt8(aClientHelloHashSize and $ff);
+ fContext.Update(Header[0],SizeOf(Header));
+ if aClientHelloHashSize>0 then begin
+  fContext.Update(aClientHelloHash,aClientHelloHashSize);
+ end;
+end;
+
+procedure TRNLDTLS13Transcript.AddMessage(const aMessageType:TRNLUInt8;
+                                          const aBody;const aBodySize:TRNLSizeInt);
+var Header:array[0..3] of TRNLUInt8;
+begin
+ // The TLS 1.3 header and nothing else. RFC 9147 section 5.2: whatever the record layer did with
+ // this message on the way - fragmented it, numbered it, sent it three times - none of that is
+ // hashed, because the other end may have seen a different cutting of the same message.
+ Header[0]:=aMessageType;
+ Header[1]:=TRNLUInt8((aBodySize shr 16) and $ff);
+ Header[2]:=TRNLUInt8((aBodySize shr 8) and $ff);
+ Header[3]:=TRNLUInt8(aBodySize and $ff);
+ fContext.Update(Header[0],SizeOf(Header));
+ if aBodySize>0 then begin
+  fContext.Update(aBody,aBodySize);
+ end;
+end;
+
+procedure TRNLDTLS13Transcript.Snapshot(out aHash);
+var Context:TRNLSHA256Context;
+begin
+ Context:=fContext;
+ Context.Finalize(aHash);
+end;
+
+class function TRNLDTLS13ClientHello.Write_(out aBody;out aBodySize:TRNLSizeInt;
+                                            const aMaximumBodySize:TRNLSizeInt;
+                                            const aRandom;
+                                            const aX25519PublicKey;
+                                            const aSecp256r1PublicKey;
+                                            const aSecp256r1PublicKeySize:TRNLSizeInt;
+                                            const aCookie;const aCookieSize:TRNLSizeInt;
+                                            const aServerName:TRNLRawByteString):boolean;
+var Writer:TRNLTLSWriter;
+    Extensions,Vector,Inner,Shares:TRNLSizeInt;
+begin
+
+ aBodySize:=0;
+ if (aCookieSize<0) or (aSecp256r1PublicKeySize<0) then begin
+  result:=false;
+  exit;
+ end;
+
+ Writer.Initialize(aBody,aMaximumBodySize);
+
+ // legacy_version stays at DTLS 1.2. RFC 9147 section 5.3: the real version travels in
+ // supported_versions, and this field only exists so that anything in the path which reads the
+ // old header sees something it recognises.
+ Writer.WriteUInt16(VERSION_DTLS12);
+ Writer.WriteBytes(aRandom,RandomSize);
+ // No session id: TLS 1.3 keeps the field for middlebox compatibility, and a client which never
+ // resumes has nothing to put in it
+ Writer.WriteUInt8(0);
+ // legacy_cookie, which RFC 9147 section 5.3 requires to be empty in DTLS 1.3 - the cookie of a
+ // HelloRetryRequest travels as an extension now, not here
+ Writer.WriteUInt8(0);
+ Writer.WriteUInt16(2);
+ Writer.WriteUInt16(CIPHER_SUITE_CHACHA20_POLY1305_SHA256);
+ Writer.WriteUInt8(1);
+ Writer.WriteUInt8(0);
+
+ Extensions:=Writer.BeginVector16;
+
+ if Length(aServerName)>0 then begin
+  Writer.WriteUInt16(EXTENSION_SERVER_NAME);
+  Vector:=Writer.BeginVector16;
+  Inner:=Writer.BeginVector16;
+  Writer.WriteUInt8(0);
+  Writer.WriteUInt16(TRNLUInt16(Length(aServerName)));
+  Writer.WriteBytes(aServerName[1],Length(aServerName));
+  Writer.EndVector16(Inner);
+  Writer.EndVector16(Vector);
+ end;
+
+ Writer.WriteUInt16(EXTENSION_SUPPORTED_VERSIONS);
+ Vector:=Writer.BeginVector16;
+ Inner:=Writer.BeginVector8;
+ Writer.WriteUInt16(VERSION_DTLS13);
+ Writer.EndVector8(Inner);
+ Writer.EndVector16(Vector);
+
+ Writer.WriteUInt16(EXTENSION_SUPPORTED_GROUPS);
+ Vector:=Writer.BeginVector16;
+ Inner:=Writer.BeginVector16;
+ Writer.WriteUInt16(GROUP_X25519);
+ Writer.WriteUInt16(GROUP_SECP256R1);
+ Writer.EndVector16(Inner);
+ Writer.EndVector16(Vector);
+
+ Writer.WriteUInt16(EXTENSION_SIGNATURE_ALGORITHMS);
+ Vector:=Writer.BeginVector16;
+ Inner:=Writer.BeginVector16;
+ Writer.WriteUInt16(SIGNATURE_ECDSA_SECP256R1_SHA256);
+ Writer.WriteUInt16(SIGNATURE_ECDSA_SECP384R1_SHA384);
+ Writer.EndVector16(Inner);
+ Writer.EndVector16(Vector);
+
+ // Both shares at once. Offering one and being told to use the other costs a HelloRetryRequest,
+ // which is a whole round trip; two shares cost sixty five bytes.
+ Writer.WriteUInt16(EXTENSION_KEY_SHARE);
+ Vector:=Writer.BeginVector16;
+ Shares:=Writer.BeginVector16;
+ Writer.WriteUInt16(GROUP_X25519);
+ Inner:=Writer.BeginVector16;
+ Writer.WriteBytes(aX25519PublicKey,SizeOf(TRNLKey));
+ Writer.EndVector16(Inner);
+ if aSecp256r1PublicKeySize>0 then begin
+  Writer.WriteUInt16(GROUP_SECP256R1);
+  Inner:=Writer.BeginVector16;
+  Writer.WriteBytes(aSecp256r1PublicKey,aSecp256r1PublicKeySize);
+  Writer.EndVector16(Inner);
+ end;
+ Writer.EndVector16(Shares);
+ Writer.EndVector16(Vector);
+
+ // Only present in the second ClientHello, and then it carries back exactly what the
+ // HelloRetryRequest asked for
+ if aCookieSize>0 then begin
+  Writer.WriteUInt16(EXTENSION_COOKIE);
+  Vector:=Writer.BeginVector16;
+  Inner:=Writer.BeginVector16;
+  Writer.WriteBytes(aCookie,aCookieSize);
+  Writer.EndVector16(Inner);
+  Writer.EndVector16(Vector);
+ end;
+
+ Writer.EndVector16(Extensions);
+
+ result:=Writer.Valid;
+ if result then begin
+  aBodySize:=Writer.Size;
+ end;
+
+end;
+
+function TRNLDTLS13ServerHello.Parse(const aData;const aDataSize:TRNLSizeInt):boolean;
+var Reader,Extensions,Inner:TRNLTLSReader;
+    Data:PRNLUInt8Array;
+    Size:TRNLSizeInt;
+    ExtensionType:TRNLUInt16;
+begin
+
+ result:=false;
+ FillChar(self,SizeOf(TRNLDTLS13ServerHello),#0);
+
+ Reader.Initialize(aData,aDataSize);
+
+ if not Reader.ReadUInt16(LegacyVersion) then begin
+  exit;
+ end;
+ if not Reader.ReadBytes(Data,TRNLDTLS13ClientHello.RandomSize) then begin
+  exit;
+ end;
+ Move(Data^[0],Random_[0],TRNLDTLS13ClientHello.RandomSize);
+ // Not a flag the server sets: a HelloRetryRequest is a ServerHello whose random is one fixed
+ // published value, so that a client which never heard of them treats it as an ordinary one
+ IsHelloRetryRequest:=TRNLMemory.SecureIsEqual(Random_,HelloRetryRequestRandom,
+                                               SizeOf(HelloRetryRequestRandom));
+
+ // The session id echo, which this client never sent anything in
+ if not Reader.ReadVector8(Data,Size) then begin
+  exit;
+ end;
+
+ if not (Reader.ReadUInt16(CipherSuite) and
+         Reader.ReadUInt8(LegacyCompressionMethod)) then begin
+  exit;
+ end;
+
+ // Extensions are not optional in a TLS 1.3 ServerHello: supported_versions has to be there or
+ // it is not a 1.3 ServerHello at all
+ if not Reader.ReadVector16(Data,Size) then begin
+  exit;
+ end;
+ Extensions.Initialize(Data^[0],Size);
+
+ while not Extensions.AtEnd do begin
+
+  if not (Extensions.ReadUInt16(ExtensionType) and
+          Extensions.ReadVector16(Data,Size)) then begin
+   exit;
+  end;
+
+  if ExtensionType=TRNLDTLS13ClientHello.EXTENSION_SUPPORTED_VERSIONS then begin
+   // In a ServerHello this is one version and not a list, unlike in the ClientHello
+   if Size<>2 then begin
+    exit;
+   end;
+   SelectedVersion:=(TRNLUInt16(Data^[0]) shl 8) or TRNLUInt16(Data^[1]);
+   HasSupportedVersions:=true;
+  end else if ExtensionType=TRNLDTLS13ClientHello.EXTENSION_KEY_SHARE then begin
+   Inner.Initialize(Data^[0],Size);
+   if not Inner.ReadUInt16(KeyShareGroup) then begin
+    exit;
+   end;
+   if IsHelloRetryRequest then begin
+    // A HelloRetryRequest names the group it wants and sends no share of its own
+    if not Inner.AtEnd then begin
+     exit;
+    end;
+    KeyShareSize:=0;
+   end else begin
+    if not Inner.ReadVector16(Data,Size) then begin
+     exit;
+    end;
+    if (Size<1) or (Size>MaximumKeyShareSize) then begin
+     exit;
+    end;
+    Move(Data^[0],KeyShare[0],Size);
+    KeyShareSize:=Size;
+    if not Inner.AtEnd then begin
+     exit;
+    end;
+   end;
+   HasKeyShare:=true;
+  end else if ExtensionType=TRNLDTLS13ClientHello.EXTENSION_COOKIE then begin
+   Inner.Initialize(Data^[0],Size);
+   if not Inner.ReadVector16(Data,Size) then begin
+    exit;
+   end;
+   if (Size<1) or (Size>MaximumCookieSize) or (not Inner.AtEnd) then begin
+    exit;
+   end;
+   Move(Data^[0],Cookie[0],Size);
+   CookieSize:=Size;
+   HasCookie:=true;
+  end;
+  // Anything else is left alone. A ServerHello may only carry extensions the client offered, and
+  // refusing an unknown one here would be a policy decision in a reader.
+
+ end;
+
+ result:=Reader.AtEnd;
+
+end;
+
+function TRNLDTLS13Certificate.Parse(const aData;const aDataSize:TRNLSizeInt):boolean;
+var Reader,List,Entry:TRNLTLSReader;
+    Data:PRNLUInt8Array;
+    Size:TRNLSizeInt;
+    ExtensionType:TRNLUInt16;
+begin
+
+ result:=false;
+ ChainLength:=0;
+ FillChar(Chain,SizeOf(TRNLX509.TChainEntries),#0);
+
+ Reader.Initialize(aData,aDataSize);
+
+ // The request context, which a server may only send back in answer to a CertificateRequest.
+ // This client never sends one, so anything in here is a server answering a question nobody asked.
+ if not Reader.ReadVector8(Data,Size) then begin
+  exit;
+ end;
+ if Size<>0 then begin
+  exit;
+ end;
+
+ if not Reader.ReadVector24(Data,Size) then begin
+  exit;
+ end;
+ List.Initialize(Data^[0],Size);
+
+ while not List.AtEnd do begin
+  if ChainLength>=TRNLX509.MaximumChainLength then begin
+   exit;
+  end;
+  if not List.ReadVector24(Data,Size) then begin
+   exit;
+  end;
+  if Size<1 then begin
+   exit;
+  end;
+  Chain[ChainLength].Data:=Data;
+  Chain[ChainLength].Size:=Size;
+  inc(ChainLength);
+  // Every entry carries its own extension list. Read past and no further: the only one defined for
+  // a server certificate is status_request, and a client which did not ask for stapled revocation
+  // cannot be sent any.
+  if not List.ReadVector16(Data,Size) then begin
+   exit;
+  end;
+  Entry.Initialize(Data^[0],Size);
+  while not Entry.AtEnd do begin
+   if not (Entry.ReadUInt16(ExtensionType) and Entry.ReadVector16(Data,Size)) then begin
+    exit;
+   end;
+  end;
+ end;
+
+ // A server which presents nothing has presented nothing, and that is not a certificate message
+ // with an empty list, it is a handshake which cannot continue
+ result:=(ChainLength>0) and Reader.AtEnd;
+
+end;
+
+function TRNLDTLS13CertificateVerify.Parse(const aData;const aDataSize:TRNLSizeInt):boolean;
+var Reader:TRNLTLSReader;
+    Data:PRNLUInt8Array;
+    Size:TRNLSizeInt;
+begin
+
+ result:=false;
+ FillChar(self,SizeOf(TRNLDTLS13CertificateVerify),#0);
+
+ Reader.Initialize(aData,aDataSize);
+ if not Reader.ReadUInt16(Algorithm) then begin
+  exit;
+ end;
+ if not Reader.ReadVector16(Data,Size) then begin
+  exit;
+ end;
+ if (Size<1) or (Size>MaximumSignatureSize) then begin
+  exit;
+ end;
+ Move(Data^[0],Signature[0],Size);
+ SignatureSize:=Size;
+
+ result:=Reader.AtEnd;
+
+end;
+
+class function TRNLDTLS13CertificateVerify.BuildSignedContent(out aContent;
+                                                              out aContentSize:TRNLSizeInt;
+                                                              const aMaximumContentSize:TRNLSizeInt;
+                                                              const aContext:TRNLRawByteString;
+                                                              const aTranscriptHash;
+                                                              const aTranscriptHashSize:TRNLSizeInt):boolean;
+var Content:PRNLUInt8Array;
+    Total:TRNLSizeInt;
+begin
+
+ result:=false;
+ aContentSize:=0;
+
+ Total:=PrefixSize+Length(aContext)+1+aTranscriptHashSize;
+ if (aTranscriptHashSize<1) or (Length(aContext)<1) or (Total>aMaximumContentSize) then begin
+  exit;
+ end;
+
+ Content:=PRNLUInt8Array(TRNLPointer(@aContent));
+ // Sixty four spaces. They are not padding: they make the signed input of TLS 1.3 begin with
+ // something no earlier version ever signed, so a signature cannot be carried across versions.
+ FillChar(Content^[0],PrefixSize,32);
+ Move(aContext[1],Content^[PrefixSize],Length(aContext));
+ // And the separator, without which a context string could run into the hash behind it
+ Content^[PrefixSize+Length(aContext)]:=0;
+ Move(aTranscriptHash,Content^[PrefixSize+Length(aContext)+1],aTranscriptHashSize);
+
+ aContentSize:=Total;
+ result:=true;
+
+end;
+
+function TRNLDTLS13CertificateVerify.VerifyWith(const aCertificate:TRNLX509Certificate;
+                                                const aTranscriptHash;
+                                                const aTranscriptHashSize:TRNLSizeInt):boolean;
+var Content:array[0..MaximumSignedContentSize-1] of TRNLUInt8;
+    ContentSize,ElementSize:TRNLSizeInt;
+    Digest:TRNLSHA384Hash;
+    DigestSize:TRNLSizeInt;
+    Context:TRNLSHA512Context;
+    Sha256:TRNLSHA256Context;
+    R_,S:array[0..TRNLP384.ElementSize-1] of TRNLUInt8;
+begin
+
+ result:=false;
+
+ // The algorithm names the curve as much as the digest, and both have to be the ones the
+ // certificate actually carries. A P-384 key with ecdsa_secp256r1_sha256 is a peer describing a
+ // signature it did not make.
+ if Algorithm=TRNLDTLS13ClientHello.SIGNATURE_ECDSA_SECP256R1_SHA256 then begin
+  if aCertificate.PublicKeyCurve<>RNL_X509_PUBLIC_KEY_CURVE_P256 then begin
+   exit;
+  end;
+  ElementSize:=TRNLP256.ElementSize;
+ end else if Algorithm=TRNLDTLS13ClientHello.SIGNATURE_ECDSA_SECP384R1_SHA384 then begin
+  if aCertificate.PublicKeyCurve<>RNL_X509_PUBLIC_KEY_CURVE_P384 then begin
+   exit;
+  end;
+  ElementSize:=TRNLP384.ElementSize;
+ end else begin
+  exit;
+ end;
+
+ if not BuildSignedContent(Content,ContentSize,SizeOf(Content),
+                           ServerContext,aTranscriptHash,aTranscriptHashSize) then begin
+  exit;
+ end;
+
+ if Algorithm=TRNLDTLS13ClientHello.SIGNATURE_ECDSA_SECP256R1_SHA256 then begin
+  Sha256.Initialize;
+  Sha256.Update(Content[0],ContentSize);
+  Sha256.Finalize(Digest);
+  DigestSize:=SizeOf(TRNLSHA256Hash);
+ end else begin
+  Context.Initialize384;
+  Context.Update(Content[0],ContentSize);
+  Context.Finalize384(Digest);
+  DigestSize:=SizeOf(TRNLSHA384Hash);
+ end;
+
+ if not TRNLX509.DecodeSignature(Signature[0],SignatureSize,ElementSize,R_,S) then begin
+  exit;
+ end;
+
+ if Algorithm=TRNLDTLS13ClientHello.SIGNATURE_ECDSA_SECP256R1_SHA256 then begin
+  result:=TRNLP256.VerifySignature(aCertificate.PublicKey,aCertificate.PublicKeySize,
+                                   Digest,DigestSize,R_,S);
+ end else begin
+  result:=TRNLP384.VerifySignature(aCertificate.PublicKey,aCertificate.PublicKeySize,
+                                   Digest,DigestSize,R_,S);
+ end;
+
+end;
+
+procedure TRNLDTLS13ACK.Initialize;
+begin
+ Count:=0;
+ FillChar(Numbers,SizeOf(TRecordNumbers),#0);
+end;
+
+function TRNLDTLS13ACK.Add(const aEpoch,aSequenceNumber:TRNLUInt64):boolean;
+begin
+ result:=Count<MaximumRecordNumbers;
+ if result then begin
+  Numbers[Count].Epoch:=aEpoch;
+  Numbers[Count].SequenceNumber:=aSequenceNumber;
+  inc(Count);
+ end;
+end;
+
+function TRNLDTLS13ACK.Write_(out aBody;out aBodySize:TRNLSizeInt;
+                              const aMaximumBodySize:TRNLSizeInt):boolean;
+var Body:PRNLUInt8Array;
+    Index,Offset:TRNLSizeInt;
+begin
+
+ result:=false;
+ aBodySize:=0;
+
+ if (2+(Count*RecordNumberSize))>aMaximumBodySize then begin
+  exit;
+ end;
+
+ Body:=PRNLUInt8Array(TRNLPointer(@aBody));
+ TRNLMemoryAccess.StoreBigEndianUInt16(Body^[0],TRNLUInt16(Count*RecordNumberSize));
+ Offset:=2;
+ for Index:=0 to Count-1 do begin
+  TRNLMemoryAccess.StoreBigEndianUInt64(Body^[Offset],Numbers[Index].Epoch);
+  TRNLMemoryAccess.StoreBigEndianUInt64(Body^[Offset+8],Numbers[Index].SequenceNumber);
+  inc(Offset,RecordNumberSize);
+ end;
+
+ aBodySize:=Offset;
+ result:=true;
+
+end;
+
+function TRNLDTLS13ACK.Parse(const aData;const aDataSize:TRNLSizeInt):boolean;
+var Data:PRNLUInt8Array;
+    Length_,Index,Offset:TRNLSizeInt;
+begin
+
+ result:=false;
+ Initialize;
+
+ if aDataSize<2 then begin
+  exit;
+ end;
+
+ Data:=PRNLUInt8Array(TRNLPointer(@aData));
+ Length_:=TRNLMemoryAccess.LoadBigEndianUInt16(Data^[0]);
+
+ // The length has to be what arrived and a whole number of record numbers. Neither follows from
+ // the other: sixteen bytes too few is still a multiple of sixteen.
+ if (Length_+2)<>aDataSize then begin
+  exit;
+ end;
+ if (Length_ mod RecordNumberSize)<>0 then begin
+  exit;
+ end;
+ if (Length_ div RecordNumberSize)>MaximumRecordNumbers then begin
+  exit;
+ end;
+
+ Offset:=2;
+ for Index:=0 to (Length_ div RecordNumberSize)-1 do begin
+  Numbers[Index].Epoch:=TRNLMemoryAccess.LoadBigEndianUInt64(Data^[Offset]);
+  Numbers[Index].SequenceNumber:=TRNLMemoryAccess.LoadBigEndianUInt64(Data^[Offset+8]);
+  inc(Offset,RecordNumberSize);
+ end;
+ Count:=Length_ div RecordNumberSize;
+
+ result:=true;
+
+end;
+
+constructor TRNLDTLS13Client.Create(const aRandomGenerator:TRNLRandomGenerator;
+                                    const aServerName:TRNLRawByteString;
+                                    const aTrustedRoots:TRNLX509.TChainEntries;
+                                    const aCountTrustedRoots:TRNLSizeInt;
+                                    const aNowSecondsSinceUnixEpoch:TRNLInt64);
+var Index:TRNLSizeInt;
+begin
+
+ inherited Create;
+
+ fRandomGenerator:=aRandomGenerator;
+ fServerName:=aServerName;
+ fTrustedRoots:=aTrustedRoots;
+ fCountTrustedRoots:=aCountTrustedRoots;
+ fNowSecondsSinceUnixEpoch:=aNowSecondsSinceUnixEpoch;
+
+ fState:=RNL_DTLS13_CLIENT_STATE_IDLE;
+ fFailure:=RNL_DTLS12_CLIENT_FAILURE_NONE;
+ fAlertDescription:=0;
+ fCertificateVerdict:=RNL_X509_VERDICT_ACCEPTED;
+
+ FillChar(fClientRandom,SizeOf(fClientRandom),#0);
+ FillChar(fX25519PublicKey,SizeOf(TRNLKey),#0);
+ FillChar(fX25519PrivateKey,SizeOf(TRNLKey),#0);
+ FillChar(fSecp256r1PrivateKey,SizeOf(fSecp256r1PrivateKey),#0);
+ FillChar(fSecp256r1PublicKey,SizeOf(fSecp256r1PublicKey),#0);
+
+ fTranscript.Initialize;
+ fClientHandshakeKeys.Clear;
+ fServerHandshakeKeys.Clear;
+ fClientApplicationKeys.Clear;
+ fServerApplicationKeys.Clear;
+ FillChar(fLeafCertificate,SizeOf(TRNLX509Certificate),#0);
+ FillChar(fTranscriptBeforeCertificateVerify,SizeOf(TRNLSHA256Hash),#0);
+ FillChar(fTranscriptBeforeServerFinished,SizeOf(TRNLSHA256Hash),#0);
+
+ fSendEpoch:=EpochInitial;
+ fReceiveEpoch:=EpochInitial;
+ for Index:=0 to 3 do begin
+  fSendSequenceNumbers[Index]:=0;
+  fReplayWindows[Index].Initialize;
+ end;
+
+ fFlightSize:=0;
+ fCountFlightEntries:=0;
+ fFlightPending:=false;
+ fRetransmissionTimeout:=InitialRetransmissionTimeout;
+ fRetransmitAt:=0;
+ fCountRetransmissions:=0;
+
+ fOutgoingHead:=0;
+ fCountOutgoing:=0;
+ fApplicationDataHead:=0;
+ fCountApplicationData:=0;
+
+ fReassembler.Initialize;
+ fDeferredSize:=0;
+ fExpectedReceiveMessageSequence:=0;
+ fNextSendMessageSequence:=0;
+ fPendingACK.Initialize;
+
+end;
+
+destructor TRNLDTLS13Client.Destroy;
+begin
+ FillChar(fX25519PrivateKey,SizeOf(TRNLKey),#0);
+ FillChar(fSecp256r1PrivateKey,SizeOf(fSecp256r1PrivateKey),#0);
+ FillChar(fFlight,SizeOf(fFlight),#0);
+ fKeySchedule.Clear;
+ fClientHandshakeKeys.Clear;
+ fServerHandshakeKeys.Clear;
+ fClientApplicationKeys.Clear;
+ fServerApplicationKeys.Clear;
+ inherited Destroy;
+end;
+
+procedure TRNLDTLS13Client.Fail(const aFailure:TRNLDTLS12ClientFailure;
+                                const aAlertDescription:TRNLUInt8);
+var Alert:array[0..1] of TRNLUInt8;
+    Datagram:array[0..127] of TRNLUInt8;
+    DatagramSize:TRNLSizeUInt;
+    Sent:boolean;
+begin
+
+ if fState=RNL_DTLS13_CLIENT_STATE_FAILED then begin
+  exit;
+ end;
+
+ if aAlertDescription<>0 then begin
+  Alert[0]:=ALERT_LEVEL_FATAL;
+  Alert[1]:=aAlertDescription;
+  if fSendEpoch=EpochInitial then begin
+   Sent:=TRNLDTLS12Record.WritePlain(Datagram[0],DatagramSize,SizeOf(Datagram),
+                                     0,fSendSequenceNumbers[EpochInitial],
+                                     TRNLDTLS12Record.CONTENT_TYPE_ALERT,Alert[0],2);
+   if Sent then begin
+    inc(fSendSequenceNumbers[EpochInitial]);
+   end;
+  end else begin
+   // An alert after the keys exist goes out protected, like everything else in that epoch
+   if fSendEpoch=EpochApplication then begin
+    Sent:=TRNLDTLSRecord.Protect(Datagram[0],DatagramSize,SizeOf(Datagram),
+                                 fClientApplicationKeys,fSendEpoch,
+                                 fSendSequenceNumbers[EpochApplication],
+                                 TRNLDTLSRecord.CONTENT_TYPE_ALERT,Alert[0],2);
+   end else begin
+    Sent:=TRNLDTLSRecord.Protect(Datagram[0],DatagramSize,SizeOf(Datagram),
+                                 fClientHandshakeKeys,fSendEpoch,
+                                 fSendSequenceNumbers[EpochHandshake],
+                                 TRNLDTLSRecord.CONTENT_TYPE_ALERT,Alert[0],2);
+   end;
+   if Sent then begin
+    inc(fSendSequenceNumbers[fSendEpoch]);
+   end;
+  end;
+  if Sent then begin
+   QueueOutgoing(Datagram[0],TRNLSizeInt(DatagramSize));
+  end;
+ end;
+
+ fFailure:=aFailure;
+ fState:=RNL_DTLS13_CLIENT_STATE_FAILED;
+ fFlightPending:=false;
+
+end;
+
+function TRNLDTLS13Client.QueueOutgoing(const aData;const aDataSize:TRNLSizeInt):boolean;
+var Index:TRNLSizeInt;
+begin
+ result:=false;
+ if (aDataSize<=0) or (aDataSize>MaximumDatagramSize) or
+    (fCountOutgoing>=MaximumQueuedDatagrams) then begin
+  exit;
+ end;
+ Index:=(fOutgoingHead+fCountOutgoing) mod MaximumQueuedDatagrams;
+ Move(aData,fOutgoing[Index].Data[0],aDataSize);
+ fOutgoing[Index].Size:=aDataSize;
+ inc(fCountOutgoing);
+ result:=true;
+end;
+
+procedure TRNLDTLS13Client.BeginFlight;
+begin
+ fFlightSize:=0;
+ fCountFlightEntries:=0;
+ fCountRetransmissions:=0;
+ fRetransmissionTimeout:=InitialRetransmissionTimeout;
+end;
+
+function TRNLDTLS13Client.AppendHandshakeMessage(const aMessageType:TRNLUInt8;
+                                                 const aBody;const aBodySize:TRNLSizeInt;
+                                                 const aEpoch:TRNLUInt64):boolean;
+var Total:TRNLSizeInt;
+begin
+
+ result:=false;
+ Total:=TRNLDTLS12Handshake.HeaderSize+aBodySize;
+ if (aBodySize<0) or
+    (fCountFlightEntries>=MaximumFlightEntries) or
+    ((fFlightSize+Total)>MaximumFlightSize) then begin
+  exit;
+ end;
+
+ // On the wire the DTLS header, with its sequence number and its fragment fields
+ TRNLDTLS12Handshake.WriteHeader(fFlight[fFlightSize],aMessageType,aBodySize,
+                                 fNextSendMessageSequence,0,aBodySize);
+ if aBodySize>0 then begin
+  Move(aBody,fFlight[fFlightSize+TRNLDTLS12Handshake.HeaderSize],aBodySize);
+ end;
+
+ // In the transcript the TLS one, without them. RFC 9147 section 5.2, and the whole reason
+ // TRNLDTLS13Transcript refuses to take a sequence number at all.
+ fTranscript.AddMessage(aMessageType,aBody,aBodySize);
+
+ fFlightEntries[fCountFlightEntries].Offset:=fFlightSize;
+ fFlightEntries[fCountFlightEntries].Size:=Total;
+ fFlightEntries[fCountFlightEntries].ContentType:=TRNLDTLSRecord.CONTENT_TYPE_HANDSHAKE;
+ fFlightEntries[fCountFlightEntries].Epoch:=aEpoch;
+ inc(fCountFlightEntries);
+ inc(fFlightSize,Total);
+ inc(fNextSendMessageSequence);
+
+ result:=true;
+
+end;
+
+function TRNLDTLS13Client.TransmitFlight(const aNow:TRNLTime):boolean;
+var Index,DatagramSize,RecordSize:TRNLSizeInt;
+    Datagram:array[0..MaximumDatagramSize-1] of TRNLUInt8;
+    Written:TRNLSizeUInt;
+    Ok:boolean;
+begin
+
+ result:=false;
+ DatagramSize:=0;
+
+ for Index:=0 to fCountFlightEntries-1 do begin
+
+  if fFlightEntries[Index].Epoch=EpochInitial then begin
+   RecordSize:=TRNLDTLS12Record.HeaderSize+fFlightEntries[Index].Size;
+  end else begin
+   RecordSize:=TRNLDTLSRecord.SentHeaderSize+fFlightEntries[Index].Size+1+TRNLDTLSRecord.TagSize;
+  end;
+  if RecordSize>MaximumDatagramSize then begin
+   exit;
+  end;
+  if (DatagramSize+RecordSize)>MaximumDatagramSize then begin
+   if not QueueOutgoing(Datagram[0],DatagramSize) then begin
+    exit;
+   end;
+   DatagramSize:=0;
+  end;
+
+  if fFlightEntries[Index].Epoch=EpochInitial then begin
+   // Epoch zero is a DTLSPlaintext record, the same thirteen byte header DTLS 1.2 uses
+   Ok:=TRNLDTLS12Record.WritePlain(Datagram[DatagramSize],Written,
+                                   TRNLSizeUInt(MaximumDatagramSize-DatagramSize),
+                                   0,fSendSequenceNumbers[EpochInitial],
+                                   fFlightEntries[Index].ContentType,
+                                   fFlight[fFlightEntries[Index].Offset],
+                                   fFlightEntries[Index].Size);
+  end else begin
+   Ok:=TRNLDTLSRecord.Protect(Datagram[DatagramSize],Written,
+                              TRNLSizeUInt(MaximumDatagramSize-DatagramSize),
+                              fClientHandshakeKeys,
+                              fFlightEntries[Index].Epoch,
+                              fSendSequenceNumbers[fFlightEntries[Index].Epoch],
+                              fFlightEntries[Index].ContentType,
+                              fFlight[fFlightEntries[Index].Offset],
+                              fFlightEntries[Index].Size);
+  end;
+  if not Ok then begin
+   exit;
+  end;
+  inc(fSendSequenceNumbers[fFlightEntries[Index].Epoch]);
+  inc(DatagramSize,TRNLSizeInt(Written));
+
+ end;
+
+ if DatagramSize>0 then begin
+  if not QueueOutgoing(Datagram[0],DatagramSize) then begin
+   exit;
+  end;
+ end;
+
+ fFlightPending:=true;
+ fRetransmitAt:=TRNLUInt64(aNow)+fRetransmissionTimeout;
+ result:=true;
+
+end;
+
+function TRNLDTLS13Client.BuildClientHello(const aNow:TRNLTime):boolean;
+var Body:array[0..(MaximumFlightSize-TRNLDTLS12Handshake.HeaderSize)-1] of TRNLUInt8;
+    BodySize:TRNLSizeInt;
+    Nothing:TRNLUInt8;
+begin
+
+ result:=false;
+ Nothing:=0;
+
+ // No cookie, ever. A cookie only comes back from a HelloRetryRequest, and this client refuses
+ // those outright - see HandleServerHello for why offering both key shares makes that the only
+ // sound answer.
+ if not TRNLDTLS13ClientHello.Write_(Body[0],BodySize,SizeOf(Body),
+                                     fClientRandom,
+                                     fX25519PublicKey,
+                                     fSecp256r1PublicKey[0],TRNLP256.PointSize,
+                                     Nothing,0,
+                                     fServerName) then begin
+  exit;
+ end;
+
+ BeginFlight;
+ if not AppendHandshakeMessage(TYPE_CLIENT_HELLO,Body[0],BodySize,EpochInitial) then begin
+  exit;
+ end;
+
+ result:=TransmitFlight(aNow);
+
+end;
+
+procedure TRNLDTLS13Client.Start(const aNow:TRNLTime);
+begin
+
+ if fState<>RNL_DTLS13_CLIENT_STATE_IDLE then begin
+  exit;
+ end;
+
+ fRandomGenerator.GetRandomBytes(fClientRandom,SizeOf(fClientRandom));
+ TRNLX25519.GeneratePublicPrivateKeyPair(fRandomGenerator,fX25519PublicKey,fX25519PrivateKey);
+ TRNLP256.GenerateKeyPair(fRandomGenerator,fSecp256r1PrivateKey,fSecp256r1PublicKey);
+
+ if not fKeySchedule.Initialize(TRNLSHA256.Descriptor) then begin
+  Fail(RNL_DTLS12_CLIENT_FAILURE_INTERNAL,0);
+  exit;
+ end;
+
+ fTranscript.Initialize;
+ if not BuildClientHello(aNow) then begin
+  Fail(RNL_DTLS12_CLIENT_FAILURE_INTERNAL,0);
+  exit;
+ end;
+
+ fState:=RNL_DTLS13_CLIENT_STATE_AWAITING_SERVER_HELLO;
+
+end;
+
+procedure TRNLDTLS13Client.Update(const aNow:TRNLTime);
+begin
+
+ if (not fFlightPending) or
+    (fState=RNL_DTLS13_CLIENT_STATE_FAILED) or
+    (fState=RNL_DTLS13_CLIENT_STATE_ESTABLISHED) then begin
+  exit;
+ end;
+ if aNow<fRetransmitAt then begin
+  exit;
+ end;
+
+ if fCountRetransmissions>=MaximumRetransmissions then begin
+  Fail(RNL_DTLS12_CLIENT_FAILURE_TIMEOUT,0);
+  exit;
+ end;
+
+ inc(fCountRetransmissions);
+ fRetransmissionTimeout:=fRetransmissionTimeout*2;
+ if fRetransmissionTimeout>MaximumRetransmissionTimeout then begin
+  fRetransmissionTimeout:=MaximumRetransmissionTimeout;
+ end;
+
+ if not TransmitFlight(aNow) then begin
+  Fail(RNL_DTLS12_CLIENT_FAILURE_INTERNAL,ALERT_INTERNAL_ERROR);
+ end;
+
+end;
+
+function TRNLDTLS13Client.PopOutgoingDatagram(out aData;out aDataSize:TRNLSizeInt;
+                                              const aMaximumDataSize:TRNLSizeInt):boolean;
+begin
+ result:=false;
+ aDataSize:=0;
+ if (fCountOutgoing=0) or (fOutgoing[fOutgoingHead].Size>aMaximumDataSize) then begin
+  exit;
+ end;
+ aDataSize:=fOutgoing[fOutgoingHead].Size;
+ Move(fOutgoing[fOutgoingHead].Data[0],aData,aDataSize);
+ fOutgoingHead:=(fOutgoingHead+1) mod MaximumQueuedDatagrams;
+ dec(fCountOutgoing);
+ result:=true;
+end;
+
+function TRNLDTLS13Client.PopApplicationData(out aData;out aDataSize:TRNLSizeInt;
+                                             const aMaximumDataSize:TRNLSizeInt):boolean;
+begin
+ result:=false;
+ aDataSize:=0;
+ if (fCountApplicationData=0) or
+    (fApplicationData[fApplicationDataHead].Size>aMaximumDataSize) then begin
+  exit;
+ end;
+ aDataSize:=fApplicationData[fApplicationDataHead].Size;
+ Move(fApplicationData[fApplicationDataHead].Data[0],aData,aDataSize);
+ fApplicationDataHead:=(fApplicationDataHead+1) mod MaximumQueuedDatagrams;
+ dec(fCountApplicationData);
+ result:=true;
+end;
+
+function TRNLDTLS13Client.Send(const aData;const aDataSize:TRNLSizeInt):boolean;
+var Datagram:array[0..MaximumDatagramSize-1] of TRNLUInt8;
+    DatagramSize:TRNLSizeUInt;
+begin
+ result:=false;
+ if (fState<>RNL_DTLS13_CLIENT_STATE_ESTABLISHED) or (aDataSize<=0) then begin
+  exit;
+ end;
+ if not TRNLDTLSRecord.Protect(Datagram[0],DatagramSize,SizeOf(Datagram),
+                               fClientApplicationKeys,EpochApplication,
+                               fSendSequenceNumbers[EpochApplication],
+                               TRNLDTLSRecord.CONTENT_TYPE_APPLICATION_DATA,
+                               aData,aDataSize) then begin
+  exit;
+ end;
+ inc(fSendSequenceNumbers[EpochApplication]);
+ result:=QueueOutgoing(Datagram[0],TRNLSizeInt(DatagramSize));
+end;
+
+procedure TRNLDTLS13Client.SendPendingACK;
+var Body:array[0..(2+(TRNLDTLS13ACK.MaximumRecordNumbers*TRNLDTLS13ACK.RecordNumberSize))-1] of TRNLUInt8;
+    BodySize:TRNLSizeInt;
+    Datagram:array[0..MaximumDatagramSize-1] of TRNLUInt8;
+    DatagramSize:TRNLSizeUInt;
+begin
+
+ if fPendingACK.Count=0 then begin
+  exit;
+ end;
+ if not fPendingACK.Write_(Body[0],BodySize,SizeOf(Body)) then begin
+  fPendingACK.Initialize;
+  exit;
+ end;
+
+ // An ACK carries its own content type and is never a handshake message, so it goes out on its
+ // own and never joins a flight
+ if fSendEpoch=EpochInitial then begin
+  if TRNLDTLS12Record.WritePlain(Datagram[0],DatagramSize,SizeOf(Datagram),
+                                 0,fSendSequenceNumbers[EpochInitial],
+                                 TRNLDTLSRecord.CONTENT_TYPE_ACK,Body[0],BodySize) then begin
+   inc(fSendSequenceNumbers[EpochInitial]);
+   QueueOutgoing(Datagram[0],TRNLSizeInt(DatagramSize));
+  end;
+ end else begin
+  if TRNLDTLSRecord.Protect(Datagram[0],DatagramSize,SizeOf(Datagram),
+                            fClientHandshakeKeys,EpochHandshake,
+                            fSendSequenceNumbers[EpochHandshake],
+                            TRNLDTLSRecord.CONTENT_TYPE_ACK,Body[0],BodySize) then begin
+   inc(fSendSequenceNumbers[EpochHandshake]);
+   QueueOutgoing(Datagram[0],TRNLSizeInt(DatagramSize));
+  end;
+ end;
+
+ fPendingACK.Initialize;
+
+end;
+
+function TRNLDTLS13Client.DeriveHandshakeKeys:boolean;
+var Hash:TRNLSHA256Hash;
+begin
+ // Transcript-Hash(ClientHello..ServerHello), which is where the handshake traffic secrets are
+ // taken from - and the point at which everything after this arrives encrypted
+ fTranscript.Snapshot(Hash);
+ result:=fKeySchedule.DeriveHandshakeTrafficSecrets(Hash,SizeOf(Hash)) and
+         fClientHandshakeKeys.DeriveFrom(fKeySchedule.ClientHandshakeTrafficSecret,
+                                         TRNLSizeUInt(SizeOf(TRNLSHA256Hash))) and
+         fServerHandshakeKeys.DeriveFrom(fKeySchedule.ServerHandshakeTrafficSecret,
+                                         TRNLSizeUInt(SizeOf(TRNLSHA256Hash)));
+end;
+
+function TRNLDTLS13Client.HandleServerHello(const aBody;const aBodySize:TRNLSizeInt;
+                                            const aNow:TRNLTime):boolean;
+var ServerHello:TRNLDTLS13ServerHello;
+    Shared:array[0..TRNLP256.ElementSize-1] of TRNLUInt8;
+    SharedKey:TRNLKey;
+begin
+
+ result:=false;
+
+ if not ServerHello.Parse(aBody,aBodySize) then begin
+  Fail(RNL_DTLS12_CLIENT_FAILURE_MALFORMED_MESSAGE,ALERT_DECODE_ERROR);
+  exit;
+ end;
+
+ // A HelloRetryRequest asks for a group. This client already sent a share for both groups it
+ // supports, so a retry can only name one of two things: a group it was given - which RFC 8446
+ // section 4.1.4 forbids the server from asking for and requires the client to abort over - or a
+ // group this client cannot do. Either way there is nothing to retry with, and the sixty five
+ // bytes of the second share are what buys that.
+ if ServerHello.IsHelloRetryRequest then begin
+  Fail(RNL_DTLS12_CLIENT_FAILURE_UNSUPPORTED_CURVE,ALERT_ILLEGAL_PARAMETER);
+  exit;
+ end;
+
+ // legacy_version has to be the old number, and the real one arrives in supported_versions. A
+ // server which leaves the extension out is not speaking 1.3 at all.
+ if (ServerHello.LegacyVersion<>TRNLDTLS13ClientHello.VERSION_DTLS12) or
+    (not ServerHello.HasSupportedVersions) or
+    (ServerHello.SelectedVersion<>TRNLDTLS13ClientHello.VERSION_DTLS13) then begin
+  Fail(RNL_DTLS12_CLIENT_FAILURE_MALFORMED_MESSAGE,ALERT_ILLEGAL_PARAMETER);
+  exit;
+ end;
+ if ServerHello.CipherSuite<>TRNLDTLS13ClientHello.CIPHER_SUITE_CHACHA20_POLY1305_SHA256 then begin
+  Fail(RNL_DTLS12_CLIENT_FAILURE_MALFORMED_MESSAGE,ALERT_ILLEGAL_PARAMETER);
+  exit;
+ end;
+ if ServerHello.LegacyCompressionMethod<>0 then begin
+  Fail(RNL_DTLS12_CLIENT_FAILURE_MALFORMED_MESSAGE,ALERT_ILLEGAL_PARAMETER);
+  exit;
+ end;
+ if not ServerHello.HasKeyShare then begin
+  Fail(RNL_DTLS12_CLIENT_FAILURE_MALFORMED_MESSAGE,ALERT_ILLEGAL_PARAMETER);
+  exit;
+ end;
+
+ if ServerHello.KeyShareGroup=TRNLDTLS13ClientHello.GROUP_X25519 then begin
+  if ServerHello.KeyShareSize<>SizeOf(TRNLKey) then begin
+   Fail(RNL_DTLS12_CLIENT_FAILURE_MALFORMED_MESSAGE,ALERT_ILLEGAL_PARAMETER);
+   exit;
+  end;
+  if not TRNLX25519.GenerateSharedSecretKey(SharedKey,
+                                            PRNLKey(TRNLPointer(@ServerHello.KeyShare[0]))^,
+                                            fX25519PrivateKey) then begin
+   Fail(RNL_DTLS12_CLIENT_FAILURE_UNSUPPORTED_CURVE,ALERT_ILLEGAL_PARAMETER);
+   exit;
+  end;
+  if not fKeySchedule.DeriveHandshakeSecret(SharedKey,TRNLSizeUInt(SizeOf(TRNLKey))) then begin
+   Fail(RNL_DTLS12_CLIENT_FAILURE_INTERNAL,ALERT_INTERNAL_ERROR);
+   exit;
+  end;
+  FillChar(SharedKey,SizeOf(TRNLKey),#0);
+ end else if ServerHello.KeyShareGroup=TRNLDTLS13ClientHello.GROUP_SECP256R1 then begin
+  if not TRNLP256.SharedSecret(Shared,fSecp256r1PrivateKey,
+                               ServerHello.KeyShare[0],
+                               TRNLSizeUInt(ServerHello.KeyShareSize)) then begin
+   Fail(RNL_DTLS12_CLIENT_FAILURE_UNSUPPORTED_CURVE,ALERT_ILLEGAL_PARAMETER);
+   exit;
+  end;
+  if not fKeySchedule.DeriveHandshakeSecret(Shared,TRNLSizeUInt(TRNLP256.ElementSize)) then begin
+   Fail(RNL_DTLS12_CLIENT_FAILURE_INTERNAL,ALERT_INTERNAL_ERROR);
+   exit;
+  end;
+  FillChar(Shared,SizeOf(Shared),#0);
+ end else begin
+  // A group nobody offered, which is a server picking from a list it was not given
+  Fail(RNL_DTLS12_CLIENT_FAILURE_UNSUPPORTED_CURVE,ALERT_ILLEGAL_PARAMETER);
+  exit;
+ end;
+
+ if not DeriveHandshakeKeys then begin
+  Fail(RNL_DTLS12_CLIENT_FAILURE_INTERNAL,ALERT_INTERNAL_ERROR);
+  exit;
+ end;
+
+ // From here the server writes in epoch two, and so does this client for the rest of the handshake
+ fReceiveEpoch:=EpochHandshake;
+ fReplayWindows[EpochHandshake].Initialize;
+
+ result:=true;
+
+end;
+
+function TRNLDTLS13Client.HandleCertificate(const aBody;const aBodySize:TRNLSizeInt):boolean;
+var Certificate:TRNLDTLS13Certificate;
+begin
+
+ result:=false;
+ fCertificateVerdict:=RNL_X509_VERDICT_MALFORMED;
+
+ if not Certificate.Parse(aBody,aBodySize) then begin
+  Fail(RNL_DTLS12_CLIENT_FAILURE_BAD_CERTIFICATE,ALERT_DECODE_ERROR);
+  exit;
+ end;
+
+ fCertificateVerdict:=TRNLX509.VerifyChain(Certificate.Chain,Certificate.ChainLength,
+                                           fTrustedRoots,fCountTrustedRoots,
+                                           fServerName,fNowSecondsSinceUnixEpoch,
+                                           fLeafCertificate);
+ if fCertificateVerdict<>RNL_X509_VERDICT_ACCEPTED then begin
+  Fail(RNL_DTLS12_CLIENT_FAILURE_BAD_CERTIFICATE,ALERT_BAD_CERTIFICATE);
+  exit;
+ end;
+
+ // Only the key survives; the windows into the message are about to be overwritten
+ fLeafCertificate.TBSCertificate:=nil;
+ fLeafCertificate.TBSCertificateSize:=0;
+ fLeafCertificate.Issuer:=nil;
+ fLeafCertificate.IssuerSize:=0;
+ fLeafCertificate.Subject:=nil;
+ fLeafCertificate.SubjectSize:=0;
+ fLeafCertificate.SubjectAlternativeNames:=nil;
+ fLeafCertificate.SubjectAlternativeNamesSize:=0;
+
+ result:=true;
+
+end;
+
+function TRNLDTLS13Client.HandleCertificateVerify(const aBody;const aBodySize:TRNLSizeInt):boolean;
+var Verify:TRNLDTLS13CertificateVerify;
+begin
+ result:=false;
+ if not Verify.Parse(aBody,aBodySize) then begin
+  Fail(RNL_DTLS12_CLIENT_FAILURE_MALFORMED_MESSAGE,ALERT_DECODE_ERROR);
+  exit;
+ end;
+ // Over the transcript as it stood when the Certificate went in, which is why that snapshot was
+ // taken there and not here
+ if not Verify.VerifyWith(fLeafCertificate,fTranscriptBeforeCertificateVerify,
+                          SizeOf(TRNLSHA256Hash)) then begin
+  Fail(RNL_DTLS12_CLIENT_FAILURE_BAD_KEY_EXCHANGE_SIGNATURE,ALERT_DECRYPT_ERROR);
+  exit;
+ end;
+ result:=true;
+end;
+
+function TRNLDTLS13Client.HandleServerFinished(const aBody;const aBodySize:TRNLSizeInt;
+                                               const aNow:TRNLTime):boolean;
+var Expected:TRNLSHA256Hash;
+begin
+
+ result:=false;
+
+ if aBodySize<>SizeOf(TRNLSHA256Hash) then begin
+  Fail(RNL_DTLS12_CLIENT_FAILURE_MALFORMED_MESSAGE,ALERT_DECODE_ERROR);
+  exit;
+ end;
+
+ if not TRNLDTLS13KeySchedule.ComputeVerifyData(TRNLSHA256.Descriptor,Expected,
+                                                fKeySchedule.ServerHandshakeTrafficSecret,
+                                                TRNLSizeUInt(SizeOf(TRNLSHA256Hash)),
+                                                fTranscriptBeforeServerFinished,
+                                                TRNLSizeUInt(SizeOf(TRNLSHA256Hash))) then begin
+  Fail(RNL_DTLS12_CLIENT_FAILURE_INTERNAL,ALERT_INTERNAL_ERROR);
+  exit;
+ end;
+ if not TRNLMemory.SecureIsEqual(Expected,aBody,SizeOf(TRNLSHA256Hash)) then begin
+  Fail(RNL_DTLS12_CLIENT_FAILURE_BAD_FINISHED,ALERT_DECRYPT_ERROR);
+  exit;
+ end;
+
+ result:=true;
+
+end;
+
+function TRNLDTLS13Client.BuildClientFinished(const aNow:TRNLTime):boolean;
+var Hash:TRNLSHA256Hash;
+    VerifyData:TRNLSHA256Hash;
+begin
+
+ result:=false;
+
+ // Transcript-Hash(ClientHello..server Finished): the application secrets and this side's verify
+ // data are both taken from it, and the client Finished which follows is not in it
+ fTranscript.Snapshot(Hash);
+ if not (fKeySchedule.DeriveMasterSecret and
+         fKeySchedule.DeriveApplicationTrafficSecrets(Hash,SizeOf(Hash)) and
+         fClientApplicationKeys.DeriveFrom(fKeySchedule.ClientApplicationTrafficSecret,
+                                           TRNLSizeUInt(SizeOf(TRNLSHA256Hash))) and
+         fServerApplicationKeys.DeriveFrom(fKeySchedule.ServerApplicationTrafficSecret,
+                                           TRNLSizeUInt(SizeOf(TRNLSHA256Hash)))) then begin
+  exit;
+ end;
+
+ if not TRNLDTLS13KeySchedule.ComputeVerifyData(TRNLSHA256.Descriptor,VerifyData,
+                                                fKeySchedule.ClientHandshakeTrafficSecret,
+                                                TRNLSizeUInt(SizeOf(TRNLSHA256Hash)),
+                                                Hash,TRNLSizeUInt(SizeOf(TRNLSHA256Hash))) then begin
+  exit;
+ end;
+
+ BeginFlight;
+ // Still in epoch two: the client Finished is the last thing the handshake keys carry
+ if not AppendHandshakeMessage(TYPE_FINISHED,VerifyData,SizeOf(VerifyData),
+                               EpochHandshake) then begin
+  exit;
+ end;
+
+ result:=TransmitFlight(aNow);
+
+end;
+
+procedure TRNLDTLS13Client.HandleMessage(const aNow:TRNLTime);
+var MessageType:TRNLUInt8;
+    Body:PRNLUInt8Array;
+    BodySize:TRNLSizeInt;
+begin
+
+ MessageType:=fReassembler.MessageType;
+ Body:=fReassembler.Body;
+ BodySize:=fReassembler.Length_;
+
+ inc(fExpectedReceiveMessageSequence);
+ fReassembler.Initialize;
+
+ if MessageType=TYPE_SERVER_HELLO then begin
+
+  if fState<>RNL_DTLS13_CLIENT_STATE_AWAITING_SERVER_HELLO then begin
+   Fail(RNL_DTLS12_CLIENT_FAILURE_UNEXPECTED_MESSAGE,ALERT_UNEXPECTED_MESSAGE);
+   exit;
+  end;
+  fTranscript.AddMessage(MessageType,Body^[0],BodySize);
+  if not HandleServerHello(Body^[0],BodySize,aNow) then begin
+   exit;
+  end;
+  fState:=RNL_DTLS13_CLIENT_STATE_AWAITING_ENCRYPTED_EXTENSIONS;
+
+ end else if MessageType=TYPE_ENCRYPTED_EXTENSIONS then begin
+
+  if fState<>RNL_DTLS13_CLIENT_STATE_AWAITING_ENCRYPTED_EXTENSIONS then begin
+   Fail(RNL_DTLS12_CLIENT_FAILURE_UNEXPECTED_MESSAGE,ALERT_UNEXPECTED_MESSAGE);
+   exit;
+  end;
+  // Nothing in it is read. Everything this client asked for is either answered in the ServerHello
+  // or refused by the handshake not completing, and an extension it did not ask for is one a
+  // server may not send.
+  fTranscript.AddMessage(MessageType,Body^[0],BodySize);
+  fState:=RNL_DTLS13_CLIENT_STATE_AWAITING_CERTIFICATE;
+
+ end else if MessageType=TYPE_CERTIFICATE then begin
+
+  if fState<>RNL_DTLS13_CLIENT_STATE_AWAITING_CERTIFICATE then begin
+   Fail(RNL_DTLS12_CLIENT_FAILURE_UNEXPECTED_MESSAGE,ALERT_UNEXPECTED_MESSAGE);
+   exit;
+  end;
+  fTranscript.AddMessage(MessageType,Body^[0],BodySize);
+  if not HandleCertificate(Body^[0],BodySize) then begin
+   exit;
+  end;
+  // What the CertificateVerify will have to be checked against, taken now because the transcript
+  // moves on the moment that message arrives
+  fTranscript.Snapshot(fTranscriptBeforeCertificateVerify);
+  fState:=RNL_DTLS13_CLIENT_STATE_AWAITING_CERTIFICATE_VERIFY;
+
+ end else if MessageType=TYPE_CERTIFICATE_VERIFY then begin
+
+  if fState<>RNL_DTLS13_CLIENT_STATE_AWAITING_CERTIFICATE_VERIFY then begin
+   Fail(RNL_DTLS12_CLIENT_FAILURE_UNEXPECTED_MESSAGE,ALERT_UNEXPECTED_MESSAGE);
+   exit;
+  end;
+  if not HandleCertificateVerify(Body^[0],BodySize) then begin
+   exit;
+  end;
+  fTranscript.AddMessage(MessageType,Body^[0],BodySize);
+  fTranscript.Snapshot(fTranscriptBeforeServerFinished);
+  fState:=RNL_DTLS13_CLIENT_STATE_AWAITING_SERVER_FINISHED;
+
+ end else if MessageType=TYPE_FINISHED then begin
+
+  if fState<>RNL_DTLS13_CLIENT_STATE_AWAITING_SERVER_FINISHED then begin
+   Fail(RNL_DTLS12_CLIENT_FAILURE_UNEXPECTED_MESSAGE,ALERT_UNEXPECTED_MESSAGE);
+   exit;
+  end;
+  if not HandleServerFinished(Body^[0],BodySize,aNow) then begin
+   exit;
+  end;
+  fTranscript.AddMessage(MessageType,Body^[0],BodySize);
+  if not BuildClientFinished(aNow) then begin
+   Fail(RNL_DTLS12_CLIENT_FAILURE_INTERNAL,ALERT_INTERNAL_ERROR);
+   exit;
+  end;
+  // Application data goes out in epoch three from here, and comes in there too
+  fSendEpoch:=EpochApplication;
+  fReceiveEpoch:=EpochApplication;
+  fReplayWindows[EpochApplication].Initialize;
+  fFlightPending:=false;
+  fState:=RNL_DTLS13_CLIENT_STATE_ESTABLISHED;
+
+ end else if MessageType=TYPE_CERTIFICATE_REQUEST then begin
+
+  // This client has no certificate to present, and a server which insists gets no handshake
+  Fail(RNL_DTLS12_CLIENT_FAILURE_UNEXPECTED_MESSAGE,ALERT_HANDSHAKE_FAILURE);
+
+ end else begin
+
+  Fail(RNL_DTLS12_CLIENT_FAILURE_UNEXPECTED_MESSAGE,ALERT_UNEXPECTED_MESSAGE);
+
+ end;
+
+end;
+
+procedure TRNLDTLS13Client.DeferFragment(const aData;const aDataSize:TRNLSizeInt);
+begin
+ if (aDataSize>0) and ((fDeferredSize+aDataSize)<=MaximumDeferredSize) then begin
+  Move(aData,fDeferred[fDeferredSize],aDataSize);
+  inc(fDeferredSize,aDataSize);
+ end;
+end;
+
+procedure TRNLDTLS13Client.ReplayDeferredFragments(const aNow:TRNLTime);
+var Position,Kept,FragmentSize,ConsumedSize:TRNLSizeInt;
+    MessageType:TRNLUInt8;
+    MessageSequence:TRNLUInt16;
+    Length_,FragmentOffset,FragmentLength:TRNLSizeInt;
+    Progress:boolean;
+begin
+ repeat
+  Progress:=false;
+  Position:=0;
+  Kept:=0;
+  while Position<fDeferredSize do begin
+   if not TRNLDTLS12Handshake.ReadHeader(fDeferred[Position],fDeferredSize-Position,
+                                         MessageType,Length_,MessageSequence,
+                                         FragmentOffset,FragmentLength) then begin
+    break;
+   end;
+   FragmentSize:=TRNLDTLS12Handshake.HeaderSize+FragmentLength;
+   if MessageSequence=fExpectedReceiveMessageSequence then begin
+    if fReassembler.Add(fDeferred[Position],FragmentSize,ConsumedSize) then begin
+     Progress:=true;
+     if fReassembler.Complete then begin
+      HandleMessage(aNow);
+      if fState=RNL_DTLS13_CLIENT_STATE_FAILED then begin
+       exit;
+      end;
+     end;
+    end;
+   end else if MessageSequence>fExpectedReceiveMessageSequence then begin
+    if Kept<>Position then begin
+     Move(fDeferred[Position],fDeferred[Kept],FragmentSize);
+    end;
+    inc(Kept,FragmentSize);
+   end;
+   inc(Position,FragmentSize);
+  end;
+  fDeferredSize:=Kept;
+ until not Progress;
+end;
+
+procedure TRNLDTLS13Client.HandleHandshakeFragments(const aContent;const aContentSize:TRNLSizeInt;
+                                                    const aNow:TRNLTime);
+var Content:PRNLUInt8Array;
+    Position,FragmentSize,ConsumedSize:TRNLSizeInt;
+    MessageType:TRNLUInt8;
+    MessageSequence:TRNLUInt16;
+    Length_,FragmentOffset,FragmentLength:TRNLSizeInt;
+begin
+
+ Content:=PRNLUInt8Array(TRNLPointer(@aContent));
+ Position:=0;
+
+ while Position<aContentSize do begin
+  if not TRNLDTLS12Handshake.ReadHeader(Content^[Position],aContentSize-Position,
+                                        MessageType,Length_,MessageSequence,
+                                        FragmentOffset,FragmentLength) then begin
+   break;
+  end;
+  FragmentSize:=TRNLDTLS12Handshake.HeaderSize+FragmentLength;
+  if MessageSequence=fExpectedReceiveMessageSequence then begin
+   if fReassembler.Add(Content^[Position],FragmentSize,ConsumedSize) then begin
+    if fReassembler.Complete then begin
+     HandleMessage(aNow);
+     if fState=RNL_DTLS13_CLIENT_STATE_FAILED then begin
+      exit;
+     end;
+     ReplayDeferredFragments(aNow);
+     if fState=RNL_DTLS13_CLIENT_STATE_FAILED then begin
+      exit;
+     end;
+    end;
+   end;
+  end else if MessageSequence>fExpectedReceiveMessageSequence then begin
+   DeferFragment(Content^[Position],FragmentSize);
+  end;
+  inc(Position,FragmentSize);
+ end;
+
+end;
+
+procedure TRNLDTLS13Client.HandleRecord(const aContentType:TRNLUInt8;
+                                        const aContent;const aContentSize:TRNLSizeInt;
+                                        const aEpoch,aSequenceNumber:TRNLUInt64;
+                                        const aNow:TRNLTime);
+var Content:PRNLUInt8Array;
+    Index:TRNLSizeInt;
+    ACK:TRNLDTLS13ACK;
+begin
+
+ Content:=PRNLUInt8Array(TRNLPointer(@aContent));
+
+ if aContentType=TRNLDTLSRecord.CONTENT_TYPE_ALERT then begin
+
+  if aContentSize>=2 then begin
+   fAlertDescription:=Content^[1];
+  end;
+  Fail(RNL_DTLS12_CLIENT_FAILURE_ALERT,0);
+
+ end else if aContentType=TRNLDTLSRecord.CONTENT_TYPE_HANDSHAKE then begin
+
+  // Every handshake record which arrived is worth acknowledging, so that the peer repeats only
+  // what did not
+  fPendingACK.Add(aEpoch,aSequenceNumber);
+  HandleHandshakeFragments(aContent,aContentSize,aNow);
+
+ end else if aContentType=TRNLDTLSRecord.CONTENT_TYPE_ACK then begin
+
+  // Read and checked, and then nothing is done with it. This client sends flights small enough to
+  // fit one datagram, so there is never a subset of one to repeat - either it arrived or the timer
+  // sends all of it again. Parsing it anyway is what keeps a malformed one from being ignored.
+  if not ACK.Parse(aContent,aContentSize) then begin
+   Fail(RNL_DTLS12_CLIENT_FAILURE_MALFORMED_MESSAGE,ALERT_DECODE_ERROR);
+  end;
+
+ end else if aContentType=TRNLDTLSRecord.CONTENT_TYPE_APPLICATION_DATA then begin
+
+  if fState<>RNL_DTLS13_CLIENT_STATE_ESTABLISHED then begin
+   Fail(RNL_DTLS12_CLIENT_FAILURE_UNEXPECTED_MESSAGE,ALERT_UNEXPECTED_MESSAGE);
+   exit;
+  end;
+  if (aContentSize>0) and (aContentSize<=MaximumDatagramSize) and
+     (fCountApplicationData<MaximumQueuedDatagrams) then begin
+   Index:=(fApplicationDataHead+fCountApplicationData) mod MaximumQueuedDatagrams;
+   Move(aContent,fApplicationData[Index].Data[0],aContentSize);
+   fApplicationData[Index].Size:=aContentSize;
+   inc(fCountApplicationData);
+  end;
+
+ end else begin
+
+  Fail(RNL_DTLS12_CLIENT_FAILURE_UNEXPECTED_MESSAGE,ALERT_UNEXPECTED_MESSAGE);
+
+ end;
+
+end;
+
+procedure TRNLDTLS13Client.ProcessDatagram(const aData;const aDataSize:TRNLSizeInt;
+                                           const aNow:TRNLTime);
+var Data:PRNLUInt8Array;
+    Position,RecordSize,FragmentSize:TRNLSizeInt;
+    ContentSize,ConsumedSize:TRNLSizeUInt;
+    ContentType:TRNLUInt8;
+    SequenceNumber:TRNLUInt64;
+    PlainEpoch:TRNLUInt16;
+begin
+
+ if (fState=RNL_DTLS13_CLIENT_STATE_IDLE) or
+    (fState=RNL_DTLS13_CLIENT_STATE_FAILED) then begin
+  exit;
+ end;
+
+ Data:=PRNLUInt8Array(TRNLPointer(@aData));
+ Position:=0;
+
+ while Position<aDataSize do begin
+
+  // RFC 9147 section 4: a record with 001 in the top three bits of its first byte is a
+  // DTLSCiphertext with the unified header; anything else is a DTLSPlaintext, whose content type
+  // is one of 20 to 26 and therefore has those bits clear. That is the whole demultiplexer, and it
+  // is why the two record layers can share a datagram at all.
+  if (Data^[Position] and TRNLDTLSRecord.HEADER_FIXED_MASK)=TRNLDTLSRecord.HEADER_FIXED_BITS then begin
+
+   if TRNLDTLSRecord.Unprotect(fRecordBuffer[0],ContentSize,ContentType,SequenceNumber,
+                               ConsumedSize,TRNLSizeUInt(SizeOf(fRecordBuffer)),
+                               fServerHandshakeKeys,fReceiveEpoch,
+                               fReplayWindows[fReceiveEpoch],
+                               Data^[Position],TRNLSizeUInt(aDataSize-Position)) then begin
+    HandleRecord(ContentType,fRecordBuffer[0],TRNLSizeInt(ContentSize),
+                 fReceiveEpoch,SequenceNumber,aNow);
+    inc(Position,TRNLSizeInt(ConsumedSize));
+   end else if (fReceiveEpoch=EpochApplication) and
+               TRNLDTLSRecord.Unprotect(fRecordBuffer[0],ContentSize,ContentType,SequenceNumber,
+                                        ConsumedSize,TRNLSizeUInt(SizeOf(fRecordBuffer)),
+                                        fServerApplicationKeys,fReceiveEpoch,
+                                        fReplayWindows[fReceiveEpoch],
+                                        Data^[Position],TRNLSizeUInt(aDataSize-Position)) then begin
+    HandleRecord(ContentType,fRecordBuffer[0],TRNLSizeInt(ContentSize),
+                 fReceiveEpoch,SequenceNumber,aNow);
+    inc(Position,TRNLSizeInt(ConsumedSize));
+   end else begin
+    // A record which will not open is one from an epoch whose keys are gone or not there yet, and
+    // there is no length to skip by without the header being trusted. The rest of the datagram
+    // goes with it.
+    break;
+   end;
+
+  end else begin
+
+   if (Position+TRNLDTLS12Record.HeaderSize)>aDataSize then begin
+    break;
+   end;
+   FragmentSize:=TRNLMemoryAccess.LoadBigEndianUInt16(Data^[Position+11]);
+   RecordSize:=TRNLDTLS12Record.HeaderSize+FragmentSize;
+   if (Position+RecordSize)>aDataSize then begin
+    break;
+   end;
+   if TRNLDTLS12Record.ReadPlain(fRecordBuffer[0],ContentSize,ContentType,PlainEpoch,
+                                 SequenceNumber,ConsumedSize,
+                                 TRNLSizeUInt(SizeOf(fRecordBuffer)),
+                                 Data^[Position],TRNLSizeUInt(RecordSize)) then begin
+    if PlainEpoch=EpochInitial then begin
+     HandleRecord(ContentType,fRecordBuffer[0],TRNLSizeInt(ContentSize),
+                  EpochInitial,SequenceNumber,aNow);
+    end;
+   end;
+   inc(Position,RecordSize);
+
+  end;
+
+  if fState=RNL_DTLS13_CLIENT_STATE_FAILED then begin
+   break;
+  end;
+
+ end;
+
+ SendPendingACK;
+
+end;
+
 procedure TRNLDTLS12Transcript.Initialize;
 begin
  fContext.Initialize;
@@ -24102,6 +26809,137 @@ begin
    fBitmap:=fBitmap or (TRNLUInt64(1) shl Distance);
   end;
  end;
+end;
+
+function TRNLDTLS13KeySchedule.DerivedFrom(out aDerived;
+                                           const aSecret;const aSecretSize:TRNLSizeUInt):boolean;
+var Context:array[0..TRNLHashDescriptor.MaximumContextSize-1] of TRNLUInt8;
+    EmptyHash:array[0..MaximumSecretSize-1] of TRNLUInt8;
+begin
+ Descriptor.Initialize(Context[0]);
+ Descriptor.Finalize(Context[0],EmptyHash[0]);
+ result:=TRNLTLS13KeySchedule.DeriveSecret(Descriptor,aDerived,
+                                           aSecret,aSecretSize,
+                                           'derived',
+                                           EmptyHash[0],TRNLSizeUInt(Descriptor.HashSize));
+ FillChar(Context,SizeOf(Context),#0);
+end;
+
+function TRNLDTLS13KeySchedule.Initialize(const aDescriptor:TRNLHashDescriptor):boolean;
+var Zeros:array[0..MaximumSecretSize-1] of TRNLUInt8;
+begin
+
+ result:=false;
+ FillChar(self,SizeOf(TRNLDTLS13KeySchedule),#0);
+
+ if (not aDescriptor.Valid) or
+    (aDescriptor.HashSize<1) or
+    (aDescriptor.HashSize>MaximumSecretSize) then begin
+  exit;
+ end;
+ Descriptor:=aDescriptor;
+
+ // Both the salt and the input are Hash.length zero bytes. RFC 8446 section 7.1 writes that as
+ // "0", and an empty string in either place gives a different early secret - for the salt the two
+ // happen to agree, because HMAC pads a short key with zeros, but for the input they do not.
+ FillChar(Zeros,SizeOf(Zeros),#0);
+ result:=TRNLHKDF.Extract(Descriptor,EarlySecret,
+                          Zeros,TRNLSizeUInt(Descriptor.HashSize),
+                          Zeros,TRNLSizeUInt(Descriptor.HashSize));
+
+end;
+
+function TRNLDTLS13KeySchedule.DeriveHandshakeSecret(const aSharedSecret;
+                                                     const aSharedSecretSize:TRNLSizeUInt):boolean;
+var Derived:array[0..MaximumSecretSize-1] of TRNLUInt8;
+begin
+ result:=DerivedFrom(Derived[0],EarlySecret,TRNLSizeUInt(Descriptor.HashSize)) and
+         // The shared secret is the input keying material and the derived secret the salt. The
+         // other way round gives a perfectly good looking secret which no counter side arrives at.
+         TRNLHKDF.Extract(Descriptor,HandshakeSecret,
+                          Derived[0],TRNLSizeUInt(Descriptor.HashSize),
+                          aSharedSecret,aSharedSecretSize);
+ FillChar(Derived,SizeOf(Derived),#0);
+end;
+
+function TRNLDTLS13KeySchedule.DeriveHandshakeTrafficSecrets(const aTranscriptHash;
+                                                             const aTranscriptHashSize:TRNLSizeUInt):boolean;
+begin
+ result:=TRNLTLS13KeySchedule.DeriveSecret(Descriptor,ClientHandshakeTrafficSecret,
+                                           HandshakeSecret,TRNLSizeUInt(Descriptor.HashSize),
+                                           'c hs traffic',
+                                           aTranscriptHash,aTranscriptHashSize) and
+         TRNLTLS13KeySchedule.DeriveSecret(Descriptor,ServerHandshakeTrafficSecret,
+                                           HandshakeSecret,TRNLSizeUInt(Descriptor.HashSize),
+                                           's hs traffic',
+                                           aTranscriptHash,aTranscriptHashSize);
+end;
+
+function TRNLDTLS13KeySchedule.DeriveMasterSecret:boolean;
+var Derived,Zeros:array[0..MaximumSecretSize-1] of TRNLUInt8;
+begin
+ FillChar(Zeros,SizeOf(Zeros),#0);
+ // Nothing goes into this extract but the rung above it: the input keying material is zeros again,
+ // which is what makes the master secret a function of the handshake secret alone
+ result:=DerivedFrom(Derived[0],HandshakeSecret,TRNLSizeUInt(Descriptor.HashSize)) and
+         TRNLHKDF.Extract(Descriptor,MasterSecret,
+                          Derived[0],TRNLSizeUInt(Descriptor.HashSize),
+                          Zeros,TRNLSizeUInt(Descriptor.HashSize));
+ FillChar(Derived,SizeOf(Derived),#0);
+end;
+
+function TRNLDTLS13KeySchedule.DeriveApplicationTrafficSecrets(const aTranscriptHash;
+                                                               const aTranscriptHashSize:TRNLSizeUInt):boolean;
+begin
+ result:=TRNLTLS13KeySchedule.DeriveSecret(Descriptor,ClientApplicationTrafficSecret,
+                                           MasterSecret,TRNLSizeUInt(Descriptor.HashSize),
+                                           'c ap traffic',
+                                           aTranscriptHash,aTranscriptHashSize) and
+         TRNLTLS13KeySchedule.DeriveSecret(Descriptor,ServerApplicationTrafficSecret,
+                                           MasterSecret,TRNLSizeUInt(Descriptor.HashSize),
+                                           's ap traffic',
+                                           aTranscriptHash,aTranscriptHashSize);
+end;
+
+class function TRNLDTLS13KeySchedule.DeriveFinishedKey(const aDescriptor:TRNLHashDescriptor;
+                                                       out aFinishedKey;
+                                                       const aTrafficSecret;
+                                                       const aTrafficSecretSize:TRNLSizeUInt):boolean;
+var Nothing:TRNLUInt8;
+begin
+ Nothing:=0;
+ // The context of this one is empty, unlike every other label in the schedule: the transcript is
+ // not what the key is derived over, it is what the key is applied to
+ result:=TRNLTLS13KeySchedule.ExpandLabel(aDescriptor,
+                                          aFinishedKey,TRNLSizeUInt(aDescriptor.HashSize),
+                                          aTrafficSecret,aTrafficSecretSize,
+                                          'finished',Nothing,0);
+end;
+
+class function TRNLDTLS13KeySchedule.ComputeVerifyData(const aDescriptor:TRNLHashDescriptor;
+                                                       out aVerifyData;
+                                                       const aTrafficSecret;
+                                                       const aTrafficSecretSize:TRNLSizeUInt;
+                                                       const aTranscriptHash;
+                                                       const aTranscriptHashSize:TRNLSizeUInt):boolean;
+var FinishedKey:array[0..MaximumSecretSize-1] of TRNLUInt8;
+begin
+ result:=DeriveFinishedKey(aDescriptor,FinishedKey[0],aTrafficSecret,aTrafficSecretSize) and
+         TRNLHMAC.Process(aDescriptor,aVerifyData,
+                          FinishedKey[0],TRNLSizeUInt(aDescriptor.HashSize),
+                          aTranscriptHash,aTranscriptHashSize);
+ FillChar(FinishedKey,SizeOf(FinishedKey),#0);
+end;
+
+procedure TRNLDTLS13KeySchedule.Clear;
+begin
+ FillChar(EarlySecret,SizeOf(EarlySecret),#0);
+ FillChar(HandshakeSecret,SizeOf(HandshakeSecret),#0);
+ FillChar(MasterSecret,SizeOf(MasterSecret),#0);
+ FillChar(ClientHandshakeTrafficSecret,SizeOf(ClientHandshakeTrafficSecret),#0);
+ FillChar(ServerHandshakeTrafficSecret,SizeOf(ServerHandshakeTrafficSecret),#0);
+ FillChar(ClientApplicationTrafficSecret,SizeOf(ClientApplicationTrafficSecret),#0);
+ FillChar(ServerApplicationTrafficSecret,SizeOf(ServerApplicationTrafficSecret),#0);
 end;
 
 class procedure TRNLDTLSRecord.BuildNonce(out aNonce;const aIV;const aSequenceNumber:TRNLUInt64);
@@ -28038,6 +30876,7 @@ begin
    RNL_CRYPTOGRAPHY_SELF_TEST_GROUP_KEY_DERIVATION:begin
     TRNLHKDF.SelfTest;
     TRNLTLS13KeySchedule.SelfTest;
+    TRNLDTLS13KeySchedule.SelfTest;
     TRNLTLS12PRF.SelfTest;
    end;
    else {RNL_CRYPTOGRAPHY_SELF_TEST_GROUP_RECORD_LAYERS:}begin
@@ -28046,6 +30885,11 @@ begin
     TRNLDTLS12Reassembler.SelfTest;
     TRNLDTLS12ServerKeyExchange.SelfTest;
     TRNLDTLS12KeySchedule.SelfTest;
+    TRNLDTLS13Transcript.SelfTest;
+    TRNLDTLS13ServerHello.SelfTest;
+    TRNLDTLS13Certificate.SelfTest;
+    TRNLDTLS13CertificateVerify.SelfTest;
+    TRNLDTLS13ACK.SelfTest;
    end;
   end;
  finally

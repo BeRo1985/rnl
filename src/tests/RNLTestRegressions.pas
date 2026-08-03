@@ -5268,6 +5268,308 @@ begin
  TestEnd;
 
 end;
+// ---------------------------------------------------------------------------------------
+// The DTLS 1.3 handshake
+// ---------------------------------------------------------------------------------------
+
+// The same bench as for 1.2 one page up, and for the same reason: no socket, no thread, a virtual
+// clock, and a server which can be told to be wrong in exactly one way at a time.
+//
+// What is harder here is the stub. In 1.3 everything from EncryptedExtensions onwards travels
+// encrypted, so a stub which could not run the key schedule could not answer at all - it derives
+// the same secrets the client does, signs its CertificateVerify with the ECDSA signer pinned to
+// RFC 6979, and protects its own flight. A handshake completing therefore still says only that the
+// two sides agree; what says they agree with anybody else are the RFC 8448 vectors underneath.
+procedure TestDTLS13HandshakeCompletesAgainstEveryHonestServer;
+var Watchdog:TRNLTestWatchdog;
+    RandomGenerator:TRNLRandomGenerator;
+    Roots:TRNLX509.TChainEntries;
+
+ procedure Entry(out aEntry:TRNLX509ChainEntry;const aData;const aSize:TRNLSizeInt);
+ begin
+  aEntry.Data:=PRNLUInt8Array(TRNLPointer(@aData));
+  aEntry.Size:=aSize;
+ end;
+
+ function Drive(const aClient:TRNLDTLS13Client;const aServer:TRNLTestDTLS13Server;
+                out aElapsed:TRNLUInt64):boolean;
+ const START_TIME=1000;
+       STEP=1000;
+       GUARD=1024;
+ var Datagram:array[0..2047] of TRNLUInt8;
+     DatagramSize:TRNLSizeInt;
+     Now_:TRNLUInt64;
+     Rounds:TRNLSizeInt;
+     Moved:boolean;
+ begin
+  Now_:=START_TIME;
+  aClient.Start(Now_);
+  Rounds:=0;
+  repeat
+   Moved:=false;
+   while aClient.PopOutgoingDatagram(Datagram,DatagramSize,SizeOf(Datagram)) do begin
+    aServer.ProcessDatagram(Datagram,DatagramSize);
+    Moved:=true;
+   end;
+   while aServer.PopOutgoingDatagram(Datagram,DatagramSize,SizeOf(Datagram)) do begin
+    aClient.ProcessDatagram(Datagram,DatagramSize,Now_);
+    Moved:=true;
+   end;
+   if not Moved then begin
+    inc(Now_,STEP);
+    aClient.Update(Now_);
+   end;
+   inc(Rounds);
+  until (aClient.State=RNL_DTLS13_CLIENT_STATE_ESTABLISHED) or
+        (aClient.State=RNL_DTLS13_CLIENT_STATE_FAILED) or
+        (Rounds>=GUARD);
+  while aClient.PopOutgoingDatagram(Datagram,DatagramSize,SizeOf(Datagram)) do begin
+   aServer.ProcessDatagram(Datagram,DatagramSize);
+  end;
+  aElapsed:=Now_-START_TIME;
+  result:=aClient.State=RNL_DTLS13_CLIENT_STATE_ESTABLISHED;
+ end;
+
+ procedure CheckApplicationDataFlowsBothWays(const aWhat:TRNLRawByteString;
+                                             const aClient:TRNLDTLS13Client;
+                                             const aServer:TRNLTestDTLS13Server);
+ const PAYLOAD:array[0..7] of TRNLUInt8=($13,$13,$be,$ef,$05,$06,$07,$08);
+ var Datagram:array[0..2047] of TRNLUInt8;
+     DatagramSize:TRNLSizeInt;
+     Received:array[0..2047] of TRNLUInt8;
+     ReceivedSize:TRNLSizeInt;
+ begin
+  Check(aClient.Send(PAYLOAD,SizeOf(PAYLOAD)),aWhat+': the client has to be able to send');
+  while aClient.PopOutgoingDatagram(Datagram,DatagramSize,SizeOf(Datagram)) do begin
+   aServer.ProcessDatagram(Datagram,DatagramSize);
+  end;
+  Check(aServer.LastApplicationDataMatches(PAYLOAD,SizeOf(PAYLOAD)),
+        aWhat+': what the client sent has to arrive as what it sent');
+  Check(aServer.Send(PAYLOAD,SizeOf(PAYLOAD)),aWhat+': and the server has to be able to answer');
+  while aServer.PopOutgoingDatagram(Datagram,DatagramSize,SizeOf(Datagram)) do begin
+   aClient.ProcessDatagram(Datagram,DatagramSize,1000);
+  end;
+  ReceivedSize:=0;
+  Check(aClient.PopApplicationData(Received,ReceivedSize,SizeOf(Received)) and
+        (ReceivedSize=SizeOf(PAYLOAD)) and
+        TRNLMemory.SecureIsEqual(Received,PAYLOAD,SizeOf(PAYLOAD)),
+        aWhat+': and the answer has to come back out of the client the same way');
+ end;
+
+ procedure Expect(const aWhat:TRNLRawByteString;
+                  const aBehaviour:TRNLTestDTLS13ServerBehaviour;
+                  const aExpectedElapsed:TRNLUInt64);
+ var Client:TRNLDTLS13Client;
+     Server:TRNLTestDTLS13Server;
+     Elapsed:TRNLUInt64;
+ begin
+  Server:=TRNLTestDTLS13Server.Create(aBehaviour);
+  try
+   Client:=TRNLDTLS13Client.Create(RandomGenerator,RNL_TEST_CERTIFICATE_HOST_NAME,
+                                   Roots,1,RNL_TEST_CERTIFICATE_NOW);
+   try
+    if Check(Drive(Client,Server,Elapsed),
+             aWhat+' has to end in a finished handshake, and ended as "'+
+             DTLSFailureName(Client.Failure)+'"') then begin
+     Check(Server.ClientFinishedVerified,
+           aWhat+': the server has to have accepted the client''s own Finished');
+     CheckEqualsInt64(TRNLInt64(Elapsed),TRNLInt64(aExpectedElapsed),
+                      aWhat+': the milliseconds spent waiting for a retransmission');
+     CheckApplicationDataFlowsBothWays(aWhat,Client,Server);
+    end;
+   finally
+    FreeAndNil(Client);
+   end;
+  finally
+   FreeAndNil(Server);
+  end;
+ end;
+
+begin
+
+ TestBegin('the DTLS 1.3 handshake completes against every server which plays fair');
+ Watchdog:=TRNLTestWatchdog.Create('DTLS 1.3 handshake',60000);
+ try
+  RandomGenerator:=TRNLRandomGenerator.Create;
+  try
+
+   FillChar(Roots,SizeOf(TRNLX509.TChainEntries),#0);
+   Entry(Roots[0],TRNLTestCertificates.Root,SizeOf(TRNLTestCertificates.Root));
+
+   // One round trip, and the whole handshake finished in it
+   Expect('a server which does everything right over x25519',
+          RNL_TEST_DTLS13_SERVER_CORRECT,0);
+
+   // The other share of the two the ClientHello carries. Which one the server takes is its
+   // choice, and both paths have to reach the same place.
+   Expect('a server which picks secp256r1 instead',
+          RNL_TEST_DTLS13_SERVER_SECP256R1,0);
+
+   // The flight cut into sixty four byte pieces and sent last one first, which exercises both the
+   // fragment reassembly and the holding back of messages whose turn has not come - and here they
+   // arrive encrypted, so every piece has to survive the record layer first
+   Expect('a server whose flight arrives backwards, in pieces',
+          RNL_TEST_DTLS13_SERVER_REVERSED_FRAGMENTS,0);
+
+   // One whole flight lost, and the second copy has to carry the same message sequence numbers
+   Expect('a server whose flight goes missing once',
+          RNL_TEST_DTLS13_SERVER_LOSES_ITS_FLIGHT,1000);
+
+  finally
+   FreeAndNil(RandomGenerator);
+  end;
+ finally
+  FreeAndNil(Watchdog);
+ end;
+ TestEnd;
+
+end;
+
+// The other half: ten ways for a 1.3 server to be broken or hostile, and the failure each has to
+// produce.
+procedure TestDTLS13HandshakeRefusesEveryBrokenServer;
+var Watchdog:TRNLTestWatchdog;
+    RandomGenerator:TRNLRandomGenerator;
+    Roots:TRNLX509.TChainEntries;
+
+ procedure Entry(out aEntry:TRNLX509ChainEntry;const aData;const aSize:TRNLSizeInt);
+ begin
+  aEntry.Data:=PRNLUInt8Array(TRNLPointer(@aData));
+  aEntry.Size:=aSize;
+ end;
+
+ function Drive(const aClient:TRNLDTLS13Client;const aServer:TRNLTestDTLS13Server):TRNLUInt64;
+ const START_TIME=1000;
+       STEP=1000;
+       GUARD=1024;
+ var Datagram:array[0..2047] of TRNLUInt8;
+     DatagramSize:TRNLSizeInt;
+     Now_:TRNLUInt64;
+     Rounds:TRNLSizeInt;
+     Moved:boolean;
+ begin
+  Now_:=START_TIME;
+  aClient.Start(Now_);
+  Rounds:=0;
+  repeat
+   Moved:=false;
+   while aClient.PopOutgoingDatagram(Datagram,DatagramSize,SizeOf(Datagram)) do begin
+    aServer.ProcessDatagram(Datagram,DatagramSize);
+    Moved:=true;
+   end;
+   while aServer.PopOutgoingDatagram(Datagram,DatagramSize,SizeOf(Datagram)) do begin
+    aClient.ProcessDatagram(Datagram,DatagramSize,Now_);
+    Moved:=true;
+   end;
+   if not Moved then begin
+    inc(Now_,STEP);
+    aClient.Update(Now_);
+   end;
+   inc(Rounds);
+  until (aClient.State=RNL_DTLS13_CLIENT_STATE_ESTABLISHED) or
+        (aClient.State=RNL_DTLS13_CLIENT_STATE_FAILED) or
+        (Rounds>=GUARD);
+  while aClient.PopOutgoingDatagram(Datagram,DatagramSize,SizeOf(Datagram)) do begin
+   aServer.ProcessDatagram(Datagram,DatagramSize);
+  end;
+  result:=Now_-START_TIME;
+ end;
+
+ procedure Expect(const aWhat:TRNLRawByteString;
+                  const aBehaviour:TRNLTestDTLS13ServerBehaviour;
+                  const aWanted:TRNLDTLS12ClientFailure;
+                  const aExpectedElapsed:TRNLUInt64=0);
+ var Client:TRNLDTLS13Client;
+     Server:TRNLTestDTLS13Server;
+     Elapsed:TRNLUInt64;
+ begin
+  Server:=TRNLTestDTLS13Server.Create(aBehaviour);
+  try
+   Client:=TRNLDTLS13Client.Create(RandomGenerator,RNL_TEST_CERTIFICATE_HOST_NAME,
+                                   Roots,1,RNL_TEST_CERTIFICATE_NOW);
+   try
+    Elapsed:=Drive(Client,Server);
+    CheckEqualsInt64(TRNLInt64(Elapsed),TRNLInt64(aExpectedElapsed),
+                     aWhat+': the milliseconds it took to give up');
+    Check(Client.State=RNL_DTLS13_CLIENT_STATE_FAILED,
+          aWhat+' must not end in a finished handshake');
+    Check(Client.Failure=aWanted,
+          aWhat+' has to fail as "'+DTLSFailureName(aWanted)+'" and failed as "'+
+          DTLSFailureName(Client.Failure)+'"');
+   finally
+    FreeAndNil(Client);
+   end;
+  finally
+   FreeAndNil(Server);
+  end;
+ end;
+
+begin
+
+ TestBegin('the DTLS 1.3 handshake refuses every server which does not');
+ Watchdog:=TRNLTestWatchdog.Create('DTLS 1.3 handshake failures',60000);
+ try
+  RandomGenerator:=TRNLRandomGenerator.Create;
+  try
+
+   FillChar(Roots,SizeOf(TRNLX509.TChainEntries),#0);
+   Entry(Roots[0],TRNLTestCertificates.Root,SizeOf(TRNLTestCertificates.Root));
+
+   // The same backoff schedule as 1.2, and the same forty seven seconds
+   Expect('a server which never answers',
+          RNL_TEST_DTLS13_SERVER_SILENT,RNL_DTLS12_CLIENT_FAILURE_TIMEOUT,47000);
+
+   // A retry has nothing to ask for: both shares went out in the first ClientHello, so it can only
+   // name one this client already sent - which RFC 8446 section 4.1.4 forbids - or one it cannot do
+   Expect('a server which answers with a HelloRetryRequest',
+          RNL_TEST_DTLS13_SERVER_HELLO_RETRY_REQUEST,
+          RNL_DTLS12_CLIENT_FAILURE_UNSUPPORTED_CURVE);
+
+   Expect('a server which picks a cipher suite nobody offered',
+          RNL_TEST_DTLS13_SERVER_UNOFFERED_CIPHER_SUITE,
+          RNL_DTLS12_CLIENT_FAILURE_MALFORMED_MESSAGE);
+
+   // Without supported_versions it is not a 1.3 ServerHello at all, whatever else it says
+   Expect('a server which leaves supported_versions out',
+          RNL_TEST_DTLS13_SERVER_WITHOUT_SUPPORTED_VERSIONS,
+          RNL_DTLS12_CLIENT_FAILURE_MALFORMED_MESSAGE);
+
+   Expect('a server which names a group nobody offered',
+          RNL_TEST_DTLS13_SERVER_UNOFFERED_GROUP,
+          RNL_DTLS12_CLIENT_FAILURE_UNSUPPORTED_CURVE);
+
+   // A perfectly good signature over a transcript which is not the one that happened
+   Expect('a server which signs the wrong transcript',
+          RNL_TEST_DTLS13_SERVER_BAD_CERTIFICATE_VERIFY,
+          RNL_DTLS12_CLIENT_FAILURE_BAD_KEY_EXCHANGE_SIGNATURE);
+
+   Expect('a server whose leaf was signed by a stranger',
+          RNL_TEST_DTLS13_SERVER_UNTRUSTED_CERTIFICATE,
+          RNL_DTLS12_CLIENT_FAILURE_BAD_CERTIFICATE);
+
+   Expect('a server whose Finished does not match the transcript',
+          RNL_TEST_DTLS13_SERVER_WRONG_VERIFY_DATA,
+          RNL_DTLS12_CLIENT_FAILURE_BAD_FINISHED);
+
+   // Every message well formed, and the order wrong. The transcript is what makes this fatal:
+   // hashing them as they came would give a different Finished on each side.
+   Expect('a server which sends its flight out of order',
+          RNL_TEST_DTLS13_SERVER_MESSAGES_OUT_OF_ORDER,
+          RNL_DTLS12_CLIENT_FAILURE_UNEXPECTED_MESSAGE);
+
+   Expect('a server which answers with a fatal alert',
+          RNL_TEST_DTLS13_SERVER_FATAL_ALERT,RNL_DTLS12_CLIENT_FAILURE_ALERT);
+
+  finally
+   FreeAndNil(RandomGenerator);
+  end;
+ finally
+  FreeAndNil(Watchdog);
+ end;
+ TestEnd;
+
+end;
+
 
 // ---------------------------------------------------------------------------------------
 // Channel numbers come back
@@ -10659,6 +10961,8 @@ begin
  TestDTLSRecordLayerRejectsWhatDoesNotAddUp;
  TestDTLSHandshakeCompletesAgainstEveryHonestServer;
  TestDTLSHandshakeRefusesEveryBrokenServer;
+ TestDTLS13HandshakeCompletesAgainstEveryHonestServer;
+ TestDTLS13HandshakeRefusesEveryBrokenServer;
 
  // Pure configuration invariants first, they are instant and their failure explains a lot of
  // what the behavioural tests below would otherwise report in a much noisier way
