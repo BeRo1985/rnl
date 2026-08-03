@@ -1,35 +1,35 @@
-(******************************************************************************
- *                      RNL TEST NETWORK FAULT INJECTOR                       *
- ******************************************************************************
- *                        Version 2026-07-27-00-00-0000                       *
- ******************************************************************************
- *                                                                            *
- * TRNLNetworkInterferenceSimulator simulates everything which can happen to a *
- * packet on its way, but it can not simulate anything which can happen to the *
+(********************************************************************************
+ *                      RNL TEST NETWORK FAULT INJECTOR                         *
+ ********************************************************************************
+ *                        Version 2026-07-27-00-00-0000                         *
+ ********************************************************************************
+ *                                                                              *
+ * TRNLNetworkInterferenceSimulator simulates everything which can happen to a  *
+ * packet on its way, but it can not simulate anything which can happen to the  *
  * local socket itself, and TRNLVirtualNetwork has neither a MTU nor a send     *
  * buffer which could ever fill up. That is precisely why a whole class of      *
- * defects only ever shows up in real world usage:                             *
- *                                                                            *
- *   TRNLRealNetwork.Send    -> 0  on EWOULDBLOCK / EMSGSIZE                   *
- *                           -> -1 on everything else                          *
+ * defects only ever shows up in real world usage:                              *
+ *                                                                              *
+ *   TRNLRealNetwork.Send    -> 0  on EWOULDBLOCK / EMSGSIZE                    *
+ *                           -> -1 on everything else                           *
  *   TRNLRealNetwork.Receive -> 0  on transient conditions                      *
- *                           -> -1 on a structurally broken socket             *
- *                                                                            *
+ *                           -> -1 on a structurally broken socket              *
+ *                                                                              *
  * TRNLVirtualNetwork.Send in contrast basically always returns aDataLength,    *
  * and TRNLNetworkInterferenceSimulator.Send even sets result:=aDataLength      *
  * unconditionally as soon as any latency or jitter is configured, so that the  *
  * whole send error handling is dead code in every simulator based test.        *
- *                                                                            *
+ *                                                                              *
  * This decorator closes exactly that gap. It is intentionally kept in the      *
  * tests directory and not in RNL.pas itself, since it is test tooling and not  *
- * library functionality.                                                      *
- *                                                                            *
+ * library functionality.                                                       *
+ *                                                                              *
  * All probability factors use the very same semantics as the ones of           *
  * TRNLNetworkInterferenceSimulator: 0 means never, $ffffffff means always, and *
  * everything in between is compared against a random 32 bit value, so that     *
- * $ffffffff div 2 is roughly 50 percent.                                      *
- *                                                                            *
- ******************************************************************************)
+ * $ffffffff div 2 is roughly 50 percent.                                       *
+ *                                                                              *
+ ********************************************************************************)
 unit RNLTestNetworkFaultInjector;
 {$ifdef fpc}
  {$mode delphi}

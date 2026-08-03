@@ -1530,10 +1530,36 @@ type PRNLVersion=^TRNLVersion;
        procedure ProcessByte(const aValue:TRNLUInt8);
        procedure Increment(var aX;const aY:TRNLUInt64);
        procedure EndBlock;
+       // The padding and the length are the same for both digest sizes; only how much of the state
+       // is written out differs
+       procedure FinalizeWords(out aHash;const aCountWords:TRNLSizeInt);
+      private
+       // SHA-384 is SHA-512 with another starting state and the last two words of the result thrown
+       // away. Same rounds, same constants, same block, so it is these two methods and nothing else -
+       // a second copy of the compression function is the thing worth not having.
+       const InitialState384:TRNLSHA512State=
+              (
+               TRNLUInt64($cbbb9d5dc1059ed8),TRNLUInt64($629a292a367cd507),
+               TRNLUInt64($9159015a3070dd17),TRNLUInt64($152fecd8f70e5939),
+               TRNLUInt64($67332667ffc00b31),TRNLUInt64($8eb44a8768581511),
+               TRNLUInt64($db0c2e0d64f98fa7),TRNLUInt64($47b5481dbefa4fa4)
+              );
       public
        procedure Initialize;
+       procedure Initialize384;
        procedure Update(const aMessage;const aMessageSize:TRNLSizeUInt);
        procedure Finalize(out aHash);
+       procedure Finalize384(out aHash);
+     end;
+
+     PRNLSHA384Hash=^TRNLSHA384Hash;
+     TRNLSHA384Hash=array[0..47] of TRNLUInt8;
+
+     PRNLSHA384=^TRNLSHA384;
+     TRNLSHA384=record
+      public
+       class procedure Process(out aHash;const aMessage;const aMessageSize:TRNLSizeUInt); static;
+       class procedure SelfTest; static;
      end;
 
      PRNLSHA512=^TRNLSHA512;
@@ -1960,22 +1986,558 @@ type PRNLVersion=^TRNLVersion;
        class procedure SelfTest; static;
      end;
 
-     // RFC 8446 section 7.3 for key and iv, RFC 9147 section 4.2.3 for the third one, which TLS does
-     // not have: over a datagram the sequence number travels in the clear where TCP had it implicit,
-     // so DTLS 1.3 masks it with a keystream taken from the record's own ciphertext.
-     PRNLDTLSTrafficKeys=^TRNLDTLSTrafficKeys;
-     TRNLDTLSTrafficKeys=record
+     // secp256r1, which NIST calls P-256, and which is here because it is what actually exists in
+     // the field. A TURN relay with a Let's Encrypt certificate signs with ecdsa_secp256r1_sha256
+     // and refuses x25519 for the key exchange, measured on 2026-08-02 - so neither the curve RNL
+     // already has nor the signature scheme it already has can be used to talk to one.
+     //
+     //   y^2 = x^3 - 3x + b   over the prime field of   p = 2^256 - 2^224 + 2^192 + 2^96 - 1
+     //
+     // Eight 32 bit limbs, least significant first, because RNL builds for 32 bit targets as well
+     // and a four by 64 bit representation would need a 128 bit product there.
+     //
+     // Montgomery form throughout, rather than the reduction the shape of p allows. That reduction
+     // is nine shuffled word vectors added and subtracted in a particular order: faster, and exactly
+     // the kind of thing which is wrong in one place and passes most tests regardless. Montgomery is
+     // one uniform loop.
+     // Wide enough for the largest curve here: P-256 needs eight limbs and P-384 twelve. A curve
+     // with fewer leaves the rest at zero, and every routine which produces an element writes the
+     // whole array, so the tail can never hold anything left over from before. That invariant is
+     // what lets the comparisons run over the full width without knowing which curve they are on.
+     PRNLECFieldElement=^TRNLECFieldElement;
+     TRNLECFieldElement=array[0..11] of TRNLUInt32;
+
+     // Jacobian coordinates, where the affine point is (X/Z^2, Y/Z^3) and Z of zero is the point at
+     // infinity. Projective rather than affine because affine addition needs an inversion per step,
+     // and an inversion is as many squarings as the field is wide.
+     PRNLECPoint=^TRNLECPoint;
+     TRNLECPoint=record
       public
-       const KeySize=TRNLChaCha20Poly1305.KeySize;
-             IVSize=TRNLChaCha20Poly1305.NonceSize;
-             SequenceNumberKeySize=TRNLChaCha20Poly1305.KeySize;
+       X,Y,Z:TRNLECFieldElement;
+     end;
+
+     // Everything the arithmetic needs of a curve. It exists so that the arithmetic exists once:
+     // the alternative was a second record carrying another six hundred lines of the same thing,
+     // which is the sort of copy that gets left behind at the next correction.
+     //
+     // Both curves here have a = -3, which is what the doubling formula rests on. A curve without it
+     // would need another one, and this record does not carry a for that reason: it would look like
+     // a knob which can be turned, and it cannot.
+     PRNLECCurve=^TRNLECCurve;
+     TRNLECCurve=record
       public
-       Key:array[0..KeySize-1] of TRNLUInt8;
-       IV:array[0..IVSize-1] of TRNLUInt8;
-       SequenceNumberKey:array[0..SequenceNumberKeySize-1] of TRNLUInt8;
-       // All three out of one traffic secret, which is what the handshake hands over
-       function DeriveFrom(const aTrafficSecret;const aTrafficSecretSize:TRNLSizeUInt):boolean;
-       procedure Clear;
+       Limbs:TRNLSizeInt;
+       ElementSize:TRNLSizeInt;
+       FieldModulus:TRNLECFieldElement;
+       FieldMontgomeryOne:TRNLECFieldElement;
+       FieldMontgomeryRSquared:TRNLECFieldElement;
+       FieldNegativeInverse:TRNLUInt32;
+       OrderModulus:TRNLECFieldElement;
+       OrderMontgomeryOne:TRNLECFieldElement;
+       OrderMontgomeryRSquared:TRNLECFieldElement;
+       OrderNegativeInverse:TRNLUInt32;
+       CurveB:TRNLECFieldElement;
+       BaseX:TRNLECFieldElement;
+       BaseY:TRNLECFieldElement;
+     end;
+
+     // The arithmetic itself, over any curve the record above can describe.
+     PRNLEC=^TRNLEC;
+     TRNLEC=record
+      public
+       const MaximumLimbs=12;
+             MaximumElementSize=MaximumLimbs*4;
+             // Uncompressed: the tag, then X, then Y. The only form TLS uses for these curves, and
+             // the only one accepted here - a compressed point would need a square root to unpack,
+             // and nothing on the way to a relay ever sends one.
+             UncompressedPointTag=TRNLUInt8($04);
+      public
+       class procedure Zero(out aResult:TRNLECFieldElement); static;
+       class procedure Copy_(out aResult:TRNLECFieldElement;const aValue:TRNLECFieldElement); static;
+       // All ones when the two are equal, zero otherwise, and without a branch on the data
+       class function EqualMask(const aLeft,aRight:TRNLECFieldElement):TRNLUInt32; static;
+       class function IsZeroMask(const aValue:TRNLECFieldElement):TRNLUInt32; static;
+       class procedure Select(out aResult:TRNLECFieldElement;
+                              const aWhenZero,aWhenOnes:TRNLECFieldElement;
+                              const aMask:TRNLUInt32); static;
+       // True when the value is below the modulus, which is what a canonical encoding means
+       class function Below(const aValue,aModulus:TRNLECFieldElement):boolean; static;
+       class procedure Add(out aResult:TRNLECFieldElement;
+                           const aLeft,aRight,aModulus:TRNLECFieldElement;
+                           const aLimbs:TRNLSizeInt); static;
+       class procedure Subtract(out aResult:TRNLECFieldElement;
+                                const aLeft,aRight,aModulus:TRNLECFieldElement;
+                                const aLimbs:TRNLSizeInt); static;
+       class procedure MontgomeryMultiply(out aResult:TRNLECFieldElement;
+                                          const aLeft,aRight,aModulus:TRNLECFieldElement;
+                                          const aNegativeInverse:TRNLUInt32;
+                                          const aLimbs:TRNLSizeInt); static;
+       // Fermat, so a^(m-2). As many squarings as the field is wide and as many multiplications, of
+       // which half are thrown away - which is the point, since the value being inverted comes off
+       // the secret scalar and a chain of operations which depended on it would say so in its timing.
+       class procedure MontgomeryInvert(out aResult:TRNLECFieldElement;
+                                        const aValue,aModulus:TRNLECFieldElement;
+                                        const aNegativeInverse:TRNLUInt32;
+                                        const aMontgomeryOne:TRNLECFieldElement;
+                                        const aLimbs:TRNLSizeInt); static;
+       class procedure FromBigEndian(out aResult:TRNLECFieldElement;
+                                     const aData;const aLimbs:TRNLSizeInt); static;
+       class procedure ToBigEndian(out aData;const aValue:TRNLECFieldElement;
+                                   const aLimbs:TRNLSizeInt); static;
+       class procedure PointSetInfinity(out aPoint:TRNLECPoint;const aCurve:TRNLECCurve); static;
+       class procedure PointDouble(out aResult:TRNLECPoint;const aPoint:TRNLECPoint;
+                                   const aCurve:TRNLECCurve); static;
+       class procedure PointAdd(out aResult:TRNLECPoint;const aLeft,aRight:TRNLECPoint;
+                                const aCurve:TRNLECCurve); static;
+       // Double and add always, so that the sequence of operations is the same whatever the scalar
+       class procedure PointMultiply(out aResult:TRNLECPoint;
+                                     const aScalar:TRNLECFieldElement;
+                                     const aPoint:TRNLECPoint;
+                                     const aCurve:TRNLECCurve); static;
+       // False for the point at infinity, which has no affine form
+       class function PointToAffine(out aX,aY:TRNLECFieldElement;const aPoint:TRNLECPoint;
+                                    const aCurve:TRNLECCurve):boolean; static;
+       // The generator, in Montgomery form and ready to multiply
+       class procedure BasePoint(out aPoint:TRNLECPoint;const aCurve:TRNLECCurve); static;
+       // Reads an uncompressed point and checks everything about it: the tag, both coordinates below
+       // p, and the point actually on the curve. Without the last one a peer can hand over a point on
+       // a different curve of its choosing, whose order is smooth, and read the private key out of
+       // the shared secret one small factor at a time.
+       class function DecodePoint(out aPoint:TRNLECPoint;
+                                  const aData;const aDataSize:TRNLSizeUInt;
+                                  const aCurve:TRNLECCurve):boolean; static;
+       class procedure EncodePoint(out aData;const aX,aY:TRNLECFieldElement;
+                                   const aCurve:TRNLECCurve); static;
+       // A private key uniformly in [1,n-1] by rejection, and the public point which goes with it.
+       // aPrivateKey is ElementSize bytes big endian, aPublicKey is 1+2*ElementSize bytes.
+       class procedure GenerateKeyPair(const aRandomGenerator:TRNLRandomGenerator;
+                                       out aPrivateKey;out aPublicKey;
+                                       const aCurve:TRNLECCurve); static;
+       // The x coordinate of d*Q, which is what TLS means by the ECDH shared secret - RFC 8422
+       // section 5.10 says the y coordinate is thrown away. False for a peer point which does not
+       // check out, and for the point at infinity, which is what a peer gets if it sends a point of
+       // small order.
+       class function SharedSecret(out aSecret;
+                                   const aPrivateKey;
+                                   const aPeerPublicKey;const aPeerPublicKeySize:TRNLSizeUInt;
+                                   const aCurve:TRNLECCurve):boolean; static;
+       // ECDSA verification, FIPS 186-4. r and s are ElementSize bytes each, big endian, which is how
+       // TLS carries them once the two INTEGERs of the DER encoding have been unwrapped.
+       //
+       // The hash arrives as bytes and is turned into a number the way FIPS 186-4 section 6.4 says:
+       // the leftmost bits, as many as the group order is wide. So SHA-256 goes into P-256 whole,
+       // SHA-384 is cut to its first thirty two bytes there, and anything shorter counts as the
+       // number it is.
+       //
+       // Everything here is public - a signature, a public key and a message everyone can see - so
+       // nothing about it needs to hide its timing. It runs on the constant time routines anyway,
+       // because a second set of them would be a second set to keep right.
+       class function VerifySignature(const aPublicKey;const aPublicKeySize:TRNLSizeUInt;
+                                      const aHash;const aHashSize:TRNLSizeUInt;
+                                      const aSignatureR;const aSignatureS;
+                                      const aCurve:TRNLECCurve):boolean; static;
+     end;
+
+     PRNLP256=^TRNLP256;
+     TRNLP256=record
+      public
+       const Limbs=8;
+             ElementSize=Limbs*4;
+             PointSize=1+(ElementSize*2);
+      private
+       const // p, and what Montgomery arithmetic needs of it. NegativeInverse is one because the
+             // lowest limb of p is all ones, so -p^-1 mod 2^32 comes out as one exactly.
+             FieldModulus:TRNLECFieldElement=
+              (
+               TRNLUInt32($ffffffff),TRNLUInt32($ffffffff),TRNLUInt32($ffffffff),TRNLUInt32($00000000),
+               TRNLUInt32($00000000),TRNLUInt32($00000000),TRNLUInt32($00000001),TRNLUInt32($ffffffff),
+               TRNLUInt32($00000000),TRNLUInt32($00000000),TRNLUInt32($00000000),TRNLUInt32($00000000)
+              );
+             FieldMontgomeryOne:TRNLECFieldElement=
+              (
+               TRNLUInt32($00000001),TRNLUInt32($00000000),TRNLUInt32($00000000),TRNLUInt32($ffffffff),
+               TRNLUInt32($ffffffff),TRNLUInt32($ffffffff),TRNLUInt32($fffffffe),TRNLUInt32($00000000),
+               TRNLUInt32($00000000),TRNLUInt32($00000000),TRNLUInt32($00000000),TRNLUInt32($00000000)
+              );
+             FieldMontgomeryRSquared:TRNLECFieldElement=
+              (
+               TRNLUInt32($00000003),TRNLUInt32($00000000),TRNLUInt32($ffffffff),TRNLUInt32($fffffffb),
+               TRNLUInt32($fffffffe),TRNLUInt32($ffffffff),TRNLUInt32($fffffffd),TRNLUInt32($00000004),
+               TRNLUInt32($00000000),TRNLUInt32($00000000),TRNLUInt32($00000000),TRNLUInt32($00000000)
+              );
+             FieldNegativeInverse=TRNLUInt32($00000001);
+             // n, the order of the base point. Needed for bounding a private key, and by ECDSA for
+             // the arithmetic its verification is written in.
+             OrderModulus:TRNLECFieldElement=
+              (
+               TRNLUInt32($fc632551),TRNLUInt32($f3b9cac2),TRNLUInt32($a7179e84),TRNLUInt32($bce6faad),
+               TRNLUInt32($ffffffff),TRNLUInt32($ffffffff),TRNLUInt32($00000000),TRNLUInt32($ffffffff),
+               TRNLUInt32($00000000),TRNLUInt32($00000000),TRNLUInt32($00000000),TRNLUInt32($00000000)
+              );
+             OrderMontgomeryOne:TRNLECFieldElement=
+              (
+               TRNLUInt32($039cdaaf),TRNLUInt32($0c46353d),TRNLUInt32($58e8617b),TRNLUInt32($43190552),
+               TRNLUInt32($00000000),TRNLUInt32($00000000),TRNLUInt32($ffffffff),TRNLUInt32($00000000),
+               TRNLUInt32($00000000),TRNLUInt32($00000000),TRNLUInt32($00000000),TRNLUInt32($00000000)
+              );
+             OrderMontgomeryRSquared:TRNLECFieldElement=
+              (
+               TRNLUInt32($be79eea2),TRNLUInt32($83244c95),TRNLUInt32($49bd6fa6),TRNLUInt32($4699799c),
+               TRNLUInt32($2b6bec59),TRNLUInt32($2845b239),TRNLUInt32($f3d95620),TRNLUInt32($66e12d94),
+               TRNLUInt32($00000000),TRNLUInt32($00000000),TRNLUInt32($00000000),TRNLUInt32($00000000)
+              );
+             OrderNegativeInverse=TRNLUInt32($ee00bc4f);
+             // b of the curve equation, and the base point, all in ordinary form and converted where
+             // they are used. Fewer constants written down is fewer constants to get wrong.
+             CurveB:TRNLECFieldElement=
+              (
+               TRNLUInt32($27d2604b),TRNLUInt32($3bce3c3e),TRNLUInt32($cc53b0f6),TRNLUInt32($651d06b0),
+               TRNLUInt32($769886bc),TRNLUInt32($b3ebbd55),TRNLUInt32($aa3a93e7),TRNLUInt32($5ac635d8),
+               TRNLUInt32($00000000),TRNLUInt32($00000000),TRNLUInt32($00000000),TRNLUInt32($00000000)
+              );
+             BaseX:TRNLECFieldElement=
+              (
+               TRNLUInt32($d898c296),TRNLUInt32($f4a13945),TRNLUInt32($2deb33a0),TRNLUInt32($77037d81),
+               TRNLUInt32($63a440f2),TRNLUInt32($f8bce6e5),TRNLUInt32($e12c4247),TRNLUInt32($6b17d1f2),
+               TRNLUInt32($00000000),TRNLUInt32($00000000),TRNLUInt32($00000000),TRNLUInt32($00000000)
+              );
+             BaseY:TRNLECFieldElement=
+              (
+               TRNLUInt32($37bf51f5),TRNLUInt32($cbb64068),TRNLUInt32($6b315ece),TRNLUInt32($2bce3357),
+               TRNLUInt32($7c0f9e16),TRNLUInt32($8ee7eb4a),TRNLUInt32($fe1a7f9b),TRNLUInt32($4fe342e2),
+               TRNLUInt32($00000000),TRNLUInt32($00000000),TRNLUInt32($00000000),TRNLUInt32($00000000)
+              );
+      public
+       // Assembled at run time rather than declared as a typed constant of the record type, which
+       // would have to sit after the constants it is built out of
+       class function Curve:TRNLECCurve; static;
+       class function DecodePoint(out aPoint:TRNLECPoint;
+                                  const aData;const aDataSize:TRNLSizeUInt):boolean; static;
+       class procedure GenerateKeyPair(const aRandomGenerator:TRNLRandomGenerator;
+                                       out aPrivateKey;out aPublicKey); static;
+       class function SharedSecret(out aSecret;
+                                   const aPrivateKey;
+                                   const aPeerPublicKey;const aPeerPublicKeySize:TRNLSizeUInt):boolean; static;
+       class function VerifySignature(const aPublicKey;const aPublicKeySize:TRNLSizeUInt;
+                                      const aHash;const aHashSize:TRNLSizeUInt;
+                                      const aSignatureR;const aSignatureS):boolean; static;
+       class procedure VerificationSelfTest; static;
+       class procedure SelfTest; static;
+     end;
+
+     // secp384r1, which NIST calls P-384, and which is here for one concrete reason: the certificate
+     // chain of the measured relay is signed with ecdsa-with-SHA384 all the way up, over P-384 keys.
+     // The handshake itself is signed with the leaf's P-256 key, so this is what the chain needs and
+     // the connection does not.
+     //
+     //   y^2 = x^3 - 3x + b   over the prime field of   p = 2^384 - 2^128 - 2^96 + 2^32 - 1
+     //
+     // Everything below is constants and five one line calls. That is what stage 4a bought: the
+     // arithmetic is the same six hundred lines it already was.
+     PRNLP384=^TRNLP384;
+     TRNLP384=record
+      public
+       const Limbs=12;
+             ElementSize=Limbs*4;
+             PointSize=1+(ElementSize*2);
+      private
+       const // The lowest limb of p is all ones here as well, so -p^-1 mod 2^32 is one again
+             FieldModulus:TRNLECFieldElement=
+              (
+               TRNLUInt32($ffffffff),TRNLUInt32($00000000),TRNLUInt32($00000000),TRNLUInt32($ffffffff),
+               TRNLUInt32($fffffffe),TRNLUInt32($ffffffff),TRNLUInt32($ffffffff),TRNLUInt32($ffffffff),
+               TRNLUInt32($ffffffff),TRNLUInt32($ffffffff),TRNLUInt32($ffffffff),TRNLUInt32($ffffffff)
+              );
+             FieldMontgomeryOne:TRNLECFieldElement=
+              (
+               TRNLUInt32($00000001),TRNLUInt32($ffffffff),TRNLUInt32($ffffffff),TRNLUInt32($00000000),
+               TRNLUInt32($00000001),TRNLUInt32($00000000),TRNLUInt32($00000000),TRNLUInt32($00000000),
+               TRNLUInt32($00000000),TRNLUInt32($00000000),TRNLUInt32($00000000),TRNLUInt32($00000000)
+              );
+             FieldMontgomeryRSquared:TRNLECFieldElement=
+              (
+               TRNLUInt32($00000001),TRNLUInt32($fffffffe),TRNLUInt32($00000000),TRNLUInt32($00000002),
+               TRNLUInt32($00000000),TRNLUInt32($fffffffe),TRNLUInt32($00000000),TRNLUInt32($00000002),
+               TRNLUInt32($00000001),TRNLUInt32($00000000),TRNLUInt32($00000000),TRNLUInt32($00000000)
+              );
+             FieldNegativeInverse=TRNLUInt32($00000001);
+             OrderModulus:TRNLECFieldElement=
+              (
+               TRNLUInt32($ccc52973),TRNLUInt32($ecec196a),TRNLUInt32($48b0a77a),TRNLUInt32($581a0db2),
+               TRNLUInt32($f4372ddf),TRNLUInt32($c7634d81),TRNLUInt32($ffffffff),TRNLUInt32($ffffffff),
+               TRNLUInt32($ffffffff),TRNLUInt32($ffffffff),TRNLUInt32($ffffffff),TRNLUInt32($ffffffff)
+              );
+             OrderMontgomeryOne:TRNLECFieldElement=
+              (
+               TRNLUInt32($333ad68d),TRNLUInt32($1313e695),TRNLUInt32($b74f5885),TRNLUInt32($a7e5f24d),
+               TRNLUInt32($0bc8d220),TRNLUInt32($389cb27e),TRNLUInt32($00000000),TRNLUInt32($00000000),
+               TRNLUInt32($00000000),TRNLUInt32($00000000),TRNLUInt32($00000000),TRNLUInt32($00000000)
+              );
+             OrderMontgomeryRSquared:TRNLECFieldElement=
+              (
+               TRNLUInt32($19b409a9),TRNLUInt32($2d319b24),TRNLUInt32($df1aa419),TRNLUInt32($ff3d81e5),
+               TRNLUInt32($fcb82947),TRNLUInt32($bc3e483a),TRNLUInt32($4aab1cc5),TRNLUInt32($d40d4917),
+               TRNLUInt32($28266895),TRNLUInt32($3fb05b7a),TRNLUInt32($2b39bf21),TRNLUInt32($0c84ee01)
+              );
+             OrderNegativeInverse=TRNLUInt32($e88fdc45);
+             CurveB:TRNLECFieldElement=
+              (
+               TRNLUInt32($d3ec2aef),TRNLUInt32($2a85c8ed),TRNLUInt32($8a2ed19d),TRNLUInt32($c656398d),
+               TRNLUInt32($5013875a),TRNLUInt32($0314088f),TRNLUInt32($fe814112),TRNLUInt32($181d9c6e),
+               TRNLUInt32($e3f82d19),TRNLUInt32($988e056b),TRNLUInt32($e23ee7e4),TRNLUInt32($b3312fa7)
+              );
+             BaseX:TRNLECFieldElement=
+              (
+               TRNLUInt32($72760ab7),TRNLUInt32($3a545e38),TRNLUInt32($bf55296c),TRNLUInt32($5502f25d),
+               TRNLUInt32($82542a38),TRNLUInt32($59f741e0),TRNLUInt32($8ba79b98),TRNLUInt32($6e1d3b62),
+               TRNLUInt32($f320ad74),TRNLUInt32($8eb1c71e),TRNLUInt32($be8b0537),TRNLUInt32($aa87ca22)
+              );
+             BaseY:TRNLECFieldElement=
+              (
+               TRNLUInt32($90ea0e5f),TRNLUInt32($7a431d7c),TRNLUInt32($1d7e819d),TRNLUInt32($0a60b1ce),
+               TRNLUInt32($b5f0b8c0),TRNLUInt32($e9da3113),TRNLUInt32($289a147c),TRNLUInt32($f8f41dbd),
+               TRNLUInt32($9292dc29),TRNLUInt32($5d9e98bf),TRNLUInt32($96262c6f),TRNLUInt32($3617de4a)
+              );
+      public
+       class function Curve:TRNLECCurve; static;
+       class function DecodePoint(out aPoint:TRNLECPoint;
+                                  const aData;const aDataSize:TRNLSizeUInt):boolean; static;
+       class procedure GenerateKeyPair(const aRandomGenerator:TRNLRandomGenerator;
+                                       out aPrivateKey;out aPublicKey); static;
+       class function SharedSecret(out aSecret;
+                                   const aPrivateKey;
+                                   const aPeerPublicKey;const aPeerPublicKeySize:TRNLSizeUInt):boolean; static;
+       class function VerifySignature(const aPublicKey;const aPublicKeySize:TRNLSizeUInt;
+                                      const aHash;const aHashSize:TRNLSizeUInt;
+                                      const aSignatureR;const aSignatureS):boolean; static;
+       class procedure SelfTest; static;
+     end;
+
+     // A window into somebody else's DER, and nothing more. Nothing here allocates and nothing here
+     // copies: entering a constructed value narrows the window instead of building a new buffer, so
+     // a certificate is walked in place.
+     //
+     // The rules enforced are DER's and not BER's, which matters because BER admits several
+     // encodings of the same value and a certificate that can be written two ways is a certificate
+     // whose fingerprint is not what anyone thinks it is:
+     //
+     //  * a tag is one byte; the high tag number form is refused rather than parsed, because nothing
+     //    in a certificate uses it
+     //  * the indefinite length form is refused, since DER forbids it outright
+     //  * a long form length must be minimal, so no leading zero byte and nothing below 128 written
+     //    the long way
+     //  * every length is checked against what is actually left, before it is believed
+     PRNLASN1Reader=^TRNLASN1Reader;
+     TRNLASN1Reader=record
+      public
+       const TAG_BOOLEAN=TRNLUInt8($01);
+             TAG_INTEGER=TRNLUInt8($02);
+             TAG_BIT_STRING=TRNLUInt8($03);
+             TAG_OCTET_STRING=TRNLUInt8($04);
+             TAG_NULL=TRNLUInt8($05);
+             TAG_OBJECT_IDENTIFIER=TRNLUInt8($06);
+             TAG_UTF8_STRING=TRNLUInt8($0c);
+             TAG_PRINTABLE_STRING=TRNLUInt8($13);
+             TAG_IA5_STRING=TRNLUInt8($16);
+             TAG_UTC_TIME=TRNLUInt8($17);
+             TAG_GENERALIZED_TIME=TRNLUInt8($18);
+             TAG_SEQUENCE=TRNLUInt8($30);
+             TAG_SET=TRNLUInt8($31);
+             // Context specific and constructed, which is how a certificate marks its optional parts
+             TAG_CONTEXT_0=TRNLUInt8($a0);
+             TAG_CONTEXT_1=TRNLUInt8($a1);
+             TAG_CONTEXT_2=TRNLUInt8($a2);
+             TAG_CONTEXT_3=TRNLUInt8($a3);
+             // Four bytes of length is more than any certificate, and refusing more keeps the
+             // arithmetic below inside what a signed integer holds
+             MaximumLengthBytes=4;
+      private
+       fData:PRNLUInt8Array;
+       fPosition:TRNLSizeInt;
+       fEnd:TRNLSizeInt;
+       // Where the element last read began and ended, tag and length included, which is what a
+       // signature is computed over and what a fingerprint is taken of
+       fElementStart:TRNLSizeInt;
+       fElementEnd:TRNLSizeInt;
+      public
+       procedure Initialize(const aData;const aDataSize:TRNLSizeUInt);
+       function AtEnd:boolean;
+       function Remaining:TRNLSizeInt;
+       function ReadAny(out aTag:TRNLUInt8;out aContents:TRNLASN1Reader):boolean;
+       function Read(const aTag:TRNLUInt8;out aContents:TRNLASN1Reader):boolean;
+       function PeekTag(out aTag:TRNLUInt8):boolean;
+       function Skip:boolean;
+       // The whole encoding of the element last read, tag and length included
+       function LastElement(out aData:PRNLUInt8Array;out aSize:TRNLSizeInt):boolean;
+       // What is left of this window, which for a contents reader is the value itself
+       procedure Rest(out aData:PRNLUInt8Array;out aSize:TRNLSizeInt);
+       // Compared over the encoded bytes rather than over decoded arc numbers, because decoding them
+       // buys nothing and costs a second thing to get wrong
+       function ReadObjectIdentifier(out aData:PRNLUInt8Array;out aSize:TRNLSizeInt):boolean;
+       function ObjectIdentifierIs(const aOID;const aOIDSize:TRNLSizeInt):boolean;
+       // A BIT STRING whose first byte says how many bits of the last one are unused. A certificate
+       // only ever holds whole bytes, so anything but zero there is refused.
+       function ReadBitString(out aData:PRNLUInt8Array;out aSize:TRNLSizeInt):boolean;
+       // Refused rather than truncated when it will not fit, and refused when it is not minimally
+       // encoded, which is DER's rule for INTEGER as much as for a length
+       function ReadInteger(out aValue:TRNLInt64):boolean;
+       function ReadIntegerBytes(out aData:PRNLUInt8Array;out aSize:TRNLSizeInt):boolean;
+       function ReadBoolean(out aValue:boolean):boolean;
+       // UTCTime or GeneralizedTime, both only in the form DER allows: four or two digit year, then
+       // month, day, hour, minute, second, then Z. No local time, no fractional seconds, no offset.
+       function ReadTime(out aSecondsSinceUnixEpoch:TRNLInt64):boolean;
+       class function DaysFromCivil(const aYear,aMonth,aDay:TRNLInt64):TRNLInt64; static;
+       class procedure SelfTest; static;
+     end;
+
+     PRNLX509SignatureAlgorithm=^TRNLX509SignatureAlgorithm;
+     TRNLX509SignatureAlgorithm=
+      (
+       RNL_X509_SIGNATURE_ALGORITHM_UNSUPPORTED,
+       RNL_X509_SIGNATURE_ALGORITHM_ECDSA_SHA256,
+       RNL_X509_SIGNATURE_ALGORITHM_ECDSA_SHA384
+      );
+
+     PRNLX509PublicKeyCurve=^TRNLX509PublicKeyCurve;
+     TRNLX509PublicKeyCurve=
+      (
+       RNL_X509_PUBLIC_KEY_CURVE_UNSUPPORTED,
+       RNL_X509_PUBLIC_KEY_CURVE_P256,
+       RNL_X509_PUBLIC_KEY_CURVE_P384
+      );
+
+     // One certificate, taken apart in place. Every pointer in here is a window into the buffer the
+     // caller supplied and lives exactly as long as that buffer does - nothing is copied except the
+     // public key and the signature, which are copied because they are needed in a fixed width form
+     // and the encoding gives them in a variable one.
+     //
+     // What is deliberately NOT here: any attempt to understand a name. The issuer and the subject
+     // are spans of encoded bytes, compared against each other byte for byte when a chain is linked
+     // up. Host names come from the subjectAltName extension and nowhere else, which is what RFC 6125
+     // has said since 2011 and what every serious X.509 name failure comes from ignoring.
+     PRNLX509Certificate=^TRNLX509Certificate;
+     TRNLX509Certificate=record
+      public
+       const // KeyUsage as the BIT STRING lays it out: bit zero is the top bit of the first byte,
+             // which is why digitalSignature is $8000 rather than $0001
+             KEY_USAGE_DIGITAL_SIGNATURE=TRNLUInt16($8000);
+             KEY_USAGE_KEY_CERT_SIGN=TRNLUInt16($0400);
+             KEY_USAGE_CRL_SIGN=TRNLUInt16($0200);
+             // GeneralName in a subjectAltName, context specific and primitive
+             GENERAL_NAME_DNS=TRNLUInt8($82);
+             GENERAL_NAME_IP_ADDRESS=TRNLUInt8($87);
+      public
+       TBSCertificate:PRNLUInt8Array;
+       TBSCertificateSize:TRNLSizeInt;
+       Issuer:PRNLUInt8Array;
+       IssuerSize:TRNLSizeInt;
+       Subject:PRNLUInt8Array;
+       SubjectSize:TRNLSizeInt;
+       SubjectAlternativeNames:PRNLUInt8Array;
+       SubjectAlternativeNamesSize:TRNLSizeInt;
+       PublicKey:array[0..TRNLP384.PointSize-1] of TRNLUInt8;
+       PublicKeySize:TRNLSizeInt;
+       PublicKeyCurve:TRNLX509PublicKeyCurve;
+       SignatureAlgorithm:TRNLX509SignatureAlgorithm;
+       // r then s, each padded on the left to the width of the curve, because that is the shape the
+       // verifier wants and the encoding gives them as two integers of whatever length they need
+       SignatureR:array[0..TRNLP384.ElementSize-1] of TRNLUInt8;
+       SignatureS:array[0..TRNLP384.ElementSize-1] of TRNLUInt8;
+       SignatureElementSize:TRNLSizeInt;
+       NotBefore:TRNLInt64;
+       NotAfter:TRNLInt64;
+       Version:TRNLInt64;
+       HasBasicConstraints:boolean;
+       IsCertificateAuthority:boolean;
+       HasPathLengthConstraint:boolean;
+       PathLengthConstraint:TRNLInt64;
+       HasKeyUsage:boolean;
+       KeyUsage:TRNLUInt16;
+       HasExtendedKeyUsage:boolean;
+       AllowsServerAuthentication:boolean;
+      public
+       // False for anything at all which does not add up, including an extension marked critical
+       // which this code does not know. RFC 5280 section 4.2 is explicit about that one, and it is
+       // the difference between ignoring a constraint and refusing to pretend it was honoured.
+       function Parse(const aData;const aDataSize:TRNLSizeUInt):boolean;
+       class procedure SelfTest; static;
+     end;
+
+     // Why a verdict and not a boolean: the difference between "expired" and "signed by somebody
+     // else" is the difference between a clock which needs setting and an attack, and a caller which
+     // cannot tell them apart will log the same line for both.
+     PRNLX509Verdict=^TRNLX509Verdict;
+     TRNLX509Verdict=
+      (
+       RNL_X509_VERDICT_ACCEPTED,
+       RNL_X509_VERDICT_MALFORMED,
+       RNL_X509_VERDICT_EMPTY_CHAIN,
+       RNL_X509_VERDICT_CHAIN_TOO_LONG,
+       RNL_X509_VERDICT_BAD_SIGNATURE,
+       RNL_X509_VERDICT_ISSUER_MISMATCH,
+       RNL_X509_VERDICT_NOT_A_CERTIFICATE_AUTHORITY,
+       RNL_X509_VERDICT_PATH_TOO_LONG,
+       RNL_X509_VERDICT_MISSING_KEY_CERT_SIGN,
+       RNL_X509_VERDICT_EXPIRED,
+       RNL_X509_VERDICT_NOT_YET_VALID,
+       RNL_X509_VERDICT_NO_CLOCK,
+       RNL_X509_VERDICT_UNTRUSTED_ROOT,
+       RNL_X509_VERDICT_WRONG_HOST_NAME,
+       RNL_X509_VERDICT_NOT_A_SERVER_CERTIFICATE
+      );
+
+     PRNLX509ChainEntry=^TRNLX509ChainEntry;
+     TRNLX509ChainEntry=record
+      public
+       Data:PRNLUInt8Array;
+       Size:TRNLSizeInt;
+     end;
+
+     PRNLX509=^TRNLX509;
+     TRNLX509=record
+      public
+       const // Eight is more than any real deployment and enough that the bound is never the reason
+             // something fails. It exists so that a peer cannot hand over a chain long enough to
+             // make the work of checking it into the attack.
+             MaximumChainLength=8;
+      public
+       type PChainEntries=^TChainEntries;
+            TChainEntries=array[0..MaximumChainLength-1] of TRNLX509ChainEntry;
+      public
+       // The signature of one certificate under the public key of another. The digest comes from the
+       // algorithm the certificate names, the width of r and s from the curve of the issuer's key,
+       // and those are two different questions - a certificate signed with SHA-384 by a P-256 key
+       // exists and would go wrong if the two were confused.
+       // An ECDSA-Sig-Value, which is a SEQUENCE of two INTEGERs, into two numbers of a fixed width.
+       // The same shape appears in a certificate and in a ServerKeyExchange, so it lives here once.
+       class function DecodeSignature(const aData;const aDataSize:TRNLSizeInt;
+                                      const aElementSize:TRNLSizeInt;
+                                      out aR,aS_):boolean; static;
+       class function VerifySignature(const aCertificate,aIssuer:TRNLX509Certificate):boolean; static;
+       // The dNSName entries of the subjectAltName, matched the way RFC 6125 wants them matched.
+       // The common name is deliberately not consulted: it has not been a source of host names
+       // since 2011, and honouring it is how a certificate for one thing gets accepted for another.
+       class function MatchesHostName(const aCertificate:TRNLX509Certificate;
+                                      const aHostName:TRNLRawByteString):boolean; static;
+       // Whether one certificate was issued by another, which is a comparison of encoded names and
+       // nothing more. No parsing, no case folding, no normalisation - RFC 5280 section 7.1 allows
+       // several of those and every one of them is a way for two different names to compare equal.
+       class function IsIssuedBy(const aCertificate,aIssuer:TRNLX509Certificate):boolean; static;
+       // The whole path, leaf first, up to one of the roots the application trusts. The root may be
+       // the last entry of the chain itself, which is what a server sends when it includes its own
+       // root, or it may sit above it.
+       //
+       // aNowSecondsSinceUnixEpoch is supplied by the application and not read from the operating
+       // system, the same way the certificates of fixplan.md stage 8 take their clock: some
+       // deployments have a trustworthy time source and some embedded targets have no clock at all.
+       // Zero means no clock, and then a certificate with a validity period is refused rather than
+       // waved through - what cannot be checked cannot be vouched for.
+       class function VerifyChain(const aChain:TChainEntries;const aChainLength:TRNLSizeInt;
+                                  const aTrustedRoots:TChainEntries;const aCountTrustedRoots:TRNLSizeInt;
+                                  const aHostName:TRNLRawByteString;
+                                  const aNowSecondsSinceUnixEpoch:TRNLInt64;
+                                  out aLeaf:TRNLX509Certificate):TRNLX509Verdict; static;
+       class procedure SelfTest; static;
      end;
 
      // A sliding window over the sequence numbers already seen inside one epoch. Deliberately two
@@ -1999,6 +2561,640 @@ type PRNLVersion=^TRNLVersion;
        function Reconstruct(const aPartial:TRNLUInt64;const aPartialSize:TRNLSizeUInt):TRNLUInt64;
        function Permits(const aSequenceNumber:TRNLUInt64):boolean;
        procedure Remember(const aSequenceNumber:TRNLUInt64);
+     end;
+
+     // RFC 5246 section 5. TLS 1.2 dropped the MD5-and-SHA-1 split its predecessors used and put a
+     // single P_hash in its place; every cipher suite defined since names SHA-256 for it, so this is
+     // HMAC-SHA-256 and there is nothing to choose.
+     //
+     //   A(0) = label|seed,  A(i) = HMAC(secret, A(i-1))
+     //   P_hash = HMAC(secret, A(1)|label|seed) | HMAC(secret, A(2)|label|seed) | ...
+     //
+     // Nothing is buffered: the label and the seed go into the HMAC one after the other, which is
+     // what the streaming context added for HKDF is good for a second time.
+     PRNLTLS12PRF=^TRNLTLS12PRF;
+     TRNLTLS12PRF=record
+      public
+       class function Process(out aOutput;const aOutputSize:TRNLSizeUInt;
+                              const aSecret;const aSecretSize:TRNLSizeUInt;
+                              const aLabel:TRNLRawByteString;
+                              const aSeed;const aSeedSize:TRNLSizeUInt):boolean; static;
+       class procedure SelfTest; static;
+     end;
+
+     // What comes out of the key block for one direction. An AEAD suite has no MAC keys, so it is a
+     // key and a fixed IV and nothing else.
+     PRNLDTLS12TrafficKeys=^TRNLDTLS12TrafficKeys;
+     TRNLDTLS12TrafficKeys=record
+      public
+       const KeySize=TRNLChaCha20Poly1305.KeySize;
+             IVSize=TRNLChaCha20Poly1305.NonceSize;
+             // client_write_key | server_write_key | client_write_IV | server_write_IV, in that
+             // order, which is the order RFC 5246 section 6.3 lays the block out in
+             KeyBlockSize=(KeySize*2)+(IVSize*2);
+      public
+       Key:array[0..KeySize-1] of TRNLUInt8;
+       IV:array[0..IVSize-1] of TRNLUInt8;
+       class procedure SplitKeyBlock(out aClientKeys,aServerKeys:TRNLDTLS12TrafficKeys;
+                                     const aKeyBlock); static;
+       procedure Clear;
+     end;
+
+     // RFC 6347 section 4.1, which is the older and simpler record layer: every field in the clear,
+     // a fixed thirteen byte header, and no masking of the sequence number - that arrived with 1.3.
+     //
+     //   struct {
+     //    ContentType type;          uint8
+     //    ProtocolVersion version;   {254,253} for DTLS 1.2
+     //    uint16 epoch;
+     //    uint48 sequence_number;
+     //    uint16 length;
+     //    opaque fragment[length];
+     //   } DTLSCiphertext;
+     PRNLDTLS12Record=^TRNLDTLS12Record;
+     TRNLDTLS12Record=record
+      public
+       const HeaderSize=13;
+             TagSize=TRNLChaCha20Poly1305.TagSize;
+             MaximumContentSize=16384;
+             // DTLS numbers its versions downwards from 1 minus the TLS number, so DTLS 1.2 is
+             // {254,253} and not {3,3}
+             VersionMajor=TRNLUInt8(254);
+             VersionMinor=TRNLUInt8(253);
+             CONTENT_TYPE_CHANGE_CIPHER_SPEC=TRNLUInt8(20);
+             CONTENT_TYPE_ALERT=TRNLUInt8(21);
+             CONTENT_TYPE_HANDSHAKE=TRNLUInt8(22);
+             CONTENT_TYPE_APPLICATION_DATA=TRNLUInt8(23);
+      private
+       // Epoch and sequence number together are the eight byte number which both the nonce and the
+       // associated data are built out of. DTLS 1.2 puts the epoch in; DTLS 1.3 leaves it out, and
+       // the two are not interchangeable for that reason.
+       class procedure BuildNonce(out aNonce;const aIV;
+                                  const aEpoch:TRNLUInt16;const aSequenceNumber:TRNLUInt64); static;
+       // seq_num | type | version | length, where the length is the one of the plaintext and not of
+       // what goes on the wire
+       class procedure BuildAssociatedData(out aData;
+                                           const aEpoch:TRNLUInt16;const aSequenceNumber:TRNLUInt64;
+                                           const aContentType:TRNLUInt8;
+                                           const aContentSize:TRNLSizeUInt); static;
+       class procedure BuildHeader(out aHeader;
+                                   const aEpoch:TRNLUInt16;const aSequenceNumber:TRNLUInt64;
+                                   const aContentType:TRNLUInt8;
+                                   const aFragmentSize:TRNLSizeUInt); static;
+      public
+       // Epoch zero carries the handshake in the clear, up to the first ChangeCipherSpec. It is a
+       // separate pair of operations rather than a flag, because a record layer which can be asked
+       // to skip its protection is one which can be asked at the wrong moment.
+       class function WritePlain(out aDatagram;out aDatagramSize:TRNLSizeUInt;
+                                 const aMaximumDatagramSize:TRNLSizeUInt;
+                                 const aEpoch:TRNLUInt16;const aSequenceNumber:TRNLUInt64;
+                                 const aContentType:TRNLUInt8;
+                                 const aContent;const aContentSize:TRNLSizeUInt):boolean; static;
+       class function ReadPlain(out aContent;out aContentSize:TRNLSizeUInt;
+                                out aContentType:TRNLUInt8;
+                                out aEpoch:TRNLUInt16;out aSequenceNumber:TRNLUInt64;
+                                out aConsumedSize:TRNLSizeUInt;
+                                const aMaximumContentSize:TRNLSizeUInt;
+                                const aDatagram;const aDatagramSize:TRNLSizeUInt):boolean; static;
+       class function Protect(out aDatagram;out aDatagramSize:TRNLSizeUInt;
+                              const aMaximumDatagramSize:TRNLSizeUInt;
+                              const aKeys:TRNLDTLS12TrafficKeys;
+                              const aEpoch:TRNLUInt16;const aSequenceNumber:TRNLUInt64;
+                              const aContentType:TRNLUInt8;
+                              const aContent;const aContentSize:TRNLSizeUInt):boolean; static;
+       // False for anything at all which does not add up, and deliberately without saying which
+       class function Unprotect(out aContent;out aContentSize:TRNLSizeUInt;
+                                out aContentType:TRNLUInt8;
+                                out aSequenceNumber:TRNLUInt64;
+                                out aConsumedSize:TRNLSizeUInt;
+                                const aMaximumContentSize:TRNLSizeUInt;
+                                const aKeys:TRNLDTLS12TrafficKeys;
+                                const aEpoch:TRNLUInt16;
+                                var aReplayWindow:TRNLDTLSReplayWindow;
+                                const aDatagram;const aDatagramSize:TRNLSizeUInt):boolean; static;
+       class procedure SelfTest; static;
+     end;
+
+     // TLS lays its variable length fields out as a length of one, two or three bytes followed by
+     // that many bytes, nested to whatever depth the structure needs. These two do that and check it:
+     // a reader which believes a length is how a peer gets to say where the parsing goes next.
+     PRNLTLSReader=^TRNLTLSReader;
+     TRNLTLSReader=record
+      private
+       fData:PRNLUInt8Array;
+       fPosition:TRNLSizeInt;
+       fEnd:TRNLSizeInt;
+      public
+       procedure Initialize(const aData;const aDataSize:TRNLSizeInt);
+       function Remaining:TRNLSizeInt;
+       function AtEnd:boolean;
+       function ReadUInt8(out aValue:TRNLUInt8):boolean;
+       function ReadUInt16(out aValue:TRNLUInt16):boolean;
+       function ReadUInt24(out aValue:TRNLSizeInt):boolean;
+       function ReadBytes(out aData:PRNLUInt8Array;const aSize:TRNLSizeInt):boolean;
+       function ReadVector8(out aData:PRNLUInt8Array;out aSize:TRNLSizeInt):boolean;
+       function ReadVector16(out aData:PRNLUInt8Array;out aSize:TRNLSizeInt):boolean;
+       function ReadVector24(out aData:PRNLUInt8Array;out aSize:TRNLSizeInt):boolean;
+       // Everything read so far, which is what a signature over "the parameters as they arrived"
+       // needs - recomputing them from the parsed values would sign what this code understood
+       // rather than what the peer actually sent
+       procedure Since(const aMark:TRNLSizeInt;out aData:PRNLUInt8Array;out aSize:TRNLSizeInt);
+       function Mark:TRNLSizeInt;
+     end;
+
+     // Nothing here throws. A build which runs out of room goes to Valid=false and stays there, so
+     // one check at the end does instead of one per field - the same shape TRNLSTUNMessage has.
+     PRNLTLSWriter=^TRNLTLSWriter;
+     TRNLTLSWriter=record
+      private
+       fData:PRNLUInt8Array;
+       fPosition:TRNLSizeInt;
+       fEnd:TRNLSizeInt;
+       fValid:boolean;
+      public
+       procedure Initialize(out aData;const aMaximumSize:TRNLSizeInt);
+       function Valid:boolean;
+       function Size:TRNLSizeInt;
+       procedure WriteUInt8(const aValue:TRNLUInt8);
+       procedure WriteUInt16(const aValue:TRNLUInt16);
+       procedure WriteUInt24(const aValue:TRNLSizeInt);
+       procedure WriteBytes(const aData;const aSize:TRNLSizeInt);
+       // Leaves room for the length and fills it in when the vector ends, so that a nested
+       // structure does not have to be measured before it is written
+       function BeginVector8:TRNLSizeInt;
+       function BeginVector16:TRNLSizeInt;
+       procedure EndVector8(const aMark:TRNLSizeInt);
+       procedure EndVector16(const aMark:TRNLSizeInt);
+     end;
+
+     // RFC 6347 section 4.2.2, and this is where DTLS parts company with TLS for good. Over a stream
+     // a handshake message is simply a run of bytes; over datagrams it may not fit one, so it
+     // travels in fragments and the header carries what is needed to put them back together.
+     //
+     //   struct {
+     //    HandshakeType msg_type;     uint8
+     //    uint24 length;              the whole message, not this piece
+     //    uint16 message_seq;
+     //    uint24 fragment_offset;
+     //    uint24 fragment_length;
+     //    opaque body[fragment_length];
+     //   } Handshake;
+     //
+     // The three byte lengths are the reason this has its own type: a uint24 read as a uint32 is
+     // off by a factor of 256 and lands somewhere plausible.
+     PRNLDTLS12Handshake=^TRNLDTLS12Handshake;
+     TRNLDTLS12Handshake=record
+      public
+       const HeaderSize=12;
+             TYPE_HELLO_REQUEST=TRNLUInt8(0);
+             TYPE_CLIENT_HELLO=TRNLUInt8(1);
+             TYPE_SERVER_HELLO=TRNLUInt8(2);
+             TYPE_HELLO_VERIFY_REQUEST=TRNLUInt8(3);
+             TYPE_CERTIFICATE=TRNLUInt8(11);
+             TYPE_SERVER_KEY_EXCHANGE=TRNLUInt8(12);
+             TYPE_CERTIFICATE_REQUEST=TRNLUInt8(13);
+             TYPE_SERVER_HELLO_DONE=TRNLUInt8(14);
+             TYPE_CERTIFICATE_VERIFY=TRNLUInt8(15);
+             TYPE_CLIENT_KEY_EXCHANGE=TRNLUInt8(16);
+             TYPE_FINISHED=TRNLUInt8(20);
+      public
+       class procedure WriteHeader(out aHeader;
+                                   const aMessageType:TRNLUInt8;
+                                   const aLength:TRNLSizeInt;
+                                   const aMessageSequence:TRNLUInt16;
+                                   const aFragmentOffset,aFragmentLength:TRNLSizeInt); static;
+       // False for a header which does not add up against the buffer it sits in
+       class function ReadHeader(const aData;const aDataSize:TRNLSizeInt;
+                                 out aMessageType:TRNLUInt8;
+                                 out aLength:TRNLSizeInt;
+                                 out aMessageSequence:TRNLUInt16;
+                                 out aFragmentOffset,aFragmentLength:TRNLSizeInt):boolean; static;
+     end;
+
+     // The one cipher suite, the one group and the two signature schemes this client offers. There
+     // is nothing to negotiate: a server which cannot do these is a server this client cannot talk
+     // to, and saying so at the ClientHello is better than discovering it four messages later.
+     PRNLDTLS12ClientHello=^TRNLDTLS12ClientHello;
+     TRNLDTLS12ClientHello=record
+      public
+       const RandomSize=32;
+             MaximumCookieSize=32;
+             // RFC 7905
+             CIPHER_SUITE_ECDHE_ECDSA_CHACHA20_POLY1305=TRNLUInt16($cca9);
+             NAMED_CURVE_SECP256R1=TRNLUInt16(23);
+             NAMED_CURVE_SECP384R1=TRNLUInt16(24);
+             EC_POINT_FORMAT_UNCOMPRESSED=TRNLUInt8(0);
+             SIGNATURE_ECDSA_SECP256R1_SHA256=TRNLUInt16($0403);
+             SIGNATURE_ECDSA_SECP384R1_SHA384=TRNLUInt16($0503);
+             EXTENSION_SERVER_NAME=TRNLUInt16(0);
+             EXTENSION_SUPPORTED_GROUPS=TRNLUInt16(10);
+             EXTENSION_EC_POINT_FORMATS=TRNLUInt16(11);
+             EXTENSION_SIGNATURE_ALGORITHMS=TRNLUInt16(13);
+             EXTENSION_EXTENDED_MASTER_SECRET=TRNLUInt16(23);
+      public
+       // False when the buffer will not hold it. aCookie is empty on the first attempt and carries
+       // what the HelloVerifyRequest said on the second - that exchange is what keeps a forged
+       // source address from costing the server an allocation.
+       class function Write_(out aBody;out aBodySize:TRNLSizeInt;
+                             const aMaximumBodySize:TRNLSizeInt;
+                             const aRandom;
+                             const aCookie;const aCookieSize:TRNLSizeInt;
+                             const aPublicKey;const aPublicKeySize:TRNLSizeInt;
+                             const aServerName:TRNLRawByteString):boolean; static;
+     end;
+
+     PRNLDTLS12ServerHello=^TRNLDTLS12ServerHello;
+     TRNLDTLS12ServerHello=record
+      public
+       Random_:array[0..TRNLDTLS12ClientHello.RandomSize-1] of TRNLUInt8;
+       CipherSuite:TRNLUInt16;
+       CompressionMethod:TRNLUInt8;
+       ExtendedMasterSecret:boolean;
+       function Parse(const aData;const aDataSize:TRNLSizeInt):boolean;
+     end;
+
+     // The parameters and the signature over them. The signature covers the two randoms and the
+     // parameters exactly as they arrived, which is why the bytes are kept rather than rebuilt from
+     // what was parsed out of them - rebuilding would sign what this code understood.
+     PRNLDTLS12ServerKeyExchange=^TRNLDTLS12ServerKeyExchange;
+     TRNLDTLS12ServerKeyExchange=record
+      public
+       NamedCurve:TRNLUInt16;
+       Point:array[0..TRNLP384.PointSize-1] of TRNLUInt8;
+       PointSize:TRNLSizeInt;
+       HashAlgorithm:TRNLUInt8;
+       SignatureAlgorithm:TRNLUInt8;
+       SignatureR:array[0..TRNLP384.ElementSize-1] of TRNLUInt8;
+       SignatureS:array[0..TRNLP384.ElementSize-1] of TRNLUInt8;
+       SignatureElementSize:TRNLSizeInt;
+       Parameters:PRNLUInt8Array;
+       ParametersSize:TRNLSizeInt;
+       function Parse(const aData;const aDataSize:TRNLSizeInt):boolean;
+       function VerifyWith(const aCertificate:TRNLX509Certificate;
+                           const aClientRandom,aServerRandom):boolean;
+       class procedure SelfTest; static;
+     end;
+
+     // The running hash of the handshake, which both Finished messages are computed over.
+     //
+     // RFC 6347 section 4.2.6 is the trap: the hash covers each message **as if it had been sent
+     // whole**, so one which travelled in five fragments is hashed as one, with a fragment offset of
+     // zero and a fragment length equal to its total length. And the first ClientHello and the
+     // HelloVerifyRequest are left out entirely - the cookie exchange happens before the transcript
+     // begins.
+     PRNLDTLS12Transcript=^TRNLDTLS12Transcript;
+     TRNLDTLS12Transcript=record
+      private
+       fContext:TRNLSHA256Context;
+      public
+       procedure Initialize;
+       procedure AddMessage(const aMessageType:TRNLUInt8;const aMessageSequence:TRNLUInt16;
+                            const aBody;const aBodySize:TRNLSizeInt);
+       // The hash as it stands, without disturbing the running one - both Finished messages are
+       // computed at different points of the same transcript
+       procedure Snapshot(out aHash);
+     end;
+
+     // RFC 5246 section 8.1 and section 6.3, and RFC 7627 for the variant which binds the master
+     // secret to the handshake instead of to two random numbers.
+     PRNLDTLS12KeySchedule=^TRNLDTLS12KeySchedule;
+     TRNLDTLS12KeySchedule=record
+      public
+       const MasterSecretSize=48;
+             VerifyDataSize=12;
+      public
+       MasterSecret:array[0..MasterSecretSize-1] of TRNLUInt8;
+      public
+       // The pre master secret of an ECDHE exchange is the x coordinate of the shared point and
+       // nothing else - not the point, not a hash of it
+       function DeriveMasterSecret(const aPreMasterSecret;const aPreMasterSecretSize:TRNLSizeInt;
+                                   const aClientRandom,aServerRandom):boolean;
+       // The two randoms give way to a hash of the handshake so far, which is what stops the same
+       // master secret from being reached in two different sessions
+       function DeriveExtendedMasterSecret(const aPreMasterSecret;const aPreMasterSecretSize:TRNLSizeInt;
+                                           const aSessionHash;const aSessionHashSize:TRNLSizeInt):boolean;
+       // Note the order: the server random comes first here and second above. Swapping them gives
+       // keys which are wrong and a handshake which fails four messages later.
+       function DeriveKeyBlock(out aKeyBlock;const aKeyBlockSize:TRNLSizeInt;
+                               const aClientRandom,aServerRandom):boolean;
+       function DeriveVerifyData(out aVerifyData;const aFromClient:boolean;
+                                 const aTranscriptHash;const aTranscriptHashSize:TRNLSizeInt):boolean;
+       procedure Clear;
+       class procedure SelfTest; static;
+     end;
+
+     // Puts one handshake message back together out of however many fragments it arrives in, in
+     // whatever order, with whatever overlap. All three of those happen: a retransmission repeats
+     // fragments which already arrived, and a path whose MTU changed mid flight re-cuts them at
+     // different boundaries, so the second copy of a byte need not sit where the first one did.
+     //
+     // Byte granular rather than range based, because ranges have to be merged and merging is where
+     // an off by one turns into a message which is declared complete while a byte of it is missing.
+     PRNLDTLS12Reassembler=^TRNLDTLS12Reassembler;
+     TRNLDTLS12Reassembler=record
+      public
+       const // Enough for a certificate chain of three, which is what the measured relay sends, with
+             // room to spare. Larger is refused rather than truncated: a peer which says its message
+             // is a megabyte long is a peer asking for a megabyte of memory.
+             MaximumMessageSize=32768;
+             BitmapSize=(MaximumMessageSize+7) div 8;
+      private
+       fMessageType:TRNLUInt8;
+       fMessageSequence:TRNLUInt16;
+       fLength:TRNLSizeInt;
+       fCountReceived:TRNLSizeInt;
+       fActive:boolean;
+       fBody:array[0..MaximumMessageSize-1] of TRNLUInt8;
+       fReceived:array[0..BitmapSize-1] of TRNLUInt8;
+      public
+       procedure Initialize;
+       // Takes one fragment out of the front of a buffer. False for anything which does not add up:
+       // a header which will not fit, a fragment past the end of its own message, a length or type
+       // which disagrees with the message already in progress, or a message larger than the bound.
+       function Add(const aData;const aDataSize:TRNLSizeInt;
+                    out aConsumedSize:TRNLSizeInt):boolean;
+       function Complete:boolean;
+       function MessageType:TRNLUInt8;
+       function MessageSequence:TRNLUInt16;
+       function Length_:TRNLSizeInt;
+       function Body:PRNLUInt8Array;
+       class procedure SelfTest; static;
+     end;
+
+     // Why the failure carries a name rather than a boolean: "the server said no", "its certificate
+     // leads nowhere trusted" and "nothing came back at all" are three different things to do
+     // something about, and a caller which cannot tell them apart writes one log line for all three.
+     PRNLDTLS12ClientFailure=^TRNLDTLS12ClientFailure;
+     TRNLDTLS12ClientFailure=
+      (
+       RNL_DTLS12_CLIENT_FAILURE_NONE,
+       // Every retransmission of a flight went unanswered
+       RNL_DTLS12_CLIENT_FAILURE_TIMEOUT,
+       // The peer sent an alert, and AlertDescription says which one
+       RNL_DTLS12_CLIENT_FAILURE_ALERT,
+       // A message which would not parse. A ServerHello which picks a cipher suite that was never
+       // offered lands here too, because the parser refuses that in the same breath as it refuses
+       // garbage - the two are not told apart, and saying so is better than a name which suggests
+       // they are.
+       RNL_DTLS12_CLIENT_FAILURE_MALFORMED_MESSAGE,
+       // A message which parsed but arrived where it has no business being
+       RNL_DTLS12_CLIENT_FAILURE_UNEXPECTED_MESSAGE,
+       RNL_DTLS12_CLIENT_FAILURE_UNSUPPORTED_CURVE,
+       // CertificateVerdict says which way it failed
+       RNL_DTLS12_CLIENT_FAILURE_BAD_CERTIFICATE,
+       RNL_DTLS12_CLIENT_FAILURE_BAD_KEY_EXCHANGE_SIGNATURE,
+       RNL_DTLS12_CLIENT_FAILURE_BAD_FINISHED,
+       // A derivation or a build which could not be carried out, which is this code's own fault and
+       // not the peer's
+       RNL_DTLS12_CLIENT_FAILURE_INTERNAL
+      );
+
+     PRNLDTLS12ClientState=^TRNLDTLS12ClientState;
+     TRNLDTLS12ClientState=
+      (
+       RNL_DTLS12_CLIENT_STATE_IDLE,
+       // A ServerHello may arrive here as well: the cookie exchange is the server's choice, not the
+       // client's, and a server which does not want one simply answers with its flight
+       RNL_DTLS12_CLIENT_STATE_AWAITING_HELLO_VERIFY_REQUEST,
+       RNL_DTLS12_CLIENT_STATE_AWAITING_SERVER_FLIGHT,
+       RNL_DTLS12_CLIENT_STATE_AWAITING_SERVER_FINISHED,
+       RNL_DTLS12_CLIENT_STATE_ESTABLISHED,
+       RNL_DTLS12_CLIENT_STATE_FAILED
+      );
+
+     // The client half of a DTLS 1.2 handshake, and the record layer over it once that has finished.
+     //
+     // It owns no socket and reads no clock. Datagrams arrive through ProcessDatagram and leave
+     // through PopOutgoingDatagram, and the time comes in as an argument. That is what lets a test
+     // lose a flight on purpose, hold the clock still between two of them and watch the
+     // retransmission happen at the millisecond it was meant to - none of which can be done against
+     // a real socket, and all of which is where the interesting mistakes live.
+     //
+     // The exchange, RFC 6347 section 4.2 with RFC 5246 section 7.3, in the one shape this client
+     // offers - ECDHE with an ECDSA certificate and no resumption:
+     //
+     //   ->  ClientHello
+     //   <-  HelloVerifyRequest                                  (optional, and the server's choice)
+     //   ->  ClientHello with the cookie
+     //   <-  ServerHello, Certificate, ServerKeyExchange, [CertificateRequest], ServerHelloDone
+     //   ->  [Certificate], ClientKeyExchange, ChangeCipherSpec, Finished
+     //   <-  ChangeCipherSpec, Finished
+     //
+     // Retransmission is by flight and not by record, and a repeated flight is rebuilt rather than
+     // replayed: every record in it gets a fresh sequence number. Fresh, because the peer keeps a
+     // replay window and a repeated sequence number is exactly what that window exists to throw
+     // away - a retransmission which reuses one is a retransmission nobody ever sees.
+     TRNLDTLS12Client=class
+      public
+       const // Conservative, and deliberately not a measured path MTU: the handshake runs before
+             // anything has measured one. Every flight this client sends fits inside one such
+             // datagram with room to spare, so nothing on the way out ever has to be fragmented.
+             MaximumDatagramSize=1200;
+             // The ClientHello is the largest of them, at about two hundred and fifty bytes with a
+             // host name in it
+             MaximumFlightSize=1024;
+             // Certificate, ClientKeyExchange, ChangeCipherSpec, Finished
+             MaximumFlightEntries=4;
+             MaximumQueuedDatagrams=4;
+             // Fragments of a message which has not been reached yet are kept here until it is.
+             // Enough for a certificate chain arriving ahead of the ServerHello, which is the worst
+             // reordering a flight of this shape can produce.
+             MaximumDeferredSize=8192;
+             // RFC 6347 section 4.2.4.1: one second to start with, doubled after every unanswered
+             // flight. Six transmissions in all, so thirty one seconds before giving up.
+             InitialRetransmissionTimeout=1000;
+             MaximumRetransmissionTimeout=16000;
+             MaximumRetransmissions=5;
+             // RFC 5246 section 7.2, and only the ones this client has a reason to send
+             ALERT_LEVEL_FATAL=TRNLUInt8(2);
+             ALERT_UNEXPECTED_MESSAGE=TRNLUInt8(10);
+             ALERT_BAD_RECORD_MAC=TRNLUInt8(20);
+             ALERT_HANDSHAKE_FAILURE=TRNLUInt8(40);
+             ALERT_BAD_CERTIFICATE=TRNLUInt8(42);
+             ALERT_DECODE_ERROR=TRNLUInt8(50);
+             ALERT_DECRYPT_ERROR=TRNLUInt8(51);
+             ALERT_INTERNAL_ERROR=TRNLUInt8(80);
+      private
+       type TRNLDTLS12ClientDatagram=record
+             Data:array[0..MaximumDatagramSize-1] of TRNLUInt8;
+             Size:TRNLSizeInt;
+            end;
+            // One message of the flight being held for retransmission. The epoch is per entry
+            // because flight five straddles one: ClientKeyExchange and ChangeCipherSpec go out in
+            // the clear and the Finished behind them is already protected.
+            TRNLDTLS12ClientFlightEntry=record
+             Offset:TRNLSizeInt;
+             Size:TRNLSizeInt;
+             ContentType:TRNLUInt8;
+             Epoch:TRNLUInt16;
+            end;
+      private
+
+       fRandomGenerator:TRNLRandomGenerator;
+
+       fServerName:TRNLRawByteString;
+
+       fTrustedRoots:TRNLX509.TChainEntries;
+       fCountTrustedRoots:TRNLSizeInt;
+
+       // Supplied rather than read from the operating system, the same way TRNLX509.VerifyChain
+       // takes it. Zero means no clock, and then a certificate with a validity period is refused.
+       fNowSecondsSinceUnixEpoch:TRNLInt64;
+
+       fState:TRNLDTLS12ClientState;
+       fFailure:TRNLDTLS12ClientFailure;
+       fAlertDescription:TRNLUInt8;
+       fCertificateVerdict:TRNLX509Verdict;
+
+       fClientRandom:array[0..TRNLDTLS12ClientHello.RandomSize-1] of TRNLUInt8;
+       fServerRandom:array[0..TRNLDTLS12ClientHello.RandomSize-1] of TRNLUInt8;
+       fCookie:array[0..TRNLDTLS12ClientHello.MaximumCookieSize-1] of TRNLUInt8;
+       fCookieSize:TRNLSizeInt;
+
+       // The ephemeral pair, on whichever curve the server names. P-256 to begin with, because that
+       // is what every measured relay picks, and made again on the other curve if one says P-384.
+       fCurve:TRNLECCurve;
+       fPrivateKey:array[0..TRNLP384.ElementSize-1] of TRNLUInt8;
+       fPublicKey:array[0..TRNLP384.PointSize-1] of TRNLUInt8;
+       fPublicKeySize:TRNLSizeInt;
+
+       // What is left of the server's certificate once the chain has been checked. Only the key
+       // fields are read afterwards, and the windows into the chain are cleared for that reason:
+       // the buffer they pointed at is the reassembler's, and the next message overwrites it.
+       fLeafCertificate:TRNLX509Certificate;
+
+       fServerPoint:array[0..TRNLP384.PointSize-1] of TRNLUInt8;
+       fServerPointSize:TRNLSizeInt;
+
+       fTranscript:TRNLDTLS12Transcript;
+       fKeySchedule:TRNLDTLS12KeySchedule;
+       fClientKeys:TRNLDTLS12TrafficKeys;
+       fServerKeys:TRNLDTLS12TrafficKeys;
+       fExtendedMasterSecret:boolean;
+       fCertificateRequested:boolean;
+       fSeenServerHello:boolean;
+       fSeenCertificate:boolean;
+       fSeenServerKeyExchange:boolean;
+
+       // What was sent in flight five, kept so that the server's Finished can be checked against a
+       // transcript which has it in it, and so that a retransmission does not have to recompute it
+       fClientVerifyData:array[0..TRNLDTLS12KeySchedule.VerifyDataSize-1] of TRNLUInt8;
+
+       fSendEpoch:TRNLUInt16;
+       // One counter per epoch: a retransmitted flight five sends its ChangeCipherSpec in epoch
+       // zero and its Finished in epoch one, and both need a number their own epoch has not used
+       fSendSequenceNumbers:array[0..1] of TRNLUInt64;
+       fReceiveEpoch:TRNLUInt16;
+       fReplayWindow:TRNLDTLSReplayWindow;
+
+       fNextSendMessageSequence:TRNLUInt16;
+       fExpectedReceiveMessageSequence:TRNLUInt16;
+
+       fFlight:array[0..MaximumFlightSize-1] of TRNLUInt8;
+       fFlightSize:TRNLSizeInt;
+       fFlightEntries:array[0..MaximumFlightEntries-1] of TRNLDTLS12ClientFlightEntry;
+       fCountFlightEntries:TRNLSizeInt;
+       fFlightPending:boolean;
+       fRetransmissionTimeout:TRNLUInt64;
+       fRetransmitAt:TRNLTime;
+       fCountRetransmissions:TRNLSizeInt;
+
+       fOutgoing:array[0..MaximumQueuedDatagrams-1] of TRNLDTLS12ClientDatagram;
+       fOutgoingHead:TRNLSizeInt;
+       fCountOutgoing:TRNLSizeInt;
+
+       fApplicationData:array[0..MaximumQueuedDatagrams-1] of TRNLDTLS12ClientDatagram;
+       fApplicationDataHead:TRNLSizeInt;
+       fCountApplicationData:TRNLSizeInt;
+
+       fReassembler:TRNLDTLS12Reassembler;
+       fDeferred:array[0..MaximumDeferredSize-1] of TRNLUInt8;
+       fDeferredSize:TRNLSizeInt;
+
+       fRecordBuffer:array[0..TRNLDTLS12Record.MaximumContentSize-1] of TRNLUInt8;
+
+       procedure Fail(const aFailure:TRNLDTLS12ClientFailure;const aAlertDescription:TRNLUInt8);
+       function QueueOutgoing(const aData;const aDataSize:TRNLSizeInt):boolean;
+
+       procedure BeginFlight;
+       function AppendHandshakeMessage(const aMessageType:TRNLUInt8;
+                                       const aBody;const aBodySize:TRNLSizeInt;
+                                       const aEpoch:TRNLUInt16):boolean;
+       function AppendChangeCipherSpec:boolean;
+       function TransmitFlight(const aNow:TRNLTime):boolean;
+
+       function BuildClientHello(const aNow:TRNLTime):boolean;
+       function BuildClientFinishedFlight(const aNow:TRNLTime):boolean;
+
+       procedure HandleRecord(const aContentType:TRNLUInt8;
+                              const aContent;const aContentSize:TRNLSizeInt;
+                              const aNow:TRNLTime);
+       procedure HandleHandshakeFragments(const aContent;const aContentSize:TRNLSizeInt;
+                                          const aNow:TRNLTime);
+       procedure HandleMessage(const aNow:TRNLTime);
+       procedure DeferFragment(const aData;const aDataSize:TRNLSizeInt);
+       procedure ReplayDeferredFragments(const aNow:TRNLTime);
+
+       function HandleHelloVerifyRequest(const aBody;const aBodySize:TRNLSizeInt;
+                                         const aNow:TRNLTime):boolean;
+       function HandleCertificate(const aBody;const aBodySize:TRNLSizeInt):boolean;
+       function HandleServerKeyExchange(const aBody;const aBodySize:TRNLSizeInt):boolean;
+       function HandleServerFinished(const aBody;const aBodySize:TRNLSizeInt):boolean;
+
+      public
+
+       // The trusted roots are windows into buffers the caller owns, exactly like everything else in
+       // TRNLX509, and they have to outlive this object. aNowSecondsSinceUnixEpoch is the clock the
+       // certificate validity is judged against.
+       constructor Create(const aRandomGenerator:TRNLRandomGenerator;
+                          const aServerName:TRNLRawByteString;
+                          const aTrustedRoots:TRNLX509.TChainEntries;
+                          const aCountTrustedRoots:TRNLSizeInt;
+                          const aNowSecondsSinceUnixEpoch:TRNLInt64); reintroduce;
+       destructor Destroy; override;
+
+       // Queues the first flight. Everything after this is driven by ProcessDatagram and Update.
+       procedure Start(const aNow:TRNLTime);
+
+       procedure ProcessDatagram(const aData;const aDataSize:TRNLSizeInt;const aNow:TRNLTime);
+
+       // Retransmits the flight in hand when its timer has run out, and gives up when there have
+       // been enough of those. Cheap enough to call on every service tick.
+       procedure Update(const aNow:TRNLTime);
+
+       function PopOutgoingDatagram(out aData;out aDataSize:TRNLSizeInt;
+                                    const aMaximumDataSize:TRNLSizeInt):boolean;
+
+       // Application data, which only goes anywhere once the handshake is done
+       function Send(const aData;const aDataSize:TRNLSizeInt):boolean;
+       function PopApplicationData(out aData;out aDataSize:TRNLSizeInt;
+                                   const aMaximumDataSize:TRNLSizeInt):boolean;
+
+       property State:TRNLDTLS12ClientState read fState;
+       property Failure:TRNLDTLS12ClientFailure read fFailure;
+       // Meaningful only when Failure is RNL_DTLS12_CLIENT_FAILURE_ALERT
+       property AlertDescription:TRNLUInt8 read fAlertDescription;
+       // Meaningful only when Failure is RNL_DTLS12_CLIENT_FAILURE_BAD_CERTIFICATE
+       property CertificateVerdict:TRNLX509Verdict read fCertificateVerdict;
+
+     end;
+
+     // RFC 8446 section 7.3 for key and iv, RFC 9147 section 4.2.3 for the third one, which TLS does
+     // not have: over a datagram the sequence number travels in the clear where TCP had it implicit,
+     // so DTLS 1.3 masks it with a keystream taken from the record's own ciphertext.
+     PRNLDTLSTrafficKeys=^TRNLDTLSTrafficKeys;
+     TRNLDTLSTrafficKeys=record
+      public
+       const KeySize=TRNLChaCha20Poly1305.KeySize;
+             IVSize=TRNLChaCha20Poly1305.NonceSize;
+             SequenceNumberKeySize=TRNLChaCha20Poly1305.KeySize;
+      public
+       Key:array[0..KeySize-1] of TRNLUInt8;
+       IV:array[0..IVSize-1] of TRNLUInt8;
+       SequenceNumberKey:array[0..SequenceNumberKeySize-1] of TRNLUInt8;
+       // All three out of one traffic secret, which is what the handshake hands over
+       function DeriveFrom(const aTrafficSecret;const aTrafficSecretSize:TRNLSizeUInt):boolean;
+       procedure Clear;
      end;
 
      // One record, protected or unprotected. Both halves are here because a client has to write what
@@ -3676,6 +4872,27 @@ type PRNLVersion=^TRNLVersion;
 
      TRNLHostPeerList=TRNLObjectList<TRNLPeer>;
 
+     // Called once per cryptographic self test vector, with its name and its verdict. It exists so
+     // that a test harness can count each vector as one of its own checks; without it the results
+     // only ever reach the console, where a human has to notice them.
+     TRNLSelfTestReportProcedure=procedure(const aName:TRNLRawByteString;const aSucceeded:boolean);
+
+     // The vectors are grouped so that a harness can report them as several results rather than as
+     // one. Running every group in order is the same thing as running the lot, which is how
+     // SelfTestCryptography is defined below - there is one list and not two.
+     PRNLCryptographySelfTestGroup=^TRNLCryptographySelfTestGroup;
+     TRNLCryptographySelfTestGroup=
+      (
+       RNL_CRYPTOGRAPHY_SELF_TEST_GROUP_CHECKSUMS,
+       RNL_CRYPTOGRAPHY_SELF_TEST_GROUP_CURVE25519,
+       RNL_CRYPTOGRAPHY_SELF_TEST_GROUP_NIST_CURVES,
+       RNL_CRYPTOGRAPHY_SELF_TEST_GROUP_CERTIFICATES,
+       RNL_CRYPTOGRAPHY_SELF_TEST_GROUP_CIPHERS,
+       RNL_CRYPTOGRAPHY_SELF_TEST_GROUP_HASHES,
+       RNL_CRYPTOGRAPHY_SELF_TEST_GROUP_KEY_DERIVATION,
+       RNL_CRYPTOGRAPHY_SELF_TEST_GROUP_RECORD_LAYERS
+      );
+
      TRNLInstance=class
       private
        fTimeBase:TRNLTime;
@@ -3699,7 +4916,19 @@ type PRNLVersion=^TRNLVersion;
        //
        // Writes a human readable report to standard output while it runs, and is not reentrant, so
        // it belongs at startup and not in a hot path.
-       class function SelfTestCryptography:boolean; static;
+       // Runs every published vector the library carries and says whether all of them came out
+       // right. aReport, if given, is called once per vector with its name and its verdict, which is
+       // how a test harness counts each of them as a check of its own; without it the results only
+       // reach the console. aCountChecks says how many were run, so that a suite which stopped
+       // running them can be told from one which passed.
+       class function SelfTestCryptography(const aReport:TRNLSelfTestReportProcedure=nil):boolean; overload; static;
+       class function SelfTestCryptography(out aCountChecks,aCountFailures:TRNLSizeInt;
+                                           const aReport:TRNLSelfTestReportProcedure=nil):boolean; overload; static;
+       // One group on its own, so that a harness can report the cryptography as several results
+       // instead of as one very large one
+       class function SelfTestCryptographyGroup(const aGroup:TRNLCryptographySelfTestGroup;
+                                                out aCountChecks,aCountFailures:TRNLSizeInt;
+                                                const aReport:TRNLSelfTestReportProcedure=nil):boolean; static;
        property Time:TRNLTime read GetTime write SetTime;
      end;
 
@@ -6662,13 +7891,52 @@ implementation
 //
 // Not reentrant, on purpose: this is meant to be run once at startup, not concurrently.
 var RNLCountSelfTestFailures:TRNLSizeInt=0;
+    // Every vector which was run, not only the ones which failed. Without it a caller can tell that
+    // nothing went wrong but not how much was actually checked, and those are different questions -
+    // a self test which silently stopped running anything would look exactly like one which passed.
+    RNLCountSelfTestChecks:TRNLSizeInt=0;
+    // What is being checked right now, so that a report can name it. The trailing separator of the
+    // printed line is cut off here rather than at every one of the hundred call sites.
+    RNLCurrentSelfTestName:TRNLRawByteString='';
+    // Optional, and nil unless somebody wants the individual results. It exists so that a test
+    // harness can count each vector as one of its own checks without RNL having to know what a test
+    // harness is.
+    RNLSelfTestReport:TRNLSelfTestReportProcedure=nil;
+
+procedure RNLSelfTestBegin(const aName:TRNLRawByteString);
+var Size:TRNLSizeInt;
+begin
+ Size:=Length(aName);
+ while (Size>0) and ((aName[Size]=' ') or (aName[Size]='.')) do begin
+  dec(Size);
+ end;
+ RNLCurrentSelfTestName:=Copy(aName,1,Size);
+{$if not defined(NEXTGEN)}
+ write(aName);
+{$ifend}
+end;
+
+procedure RNLSelfTestSucceeded;
+begin
+ inc(RNLCountSelfTestChecks);
+{$if not defined(NEXTGEN)}
+ writeln('OK!');
+{$ifend}
+ if assigned(RNLSelfTestReport) then begin
+  RNLSelfTestReport(RNLCurrentSelfTestName,true);
+ end;
+end;
 
 procedure RNLSelfTestFailure;
 begin
+ inc(RNLCountSelfTestChecks);
  inc(RNLCountSelfTestFailures);
 {$if not defined(NEXTGEN)}
  writeln('FAILED!');
 {$ifend}
+ if assigned(RNLSelfTestReport) then begin
+  RNLSelfTestReport(RNLCurrentSelfTestName,false);
+ end;
 end;
 
 const RNLDiscoveryRequestSignature:TRNLDiscoverySignature=('R','N','L','D','R',#0,#0,#0);
@@ -9644,7 +10912,7 @@ begin
    d:=42;
    ConditionalSwap(c,d,1);
    if (a=d) and (b=c) then begin
-    writeln('OK!');
+    RNLSelfTestSucceeded;
    end else begin
     RNLSelfTestFailure;
    end;
@@ -9656,7 +10924,7 @@ begin
    c:=TRNLValue25519.CreateRandom(RandomGenerator);
    x:=((((a+b)-c)-a)+c).Carry;
    if x=b then begin
-    writeln('OK!');
+    RNLSelfTestSucceeded;
    end else begin
     RNLSelfTestFailure;
    end;
@@ -9667,7 +10935,7 @@ begin
    b:=(a+a).Carry;
    c:=a*2;
    if b=c then begin
-    writeln('OK!');
+    RNLSelfTestSucceeded;
    end else begin
     RNLSelfTestFailure;
    end;
@@ -9678,7 +10946,7 @@ begin
    b:=1;
    c:=a.Invert*a;
    if b=c then begin
-    writeln('OK!');
+    RNLSelfTestSucceeded;
    end else begin
     RNLSelfTestFailure;
    end;
@@ -9869,36 +11137,36 @@ const alice_private:TRNLKey=(ui8:($77,$07,$6d,$0a,$73,$18,$a5,$7d,$3c,$16,$c1,$7
 var alice_private_,bob_private_,r:TRNLKey;
 begin
 
- write('[Curve25519] Generating private and public key pair for Alice ... ');
+ RNLSelfTestBegin('[Curve25519] Generating private and public key pair for Alice ... ');
  alice_private_:=alice_private.ClampForCurve25519;
  Eval(r,alice_private_,nil);
  if r=alice_public then begin
-  writeln('OK!');
+  RNLSelfTestSucceeded;
  end else begin
   RNLSelfTestFailure;
  end;
 
- write('[Curve25519] Generating private and public key pair for Bob ... ');
+ RNLSelfTestBegin('[Curve25519] Generating private and public key pair for Bob ... ');
  bob_private_:=bob_private.ClampForCurve25519;
  Eval(r,bob_private_,nil);
  if r=bob_public then begin
-  writeln('OK!');
+  RNLSelfTestSucceeded;
  end else begin
   RNLSelfTestFailure;
  end;
 
- write('[Curve25519] Generating shared secret for Alice ... ');
+ RNLSelfTestBegin('[Curve25519] Generating shared secret for Alice ... ');
  Eval(r,alice_private_,@bob_public);
  if r=shared_secret then begin
-  writeln('OK!');
+  RNLSelfTestSucceeded;
  end else begin
   RNLSelfTestFailure;
  end;
 
- write('[Curve25519] Generating shared secret for Bob ... ');
+ RNLSelfTestBegin('[Curve25519] Generating shared secret for Bob ... ');
  Eval(r,bob_private_,@alice_public);
  if r=shared_secret then begin
-  writeln('OK!');
+  RNLSelfTestSucceeded;
  end else begin
   RNLSelfTestFailure;
  end;
@@ -9936,7 +11204,7 @@ begin
 
   write('[X25519] Generating random public/private key pair for Alice ... ');
   if GeneratePublicPrivateKeyPair(RandomGenerator,alice_k,alice_f) then begin
-   writeln('OK!');
+   RNLSelfTestSucceeded;
   end else begin
    RNLSelfTestFailure;
    exit;
@@ -9944,7 +11212,7 @@ begin
 
   write('[X25519] Generating random public/private key pair for Bob ... ');
   if GeneratePublicPrivateKeyPair(RandomGenerator,bob_k,bob_f) then begin
-   writeln('OK!');
+   RNLSelfTestSucceeded;
   end else begin
    RNLSelfTestFailure;
    exit;
@@ -9952,7 +11220,7 @@ begin
 
   write('[X25519] Generating shared secret key for Alice ... ');
   if GenerateSharedSecretKey(alice_s,bob_k,alice_f) then begin
-   writeln('OK!');
+   RNLSelfTestSucceeded;
   end else begin
    RNLSelfTestFailure;
    exit;
@@ -9960,7 +11228,7 @@ begin
 
   write('[X25519] Generating shared secret key for Bob ... ');
   if GenerateSharedSecretKey(bob_s,alice_k,bob_f) then begin
-   writeln('OK!');
+   RNLSelfTestSucceeded;
   end else begin
    RNLSelfTestFailure;
    exit;
@@ -10140,9 +11408,9 @@ const Key:array[0..31] of TRNLUInt8=($ee,$a6,$a7,$25,$1c,$1e,$72,$91,$6d,$11,$c2
                                        $5a,$74,$e3,$55,$a5);
       Hash:array[0..15] of TRNLUInt8=($f3,$ff,$c7,$70,$3f,$94,$00,$e5,$2a,$7d,$fb,$4b,$3d,$33,$05,$d9);
 begin
- write('[Poly1305] ');
+ RNLSelfTestBegin('[Poly1305] ');
  if OneTimeAuthenticationVerify(Hash,Data,SizeOf(Data),Key) then begin
-  writeln('OK!');
+  RNLSelfTestSucceeded;
  end else begin
   RNLSelfTestFailure;
  end;
@@ -10271,7 +11539,7 @@ begin
  end;
 end;
 
-procedure TRNLSHA512Context.Finalize(out aHash);
+procedure TRNLSHA512Context.FinalizeWords(out aHash;const aCountWords:TRNLSizeInt);
 var Index:TRNLInt32;
 begin
  Increment(fInputSize,fInputIndex shl 3);
@@ -10283,9 +11551,37 @@ begin
  fInput[14]:=fInputSize[0];
  fInput[15]:=fInputSize[1];
  Compress;
- for Index:=0 to 7 do begin
+ for Index:=0 to aCountWords-1 do begin
   TRNLMemoryAccess.StoreBigEndianUInt64(PRNLUInt64Array(TRNLPointer(@aHash))^[Index],fState[Index]);
  end;
+end;
+
+procedure TRNLSHA512Context.Finalize(out aHash);
+begin
+ FinalizeWords(aHash,8);
+end;
+
+procedure TRNLSHA512Context.Finalize384(out aHash);
+begin
+ // Six of the eight words, which is what makes a 384 bit digest out of a 512 bit state. The two
+ // which are dropped are not merely hidden - they are what keeps a length extension from working.
+ FinalizeWords(aHash,6);
+end;
+
+procedure TRNLSHA512Context.Initialize384;
+begin
+ fState:=InitialState384;
+ fInputSize[0]:=0;
+ fInputSize[1]:=0;
+ ResetInput;
+end;
+
+class procedure TRNLSHA384.Process(out aHash;const aMessage;const aMessageSize:TRNLSizeUInt);
+var Context:TRNLSHA512Context;
+begin
+ Context.Initialize384;
+ Context.Update(aMessage,aMessageSize);
+ Context.Finalize384(aHash);
 end;
 
 function TRNLHashDescriptor.Valid:boolean;
@@ -10469,35 +11765,35 @@ const Hash0:TRNLSHA512Hash=
 var Hash:TRNLSHA512Hash;
 begin
 
- write('[SHA512] Hashing "" ... ');
+ RNLSelfTestBegin('[SHA512] Hashing "" ... ');
  Process(Hash,TRNLPointer(nil)^,0);
  if TRNLMemory.SecureIsEqual(Hash,Hash0,SizeOf(TRNLSHA512Hash)) then begin
-  writeln('OK!');
+  RNLSelfTestSucceeded;
  end else begin
   RNLSelfTestFailure;
  end;
 
- write('[SHA512] Hashing "abc" ... ');
+ RNLSelfTestBegin('[SHA512] Hashing "abc" ... ');
  Process(Hash,DataABC,SizeOf(DataABC));
  if TRNLMemory.SecureIsEqual(Hash,HashABC,SizeOf(TRNLSHA512Hash)) then begin
-  writeln('OK!');
+  RNLSelfTestSucceeded;
  end else begin
   RNLSelfTestFailure;
  end;
 
- write('[SHA512] Hashing "0123456789abcdef" ... ');
+ RNLSelfTestBegin('[SHA512] Hashing "0123456789abcdef" ... ');
  Process(Hash,Data0123456789abcdef,SizeOf(Data0123456789abcdef));
  if TRNLMemory.SecureIsEqual(Hash,Hash0123456789abcdef,SizeOf(TRNLSHA512Hash)) then begin
-  writeln('OK!');
+  RNLSelfTestSucceeded;
  end else begin
   RNLSelfTestFailure;
  end;
 
 {$if not defined(NEXTGEN)}
- write('[SHA512] Hashing "','abcdefghbcdefghicdefghijdefghijkefghijklfghijklmghijklmnhijklmnoijklmnopjklmnopqklmnopqrlmnopqrsmnopqrstnopqrstu','" ... ');
+ RNLSelfTestBegin('[SHA512] Hashing the 112 byte FIPS 180-2 string ... ');
  Process(Hash,DataLong,SizeOf(DataLong));
  if TRNLMemory.SecureIsEqual(Hash,HashLong,SizeOf(TRNLSHA512Hash)) then begin
-  writeln('OK!');
+  RNLSelfTestSucceeded;
  end else begin
   RNLSelfTestFailure;
  end;
@@ -11357,31 +12653,31 @@ const Expected0:TRNLSHA256Hash=
         );
 var Value:TRNLSHA256Hash;
 begin
- write('[SHA256] Hashing "" ... ');
+ RNLSelfTestBegin('[SHA256] Hashing "" ... ');
  Process(Value,TRNLPointer(nil)^,0);
  if TRNLMemory.SecureIsEqual(Value,Expected0,SizeOf(TRNLSHA256Hash)) then begin
-  writeln('OK!');
+  RNLSelfTestSucceeded;
  end else begin
   RNLSelfTestFailure;
  end;
- write('[SHA256] Hashing "abc" ... ');
+ RNLSelfTestBegin('[SHA256] Hashing "abc" ... ');
  Process(Value,Data1,SizeOf(Data1));
  if TRNLMemory.SecureIsEqual(Value,Expected1,SizeOf(TRNLSHA256Hash)) then begin
-  writeln('OK!');
+  RNLSelfTestSucceeded;
  end else begin
   RNLSelfTestFailure;
  end;
- write('[SHA256] Hashing the 56 byte FIPS 180-2 message ... ');
+ RNLSelfTestBegin('[SHA256] Hashing the 56 byte FIPS 180-2 message ... ');
  Process(Value,Data2,SizeOf(Data2));
  if TRNLMemory.SecureIsEqual(Value,Expected2,SizeOf(TRNLSHA256Hash)) then begin
-  writeln('OK!');
+  RNLSelfTestSucceeded;
  end else begin
   RNLSelfTestFailure;
  end;
- write('[SHA256] Hashing 1000 bytes, which spans several blocks ... ');
+ RNLSelfTestBegin('[SHA256] Hashing 1000 bytes, which spans several blocks ... ');
  Process(Value,Data3,SizeOf(Data3));
  if TRNLMemory.SecureIsEqual(Value,Expected3,SizeOf(TRNLSHA256Hash)) then begin
-  writeln('OK!');
+  RNLSelfTestSucceeded;
  end else begin
   RNLSelfTestFailure;
  end;
@@ -11422,24 +12718,24 @@ const Expected0:TRNLSHA1Hash=
         );
 var Value:TRNLSHA1Hash;
 begin
- write('[SHA1] Hashing "" ... ');
+ RNLSelfTestBegin('[SHA1] Hashing "" ... ');
  Process(Value,TRNLPointer(nil)^,0);
  if TRNLMemory.SecureIsEqual(Value,Expected0,SizeOf(TRNLSHA1Hash)) then begin
-  writeln('OK!');
+  RNLSelfTestSucceeded;
  end else begin
   RNLSelfTestFailure;
  end;
- write('[SHA1] Hashing "abc" ... ');
+ RNLSelfTestBegin('[SHA1] Hashing "abc" ... ');
  Process(Value,Data1,SizeOf(Data1));
  if TRNLMemory.SecureIsEqual(Value,Expected1,SizeOf(TRNLSHA1Hash)) then begin
-  writeln('OK!');
+  RNLSelfTestSucceeded;
  end else begin
   RNLSelfTestFailure;
  end;
- write('[SHA1] Hashing the 56 byte FIPS 180-2 message ... ');
+ RNLSelfTestBegin('[SHA1] Hashing the 56 byte FIPS 180-2 message ... ');
  Process(Value,Data2,SizeOf(Data2));
  if TRNLMemory.SecureIsEqual(Value,Expected2,SizeOf(TRNLSHA1Hash)) then begin
-  writeln('OK!');
+  RNLSelfTestSucceeded;
  end else begin
   RNLSelfTestFailure;
  end;
@@ -11499,38 +12795,38 @@ const Expected0:TRNLMD5Hash=
         );
 var Value:TRNLMD5Hash;
 begin
- write('[MD5] Hashing "" ... ');
+ RNLSelfTestBegin('[MD5] Hashing "" ... ');
  Process(Value,TRNLPointer(nil)^,0);
  if TRNLMemory.SecureIsEqual(Value,Expected0,SizeOf(TRNLMD5Hash)) then begin
-  writeln('OK!');
+  RNLSelfTestSucceeded;
  end else begin
   RNLSelfTestFailure;
  end;
- write('[MD5] Hashing "abc" ... ');
+ RNLSelfTestBegin('[MD5] Hashing "abc" ... ');
  Process(Value,Data1,SizeOf(Data1));
  if TRNLMemory.SecureIsEqual(Value,Expected1,SizeOf(TRNLMD5Hash)) then begin
-  writeln('OK!');
+  RNLSelfTestSucceeded;
  end else begin
   RNLSelfTestFailure;
  end;
- write('[MD5] Hashing "message digest" ... ');
+ RNLSelfTestBegin('[MD5] Hashing "message digest" ... ');
  Process(Value,Data2,SizeOf(Data2));
  if TRNLMemory.SecureIsEqual(Value,Expected2,SizeOf(TRNLMD5Hash)) then begin
-  writeln('OK!');
+  RNLSelfTestSucceeded;
  end else begin
   RNLSelfTestFailure;
  end;
- write('[MD5] Hashing the lower case alphabet ... ');
+ RNLSelfTestBegin('[MD5] Hashing the lower case alphabet ... ');
  Process(Value,Data3,SizeOf(Data3));
  if TRNLMemory.SecureIsEqual(Value,Expected3,SizeOf(TRNLMD5Hash)) then begin
-  writeln('OK!');
+  RNLSelfTestSucceeded;
  end else begin
   RNLSelfTestFailure;
  end;
- write('[MD5] Hashing the 80 byte RFC 1321 digit string ... ');
+ RNLSelfTestBegin('[MD5] Hashing the 80 byte RFC 1321 digit string ... ');
  Process(Value,Data4,SizeOf(Data4));
  if TRNLMemory.SecureIsEqual(Value,Expected4,SizeOf(TRNLMD5Hash)) then begin
-  writeln('OK!');
+  RNLSelfTestSucceeded;
  end else begin
   RNLSelfTestFailure;
  end;
@@ -11623,31 +12919,31 @@ const Expected0:TRNLSHA256Hash=
         );
 var Value:TRNLSHA256Hash;
 begin
- write('[HMAC-SHA256] RFC 4231 case 1 ... ');
+ RNLSelfTestBegin('[HMAC-SHA256] RFC 4231 case 1 ... ');
  Process(Value,Key0,SizeOf(Key0),Data0,SizeOf(Data0));
  if TRNLMemory.SecureIsEqual(Value,Expected0,SizeOf(TRNLSHA256Hash)) then begin
-  writeln('OK!');
+  RNLSelfTestSucceeded;
  end else begin
   RNLSelfTestFailure;
  end;
- write('[HMAC-SHA256] RFC 4231 case 2 ... ');
+ RNLSelfTestBegin('[HMAC-SHA256] RFC 4231 case 2 ... ');
  Process(Value,Key1,SizeOf(Key1),Data1,SizeOf(Data1));
  if TRNLMemory.SecureIsEqual(Value,Expected1,SizeOf(TRNLSHA256Hash)) then begin
-  writeln('OK!');
+  RNLSelfTestSucceeded;
  end else begin
   RNLSelfTestFailure;
  end;
- write('[HMAC-SHA256] RFC 4231 case 3 ... ');
+ RNLSelfTestBegin('[HMAC-SHA256] RFC 4231 case 3 ... ');
  Process(Value,Key2,SizeOf(Key2),Data2,SizeOf(Data2));
  if TRNLMemory.SecureIsEqual(Value,Expected2,SizeOf(TRNLSHA256Hash)) then begin
-  writeln('OK!');
+  RNLSelfTestSucceeded;
  end else begin
   RNLSelfTestFailure;
  end;
- write('[HMAC-SHA256] RFC 4231 case 6, key longer than one block ... ');
+ RNLSelfTestBegin('[HMAC-SHA256] RFC 4231 case 6, key longer than one block ... ');
  Process(Value,Key3,SizeOf(Key3),Data3,SizeOf(Data3));
  if TRNLMemory.SecureIsEqual(Value,Expected3,SizeOf(TRNLSHA256Hash)) then begin
-  writeln('OK!');
+  RNLSelfTestSucceeded;
  end else begin
   RNLSelfTestFailure;
  end;
@@ -11715,24 +13011,24 @@ const Expected0:TRNLSHA1Hash=
         );
 var Value:TRNLSHA1Hash;
 begin
- write('[HMAC-SHA1] RFC 2202 case 1 ... ');
+ RNLSelfTestBegin('[HMAC-SHA1] RFC 2202 case 1 ... ');
  Process(Value,Key0,SizeOf(Key0),Data0,SizeOf(Data0));
  if TRNLMemory.SecureIsEqual(Value,Expected0,SizeOf(TRNLSHA1Hash)) then begin
-  writeln('OK!');
+  RNLSelfTestSucceeded;
  end else begin
   RNLSelfTestFailure;
  end;
- write('[HMAC-SHA1] RFC 2202 case 2 ... ');
+ RNLSelfTestBegin('[HMAC-SHA1] RFC 2202 case 2 ... ');
  Process(Value,Key1,SizeOf(Key1),Data1,SizeOf(Data1));
  if TRNLMemory.SecureIsEqual(Value,Expected1,SizeOf(TRNLSHA1Hash)) then begin
-  writeln('OK!');
+  RNLSelfTestSucceeded;
  end else begin
   RNLSelfTestFailure;
  end;
- write('[HMAC-SHA1] RFC 2202 case 7, key and data both longer than one block ... ');
+ RNLSelfTestBegin('[HMAC-SHA1] RFC 2202 case 7, key and data both longer than one block ... ');
  Process(Value,Key2,SizeOf(Key2),Data2,SizeOf(Data2));
  if TRNLMemory.SecureIsEqual(Value,Expected2,SizeOf(TRNLSHA1Hash)) then begin
-  writeln('OK!');
+  RNLSelfTestSucceeded;
  end else begin
   RNLSelfTestFailure;
  end;
@@ -11740,6 +13036,1762 @@ begin
 end;
 
 {$ifend}
+
+// The first vector of the NIST CAVP set for the ECC CDH primitive over P-256, which is the one
+// document that says what this curve is supposed to do rather than what it is. Both halves of it are
+// used: the public point which belongs to the private key, and the shared secret which comes of
+// putting that key together with the counter side's point.
+//
+// The value was confirmed three ways before it was written down here - against the printed CAVP
+// vector, against a separate implementation of the group law, and against another library.
+class procedure TRNLP256.SelfTest;
+const PrivateKey:array[0..31] of TRNLUInt8=
+       (
+        $7d,$7d,$c5,$f7,$1e,$b2,$9d,$da,$f8,$0d,$62,$14,
+        $63,$2e,$ea,$e0,$3d,$90,$58,$af,$1f,$b6,$d2,$2e,
+        $d8,$0b,$ad,$b6,$2b,$c1,$a5,$34
+       );
+      ExpectedPublicKey:array[0..64] of TRNLUInt8=
+       (
+        $04,$ea,$d2,$18,$59,$01,$19,$e8,$87,$6b,$29,$14,
+        $6f,$f8,$9c,$a6,$17,$70,$c4,$ed,$bb,$f9,$7d,$38,
+        $ce,$38,$5e,$d2,$81,$d8,$a6,$b2,$30,$28,$af,$61,
+        $28,$1f,$d3,$5e,$2f,$a7,$00,$25,$23,$ac,$c8,$5a,
+        $42,$9c,$b0,$6e,$e6,$64,$83,$25,$38,$9f,$59,$ed,
+        $fc,$e1,$40,$51,$41
+       );
+      PeerPublicKey:array[0..64] of TRNLUInt8=
+       (
+        $04,$70,$0c,$48,$f7,$7f,$56,$58,$4c,$5c,$c6,$32,
+        $ca,$65,$64,$0d,$b9,$1b,$6b,$ac,$ce,$3a,$4d,$f6,
+        $b4,$2c,$e7,$cc,$83,$88,$33,$d2,$87,$db,$71,$e5,
+        $09,$e3,$fd,$9b,$06,$0d,$db,$20,$ba,$5c,$51,$dc,
+        $c5,$94,$8d,$46,$fb,$f6,$40,$df,$e0,$44,$17,$82,
+        $ca,$b8,$5f,$a4,$ac
+       );
+      ExpectedSharedSecret:array[0..31] of TRNLUInt8=
+       (
+        $46,$fc,$62,$10,$64,$20,$ff,$01,$2e,$54,$a4,$34,
+        $fb,$dd,$2d,$25,$cc,$c5,$85,$20,$60,$56,$1e,$68,
+        $04,$0d,$d7,$77,$89,$97,$bd,$7b
+       );
+      // The same point with the lowest bit of its y turned over, so it is no longer on the curve
+      PeerPublicKeyOffCurve:array[0..64] of TRNLUInt8=
+       (
+        $04,$70,$0c,$48,$f7,$7f,$56,$58,$4c,$5c,$c6,$32,
+        $ca,$65,$64,$0d,$b9,$1b,$6b,$ac,$ce,$3a,$4d,$f6,
+        $b4,$2c,$e7,$cc,$83,$88,$33,$d2,$87,$db,$71,$e5,
+        $09,$e3,$fd,$9b,$06,$0d,$db,$20,$ba,$5c,$51,$dc,
+        $c5,$94,$8d,$46,$fb,$f6,$40,$df,$e0,$44,$17,$82,
+        $ca,$b8,$5f,$a4,$ad
+       );
+      // And with x set to p itself, which is a number rather than a field element
+      PeerPublicKeyOutOfRange:array[0..64] of TRNLUInt8=
+       (
+        $04,$ff,$ff,$ff,$ff,$00,$00,$00,$01,$00,$00,$00,
+        $00,$00,$00,$00,$00,$00,$00,$00,$00,$ff,$ff,$ff,
+        $ff,$ff,$ff,$ff,$ff,$ff,$ff,$ff,$ff,$db,$71,$e5,
+        $09,$e3,$fd,$9b,$06,$0d,$db,$20,$ba,$5c,$51,$dc,
+        $c5,$94,$8d,$46,$fb,$f6,$40,$df,$e0,$44,$17,$82,
+        $ca,$b8,$5f,$a4,$ac
+       );
+var C:TRNLECCurve;
+    Scalar,X,Y,Order:TRNLECFieldElement;
+    Base,Product:TRNLECPoint;
+    PublicKey:array[0..PointSize-1] of TRNLUInt8;
+    Secret:array[0..ElementSize-1] of TRNLUInt8;
+    Point_:TRNLECPoint;
+begin
+
+ C:=Curve;
+ TRNLEC.BasePoint(Base,C);
+
+ RNLSelfTestBegin('[P-256] the base point is on the curve ... ');
+ TRNLEC.EncodePoint(PublicKey,BaseX,BaseY,C);
+ if DecodePoint(Point_,PublicKey,SizeOf(PublicKey)) then begin
+  RNLSelfTestSucceeded;
+ end else begin
+  RNLSelfTestFailure;
+ end;
+
+ // n*G is the point at infinity, and nothing else is. This says the base point and the order belong
+ // to each other, which no amount of arithmetic on other values would catch if one of them were
+ // mistyped.
+ RNLSelfTestBegin('[P-256] and multiplying it by the group order gives the point at infinity ... ');
+ TRNLEC.Copy_(Order,OrderModulus);
+ TRNLEC.PointMultiply(Product,Order,Base,C);
+ if TRNLEC.IsZeroMask(Product.Z)<>0 then begin
+  RNLSelfTestSucceeded;
+ end else begin
+  RNLSelfTestFailure;
+ end;
+
+ RNLSelfTestBegin('[P-256] NIST CAVP: the public key belonging to the private one ... ');
+ TRNLEC.FromBigEndian(Scalar,PrivateKey,C.Limbs);
+ TRNLEC.PointMultiply(Product,Scalar,Base,C);
+ if TRNLEC.PointToAffine(X,Y,Product,C) then begin
+  TRNLEC.EncodePoint(PublicKey,X,Y,C);
+ end else begin
+  FillChar(PublicKey,SizeOf(PublicKey),#0);
+ end;
+ if TRNLMemory.SecureIsEqual(PublicKey,ExpectedPublicKey,SizeOf(ExpectedPublicKey)) then begin
+  RNLSelfTestSucceeded;
+ end else begin
+  RNLSelfTestFailure;
+ end;
+
+ RNLSelfTestBegin('[P-256] NIST CAVP: the shared secret ... ');
+ if SharedSecret(Secret,PrivateKey,PeerPublicKey,SizeOf(PeerPublicKey)) and
+    TRNLMemory.SecureIsEqual(Secret,ExpectedSharedSecret,SizeOf(ExpectedSharedSecret)) then begin
+  RNLSelfTestSucceeded;
+ end else begin
+  RNLSelfTestFailure;
+ end;
+
+ // Without this one an invalid curve attack goes straight through, and the two above would not
+ // notice, because they only ever hand over points which are correct
+ RNLSelfTestBegin('[P-256] a peer point which is not on the curve is refused ... ');
+ if not SharedSecret(Secret,PrivateKey,PeerPublicKeyOffCurve,SizeOf(PeerPublicKeyOffCurve)) then begin
+  RNLSelfTestSucceeded;
+ end else begin
+  RNLSelfTestFailure;
+ end;
+
+ // A coordinate at or above p is not a field element. Note what this does and does not show: with
+ // the range check taken out, this case is still refused, because p reduces to zero and zero is not
+ // on the curve. The curve equation catches it, so the point level test cannot isolate the range
+ // check - which is why the boundary itself is checked below rather than only through a point.
+ RNLSelfTestBegin('[P-256] and so is a coordinate which is not below p ... ');
+ if not SharedSecret(Secret,PrivateKey,PeerPublicKeyOutOfRange,SizeOf(PeerPublicKeyOutOfRange)) then begin
+  RNLSelfTestSucceeded;
+ end else begin
+  RNLSelfTestFailure;
+ end;
+
+ // The comparison itself, at the one place it can be wrong: p is not below p, and one less is. An
+ // off by one here would let a non canonical encoding through, and a point with two encodings is a
+ // signature which verifies twice.
+ RNLSelfTestBegin('[P-256] the range comparison sits exactly at p ... ');
+ TRNLEC.Copy_(X,FieldModulus);
+ TRNLEC.Copy_(Y,FieldModulus);
+ Y[0]:=Y[0]-1;
+ if (not TRNLEC.Below(X,FieldModulus)) and TRNLEC.Below(Y,FieldModulus) then begin
+  RNLSelfTestSucceeded;
+ end else begin
+  RNLSelfTestFailure;
+ end;
+
+ VerificationSelfTest;
+
+end;
+
+// Split out only because the vectors of the two halves would otherwise share one constant block the
+// length of a page
+class procedure TRNLP256.VerificationSelfTest;
+const // RFC 6979 appendix A.2.5, the P-256 signature over "sample" with SHA-256. Deterministic, so
+      // the same key and message always give these two numbers and they can be printed in an RFC at
+      // all - which is what makes it a vector rather than an example.
+      VerifyPublicKey:array[0..64] of TRNLUInt8=
+       (
+        $04,$60,$fe,$d4,$ba,$25,$5a,$9d,$31,$c9,$61,$eb,
+        $74,$c6,$35,$6d,$68,$c0,$49,$b8,$92,$3b,$61,$fa,
+        $6c,$e6,$69,$62,$2e,$60,$f2,$9f,$b6,$79,$03,$fe,
+        $10,$08,$b8,$bc,$99,$a4,$1a,$e9,$e9,$56,$28,$bc,
+        $64,$f2,$f1,$b2,$0c,$2d,$7e,$9f,$51,$77,$a3,$c2,
+        $94,$d4,$46,$22,$99
+       );
+      // SHA-256 of "sample"
+      VerifyHash:array[0..31] of TRNLUInt8=
+       (
+        $af,$2b,$db,$e1,$aa,$9b,$6e,$c1,$e2,$ad,$e1,$d6,
+        $94,$f4,$1f,$c7,$1a,$83,$1d,$02,$68,$e9,$89,$15,
+        $62,$11,$3d,$8a,$62,$ad,$d1,$bf
+       );
+      VerifyR:array[0..31] of TRNLUInt8=
+       (
+        $ef,$d4,$8b,$2a,$ac,$b6,$a8,$fd,$11,$40,$dd,$9c,
+        $d4,$5e,$81,$d6,$9d,$2c,$87,$7b,$56,$aa,$f9,$91,
+        $c3,$4d,$0e,$a8,$4e,$af,$37,$16
+       );
+      VerifyS:array[0..31] of TRNLUInt8=
+       (
+        $f7,$cb,$1c,$94,$2d,$65,$7c,$41,$d4,$36,$c7,$a1,
+        $b6,$e2,$9f,$65,$f3,$e9,$00,$db,$b9,$af,$f4,$06,
+        $4d,$c4,$ab,$2f,$84,$3a,$cd,$a8
+       );
+      Zeroes:array[0..31] of TRNLUInt8=
+       (
+        $00,$00,$00,$00,$00,$00,$00,$00,$00,$00,$00,$00,
+        $00,$00,$00,$00,$00,$00,$00,$00,$00,$00,$00,$00,
+        $00,$00,$00,$00,$00,$00,$00,$00
+       );
+      // n itself, which is congruent to zero and must not stand in for it
+      OrderBytes:array[0..31] of TRNLUInt8=
+       (
+        $ff,$ff,$ff,$ff,$00,$00,$00,$00,$ff,$ff,$ff,$ff,
+        $ff,$ff,$ff,$ff,$bc,$e6,$fa,$ad,$a7,$17,$9e,$84,
+        $f3,$b9,$ca,$c2,$fc,$63,$25,$51
+       );
+      // The same key over "test" rather than "sample", so that the way the hash becomes a scalar is
+      // exercised at a second value instead of at the one it was written against
+      VerifyHashTest:array[0..31] of TRNLUInt8=
+       (
+        $9f,$86,$d0,$81,$88,$4c,$7d,$65,$9a,$2f,$ea,$a0,
+        $c5,$5a,$d0,$15,$a3,$bf,$4f,$1b,$2b,$0b,$82,$2c,
+        $d1,$5d,$6c,$15,$b0,$f0,$0a,$08
+       );
+      VerifyRTest:array[0..31] of TRNLUInt8=
+       (
+        $f1,$ab,$b0,$23,$51,$83,$51,$cd,$71,$d8,$81,$56,
+        $7b,$1e,$a6,$63,$ed,$3e,$fc,$f6,$c5,$13,$2b,$35,
+        $4f,$28,$d3,$b0,$b7,$d3,$83,$67
+       );
+      // Its top byte is one, so the leading zero of a big endian number is exercised as well
+      VerifySTest:array[0..31] of TRNLUInt8=
+       (
+        $01,$9f,$41,$13,$74,$2a,$2b,$14,$bd,$25,$92,$6b,
+        $49,$c6,$49,$15,$5f,$26,$7e,$60,$d3,$81,$4b,$4c,
+        $0c,$c8,$42,$50,$e4,$6f,$00,$83
+       );
+var C:TRNLECCurve;
+    Damaged:array[0..31] of TRNLUInt8;
+    Value,Expected:TRNLECFieldElement;
+begin
+
+ C:=Curve;
+
+ RNLSelfTestBegin('[P-256] RFC 6979 signature over "sample" verifies ... ');
+ if VerifySignature(VerifyPublicKey,SizeOf(VerifyPublicKey),
+                    VerifyHash,SizeOf(VerifyHash),VerifyR,VerifyS) then begin
+  RNLSelfTestSucceeded;
+ end else begin
+  RNLSelfTestFailure;
+ end;
+
+ RNLSelfTestBegin('[P-256] RFC 6979 signature over "test" verifies as well ... ');
+ if VerifySignature(VerifyPublicKey,SizeOf(VerifyPublicKey),
+                    VerifyHashTest,SizeOf(VerifyHashTest),VerifyRTest,VerifySTest) then begin
+  RNLSelfTestSucceeded;
+ end else begin
+  RNLSelfTestFailure;
+ end;
+
+ // The reduction which turns the x of the result into something comparable with r. It only ever
+ // does anything for the roughly one signature in four billion whose x lands between n and p, so no
+ // vector will reach it and it is checked here at the one boundary where it can be wrong: n itself
+ // has to come down to zero and n-1 has to stay where it is.
+ RNLSelfTestBegin('[P-256] the reduction modulo n sits exactly at n ... ');
+ TRNLEC.Copy_(Value,OrderModulus);
+ TRNLEC.Subtract(Value,Value,OrderModulus,OrderModulus,C.Limbs);
+ TRNLEC.Zero(Expected);
+ if TRNLEC.EqualMask(Value,Expected)<>0 then begin
+  TRNLEC.Copy_(Value,OrderModulus);
+  Value[0]:=Value[0]-1;
+  TRNLEC.Copy_(Expected,Value);
+  TRNLEC.Subtract(Value,Value,OrderModulus,OrderModulus,C.Limbs);
+  if TRNLEC.EqualMask(Value,Expected)<>0 then begin
+   RNLSelfTestSucceeded;
+  end else begin
+   RNLSelfTestFailure;
+  end;
+ end else begin
+  RNLSelfTestFailure;
+ end;
+
+ // Without the four below, a verification which always said yes would pass the one above
+ RNLSelfTestBegin('[P-256] a signature over another message does not ... ');
+ Move(VerifyHash,Damaged,SizeOf(Damaged));
+ Damaged[SizeOf(Damaged)-1]:=Damaged[SizeOf(Damaged)-1] xor 1;
+ if not VerifySignature(VerifyPublicKey,SizeOf(VerifyPublicKey),
+                        Damaged,SizeOf(Damaged),VerifyR,VerifyS) then begin
+  RNLSelfTestSucceeded;
+ end else begin
+  RNLSelfTestFailure;
+ end;
+
+ RNLSelfTestBegin('[P-256] nor one whose s was changed ... ');
+ Move(VerifyS,Damaged,SizeOf(Damaged));
+ Damaged[SizeOf(Damaged)-1]:=Damaged[SizeOf(Damaged)-1] xor 1;
+ if not VerifySignature(VerifyPublicKey,SizeOf(VerifyPublicKey),
+                        VerifyHash,SizeOf(VerifyHash),VerifyR,Damaged) then begin
+  RNLSelfTestSucceeded;
+ end else begin
+  RNLSelfTestFailure;
+ end;
+
+ RNLSelfTestBegin('[P-256] nor one with r or s at zero ... ');
+ if (not VerifySignature(VerifyPublicKey,SizeOf(VerifyPublicKey),
+                         VerifyHash,SizeOf(VerifyHash),Zeroes,VerifyS)) and
+    (not VerifySignature(VerifyPublicKey,SizeOf(VerifyPublicKey),
+                         VerifyHash,SizeOf(VerifyHash),VerifyR,Zeroes)) then begin
+  RNLSelfTestSucceeded;
+ end else begin
+  RNLSelfTestFailure;
+ end;
+
+ RNLSelfTestBegin('[P-256] nor one with r or s at the group order ... ');
+ if (not VerifySignature(VerifyPublicKey,SizeOf(VerifyPublicKey),
+                         VerifyHash,SizeOf(VerifyHash),OrderBytes,VerifyS)) and
+    (not VerifySignature(VerifyPublicKey,SizeOf(VerifyPublicKey),
+                         VerifyHash,SizeOf(VerifyHash),VerifyR,OrderBytes)) then begin
+  RNLSelfTestSucceeded;
+ end else begin
+  RNLSelfTestFailure;
+ end;
+
+end;
+
+// RFC 6979 appendix A.2.6, the P-384 key and its SHA-384 signature over "sample", plus a key
+// agreement over the same curve. Both were confirmed against a separate implementation of the group
+// law and against another library before they were written down.
+//
+// The interesting part is not that P-384 works, it is that it works through the very same routines
+// P-256 does, with nothing changed but the constants. Every check here is therefore also a second
+// opinion on the generalisation.
+class procedure TRNLP384.SelfTest;
+const PrivateKey:array[0..47] of TRNLUInt8=
+       (
+        $6b,$9d,$3d,$ad,$2e,$1b,$8c,$1c,$05,$b1,$98,$75,
+        $b6,$65,$9f,$4d,$e2,$3c,$3b,$66,$7b,$f2,$97,$ba,
+        $9a,$a4,$77,$40,$78,$71,$37,$d8,$96,$d5,$72,$4e,
+        $4c,$70,$a8,$25,$f8,$72,$c9,$ea,$60,$d2,$ed,$f5
+       );
+      ExpectedPublicKey:array[0..96] of TRNLUInt8=
+       (
+        $04,$ec,$3a,$4e,$41,$5b,$4e,$19,$a4,$56,$86,$18,
+        $02,$9f,$42,$7f,$a5,$da,$9a,$8b,$c4,$ae,$92,$e0,
+        $2e,$06,$aa,$e5,$28,$6b,$30,$0c,$64,$de,$f8,$f0,
+        $ea,$90,$55,$86,$60,$64,$a2,$54,$51,$54,$80,$bc,
+        $13,$80,$15,$d9,$b7,$2d,$7d,$57,$24,$4e,$a8,$ef,
+        $9a,$c0,$c6,$21,$89,$67,$08,$a5,$93,$67,$f9,$df,
+        $b9,$f5,$4c,$a8,$4b,$3f,$1c,$9d,$b1,$28,$8b,$23,
+        $1c,$3a,$e0,$d4,$fe,$73,$44,$fd,$25,$33,$26,$47,
+        $20
+       );
+      // SHA-384 of "sample"
+      VerifyHash:array[0..47] of TRNLUInt8=
+       (
+        $9a,$90,$83,$50,$5b,$c9,$22,$76,$ae,$c4,$be,$31,
+        $26,$96,$ef,$7b,$f3,$bf,$60,$3f,$4b,$bd,$38,$11,
+        $96,$a0,$29,$f3,$40,$58,$53,$12,$31,$3b,$ca,$4a,
+        $9b,$5b,$89,$0e,$fe,$e4,$2c,$77,$b1,$ee,$25,$fe
+       );
+      VerifyR:array[0..47] of TRNLUInt8=
+       (
+        $94,$ed,$bb,$92,$a5,$ec,$b8,$aa,$d4,$73,$6e,$56,
+        $c6,$91,$91,$6b,$3f,$88,$14,$06,$66,$ce,$9f,$a7,
+        $3d,$64,$c4,$ea,$95,$ad,$13,$3c,$81,$a6,$48,$15,
+        $2e,$44,$ac,$f9,$6e,$36,$dd,$1e,$80,$fa,$be,$46
+       );
+      VerifyS:array[0..47] of TRNLUInt8=
+       (
+        $99,$ef,$4a,$eb,$15,$f1,$78,$ce,$a1,$fe,$40,$db,
+        $26,$03,$13,$8f,$13,$0e,$74,$0a,$19,$62,$45,$26,
+        $20,$3b,$63,$51,$d0,$a3,$a9,$4f,$a3,$29,$c1,$45,
+        $78,$6e,$67,$9e,$7b,$82,$c7,$1a,$38,$62,$8a,$c8
+       );
+      PeerPublicKey:array[0..96] of TRNLUInt8=
+       (
+        $04,$46,$f6,$1a,$a1,$f3,$f1,$ea,$b3,$26,$44,$55,
+        $f2,$3e,$04,$94,$cc,$21,$bf,$a8,$98,$77,$da,$fb,
+        $25,$b1,$d4,$bf,$7b,$e1,$77,$81,$2f,$cd,$d0,$4d,
+        $40,$71,$00,$e0,$ec,$e6,$5e,$a8,$17,$0b,$8e,$cd,
+        $d6,$95,$99,$38,$d0,$42,$0b,$6f,$76,$db,$3f,$40,
+        $c7,$47,$11,$52,$1c,$2a,$b9,$d9,$81,$51,$43,$3c,
+        $e9,$02,$fd,$bc,$6d,$7d,$f9,$87,$1f,$4e,$c4,$fb,
+        $3c,$4a,$ec,$6f,$c7,$d9,$80,$59,$0e,$cb,$fb,$1d,
+        $86
+       );
+      ExpectedSharedSecret:array[0..47] of TRNLUInt8=
+       (
+        $a6,$6a,$19,$c6,$77,$97,$d4,$51,$2d,$b7,$38,$34,
+        $5b,$09,$37,$14,$56,$b8,$d6,$41,$0d,$d2,$63,$1f,
+        $e3,$41,$13,$c5,$12,$86,$2d,$4a,$98,$8e,$05,$8a,
+        $48,$d3,$02,$51,$e6,$af,$7e,$04,$a1,$bc,$f1,$5a
+       );
+var C:TRNLECCurve;
+    Scalar,X,Y,Order:TRNLECFieldElement;
+    Base,Product:TRNLECPoint;
+    PublicKey:array[0..PointSize-1] of TRNLUInt8;
+    Secret:array[0..ElementSize-1] of TRNLUInt8;
+    Damaged:array[0..ElementSize-1] of TRNLUInt8;
+begin
+
+ C:=Curve;
+ TRNLEC.BasePoint(Base,C);
+
+ RNLSelfTestBegin('[P-384] multiplying the base point by the group order gives the point at infinity ... ');
+ TRNLEC.Copy_(Order,OrderModulus);
+ TRNLEC.PointMultiply(Product,Order,Base,C);
+ if TRNLEC.IsZeroMask(Product.Z)<>0 then begin
+  RNLSelfTestSucceeded;
+ end else begin
+  RNLSelfTestFailure;
+ end;
+
+ RNLSelfTestBegin('[P-384] RFC 6979: the public key belonging to the private one ... ');
+ TRNLEC.FromBigEndian(Scalar,PrivateKey,C.Limbs);
+ TRNLEC.PointMultiply(Product,Scalar,Base,C);
+ if TRNLEC.PointToAffine(X,Y,Product,C) then begin
+  TRNLEC.EncodePoint(PublicKey,X,Y,C);
+ end else begin
+  FillChar(PublicKey,SizeOf(PublicKey),#0);
+ end;
+ if TRNLMemory.SecureIsEqual(PublicKey,ExpectedPublicKey,SizeOf(ExpectedPublicKey)) then begin
+  RNLSelfTestSucceeded;
+ end else begin
+  RNLSelfTestFailure;
+ end;
+
+ RNLSelfTestBegin('[P-384] RFC 6979 signature over "sample" with SHA-384 verifies ... ');
+ if VerifySignature(ExpectedPublicKey,SizeOf(ExpectedPublicKey),
+                    VerifyHash,SizeOf(VerifyHash),VerifyR,VerifyS) then begin
+  RNLSelfTestSucceeded;
+ end else begin
+  RNLSelfTestFailure;
+ end;
+
+ RNLSelfTestBegin('[P-384] and one over another message does not ... ');
+ Move(VerifyHash,Damaged,SizeOf(Damaged));
+ Damaged[SizeOf(Damaged)-1]:=Damaged[SizeOf(Damaged)-1] xor 1;
+ if not VerifySignature(ExpectedPublicKey,SizeOf(ExpectedPublicKey),
+                        Damaged,SizeOf(Damaged),VerifyR,VerifyS) then begin
+  RNLSelfTestSucceeded;
+ end else begin
+  RNLSelfTestFailure;
+ end;
+
+ RNLSelfTestBegin('[P-384] key agreement over the same curve ... ');
+ if SharedSecret(Secret,PrivateKey,PeerPublicKey,SizeOf(PeerPublicKey)) and
+    TRNLMemory.SecureIsEqual(Secret,ExpectedSharedSecret,SizeOf(ExpectedSharedSecret)) then begin
+  RNLSelfTestSucceeded;
+ end else begin
+  RNLSelfTestFailure;
+ end;
+
+ RNLSelfTestBegin('[P-384] a peer point which is not on the curve is refused ... ');
+ Move(PeerPublicKey,PublicKey,SizeOf(PeerPublicKey));
+ PublicKey[SizeOf(PublicKey)-1]:=PublicKey[SizeOf(PublicKey)-1] xor 1;
+ if not SharedSecret(Secret,PrivateKey,PublicKey,SizeOf(PublicKey)) then begin
+  RNLSelfTestSucceeded;
+ end else begin
+  RNLSelfTestFailure;
+ end;
+
+ // A point of the other curve's length must not be read as if it were of this one
+ RNLSelfTestBegin('[P-384] and so is a point of the wrong length ... ');
+ if not SharedSecret(Secret,PrivateKey,PeerPublicKey,TRNLP256.PointSize) then begin
+  RNLSelfTestSucceeded;
+ end else begin
+  RNLSelfTestFailure;
+ end;
+
+end;
+
+// There is no vector for a parser; what there is instead is a list of encodings which have to be
+// refused. Each of these is legal BER and illegal DER, or illegal outright, and each of them is a
+// way for one certificate to have two encodings - which means two fingerprints, which means a pin
+// that does not pin.
+// The real leaf certificate of nc-workhorse.rosseaux.com, fetched on 2026-08-03. It is used by
+// two self tests - the one which takes a certificate apart and the one which checks a chain -
+// so it lives here rather than inside either of them.
+const RNLX509SelfTestLeaf:array[0..929] of TRNLUInt8=
+       (
+        $30,$82,$03,$9e,$30,$82,$03,$25,$a0,$03,$02,$01,
+        $02,$02,$12,$05,$b7,$47,$5b,$48,$f8,$81,$11,$c8,
+        $4b,$e8,$9e,$f7,$28,$c5,$16,$5e,$92,$30,$0a,$06,
+        $08,$2a,$86,$48,$ce,$3d,$04,$03,$03,$30,$33,$31,
+        $0b,$30,$09,$06,$03,$55,$04,$06,$13,$02,$55,$53,
+        $31,$16,$30,$14,$06,$03,$55,$04,$0a,$13,$0d,$4c,
+        $65,$74,$27,$73,$20,$45,$6e,$63,$72,$79,$70,$74,
+        $31,$0c,$30,$0a,$06,$03,$55,$04,$03,$13,$03,$59,
+        $45,$32,$30,$1e,$17,$0d,$32,$36,$30,$36,$32,$35,
+        $32,$30,$32,$39,$32,$37,$5a,$17,$0d,$32,$36,$30,
+        $39,$32,$33,$32,$30,$32,$39,$32,$36,$5a,$30,$24,
+        $31,$22,$30,$20,$06,$03,$55,$04,$03,$13,$19,$6e,
+        $63,$2d,$77,$6f,$72,$6b,$68,$6f,$72,$73,$65,$2e,
+        $72,$6f,$73,$73,$65,$61,$75,$78,$2e,$63,$6f,$6d,
+        $30,$59,$30,$13,$06,$07,$2a,$86,$48,$ce,$3d,$02,
+        $01,$06,$08,$2a,$86,$48,$ce,$3d,$03,$01,$07,$03,
+        $42,$00,$04,$e3,$2d,$13,$ec,$7c,$f6,$33,$39,$30,
+        $5f,$90,$9a,$39,$32,$bb,$1d,$64,$8c,$d7,$d2,$6a,
+        $e2,$0e,$1c,$d5,$0c,$c8,$39,$54,$54,$8d,$af,$8e,
+        $8f,$20,$27,$75,$f6,$cf,$5e,$48,$f5,$29,$f0,$b7,
+        $f9,$6e,$27,$fe,$49,$dd,$5e,$68,$d5,$0f,$89,$8a,
+        $1e,$2b,$e9,$21,$c1,$34,$da,$a3,$82,$02,$26,$30,
+        $82,$02,$22,$30,$0e,$06,$03,$55,$1d,$0f,$01,$01,
+        $ff,$04,$04,$03,$02,$07,$80,$30,$13,$06,$03,$55,
+        $1d,$25,$04,$0c,$30,$0a,$06,$08,$2b,$06,$01,$05,
+        $05,$07,$03,$01,$30,$0c,$06,$03,$55,$1d,$13,$01,
+        $01,$ff,$04,$02,$30,$00,$30,$1d,$06,$03,$55,$1d,
+        $0e,$04,$16,$04,$14,$2d,$bd,$14,$bf,$d1,$19,$78,
+        $b3,$20,$e8,$1f,$ff,$46,$95,$f4,$9e,$da,$fa,$67,
+        $7d,$30,$1f,$06,$03,$55,$1d,$23,$04,$18,$30,$16,
+        $80,$14,$b9,$59,$f2,$8e,$cf,$22,$f0,$86,$d3,$37,
+        $48,$ff,$76,$14,$18,$ba,$82,$d8,$55,$87,$30,$33,
+        $06,$08,$2b,$06,$01,$05,$05,$07,$01,$01,$04,$27,
+        $30,$25,$30,$23,$06,$08,$2b,$06,$01,$05,$05,$07,
+        $30,$02,$86,$17,$68,$74,$74,$70,$3a,$2f,$2f,$79,
+        $65,$32,$2e,$69,$2e,$6c,$65,$6e,$63,$72,$2e,$6f,
+        $72,$67,$2f,$30,$24,$06,$03,$55,$1d,$11,$04,$1d,
+        $30,$1b,$82,$19,$6e,$63,$2d,$77,$6f,$72,$6b,$68,
+        $6f,$72,$73,$65,$2e,$72,$6f,$73,$73,$65,$61,$75,
+        $78,$2e,$63,$6f,$6d,$30,$13,$06,$03,$55,$1d,$20,
+        $04,$0c,$30,$0a,$30,$08,$06,$06,$67,$81,$0c,$01,
+        $02,$01,$30,$2e,$06,$03,$55,$1d,$1f,$04,$27,$30,
+        $25,$30,$23,$a0,$21,$a0,$1f,$86,$1d,$68,$74,$74,
+        $70,$3a,$2f,$2f,$79,$65,$32,$2e,$63,$2e,$6c,$65,
+        $6e,$63,$72,$2e,$6f,$72,$67,$2f,$31,$39,$2e,$63,
+        $72,$6c,$30,$82,$01,$0b,$06,$0a,$2b,$06,$01,$04,
+        $01,$d6,$79,$02,$04,$02,$04,$81,$fc,$04,$81,$f9,
+        $00,$f7,$00,$75,$00,$af,$67,$88,$3b,$57,$b0,$4e,
+        $dd,$8f,$a6,$d9,$7e,$f6,$2e,$a8,$eb,$81,$0a,$c7,
+        $71,$60,$f0,$24,$5e,$55,$d6,$0c,$2f,$e7,$85,$87,
+        $3a,$00,$00,$01,$9f,$00,$ae,$b7,$8b,$00,$00,$04,
+        $03,$00,$46,$30,$44,$02,$20,$0e,$d9,$ab,$c4,$11,
+        $fc,$04,$3f,$a9,$e6,$54,$f8,$ae,$ca,$d4,$ca,$3c,
+        $3f,$36,$3e,$4e,$26,$7e,$4d,$03,$ff,$b5,$57,$06,
+        $04,$99,$87,$02,$20,$27,$03,$30,$f6,$df,$0f,$b8,
+        $01,$7d,$f2,$20,$fa,$4e,$26,$5f,$83,$1a,$b1,$97,
+        $1f,$b3,$d0,$c3,$d5,$4c,$a0,$f6,$9b,$fe,$8b,$4c,
+        $43,$00,$7e,$00,$26,$e3,$64,$6e,$58,$69,$21,$23,
+        $bc,$34,$3f,$47,$24,$35,$9b,$37,$92,$cd,$24,$5a,
+        $88,$d8,$15,$d3,$93,$33,$fd,$99,$18,$ab,$47,$23,
+        $00,$00,$01,$9f,$00,$ae,$b5,$64,$00,$08,$00,$00,
+        $05,$00,$22,$2b,$23,$27,$04,$03,$00,$47,$30,$45,
+        $02,$20,$2a,$17,$74,$fc,$5c,$dd,$f8,$6b,$a4,$97,
+        $5c,$e4,$07,$c0,$33,$24,$33,$91,$da,$16,$7b,$f0,
+        $79,$67,$45,$cb,$88,$13,$06,$bf,$67,$73,$02,$21,
+        $00,$ee,$33,$62,$7c,$9d,$d7,$06,$20,$7b,$77,$ba,
+        $10,$b0,$7c,$50,$1c,$ea,$fb,$51,$d7,$17,$7d,$f5,
+        $e4,$15,$a5,$aa,$1b,$fc,$be,$b7,$c8,$30,$0a,$06,
+        $08,$2a,$86,$48,$ce,$3d,$04,$03,$03,$03,$67,$00,
+        $30,$64,$02,$30,$68,$6e,$77,$dc,$23,$d3,$27,$33,
+        $d8,$ee,$c7,$1d,$88,$9f,$3c,$cc,$bc,$e8,$7b,$4f,
+        $58,$90,$2d,$89,$08,$76,$fa,$74,$14,$ec,$cf,$92,
+        $ff,$ab,$55,$7e,$7e,$26,$06,$07,$3b,$45,$80,$6d,
+        $0e,$c3,$3b,$6c,$02,$30,$5b,$66,$73,$dc,$15,$f7,
+        $97,$53,$98,$c3,$34,$ff,$0f,$16,$9f,$94,$e8,$c7,
+        $f0,$2b,$cf,$ba,$c8,$f1,$99,$81,$e7,$06,$eb,$7f,
+        $eb,$fa,$77,$a9,$ef,$70,$4e,$fd,$6a,$f1,$03,$46,
+        $a7,$e2,$16,$96,$a6,$13
+       );
+
+class procedure TRNLASN1Reader.SelfTest;
+const // SEQUENCE { INTEGER 1 }
+      Good:array[0..4] of TRNLUInt8=($30,$03,$02,$01,$01);
+      // The indefinite length form, which BER allows and DER does not
+      Indefinite:array[0..3] of TRNLUInt8=($30,$80,$00,$00);
+      // A length of five written the long way, which the short form could have carried
+      NonMinimalLength:array[0..6] of TRNLUInt8=($30,$81,$05,$02,$01,$01,$00);
+      // A leading zero in the length bytes
+      PaddedLength:array[0..7] of TRNLUInt8=($30,$82,$00,$05,$02,$01,$01,$00);
+      // A length which runs past what is there
+      LengthPastTheEnd:array[0..3] of TRNLUInt8=($30,$09,$02,$01);
+      // The high tag number form, which nothing in a certificate uses
+      HighTagNumber:array[0..2] of TRNLUInt8=($3f,$01,$00);
+      // INTEGER 1 with a leading zero it does not need
+      NonMinimalInteger:array[0..3] of TRNLUInt8=($02,$02,$00,$01);
+      // A negative INTEGER written with a leading $ff it does not need
+      NonMinimalNegative:array[0..3] of TRNLUInt8=($02,$02,$ff,$81);
+      // A BIT STRING claiming one unused bit, where whole bytes are wanted
+      BitStringWithPadding:array[0..3] of TRNLUInt8=($03,$02,$01,$fe);
+      // TRUE written as one, which DER spells $ff
+      SloppyBoolean:array[0..2] of TRNLUInt8=($01,$01,$01);
+      // UTCTime 260625202927Z
+      Time:array[0..14] of TRNLUInt8=
+       ($17,$0d,$32,$36,$30,$36,$32,$35,$32,$30,$32,$39,$32,$37,$5a);
+      // The same moment as a GeneralizedTime
+      GeneralizedTime_:array[0..16] of TRNLUInt8=
+       ($18,$0f,$32,$30,$32,$36,$30,$36,$32,$35,$32,$30,$32,$39,$32,$37,$5a);
+      // Without the Z, which DER does not allow in a certificate
+      TimeWithoutZone:array[0..13] of TRNLUInt8=
+       ($17,$0c,$32,$36,$30,$36,$32,$35,$32,$30,$32,$39,$32,$37);
+      // Month thirteen
+      ImpossibleTime:array[0..14] of TRNLUInt8=
+       ($17,$0d,$32,$36,$31,$33,$32,$35,$32,$30,$32,$39,$32,$37,$5a);
+      EXPECTED_TIME=TRNLInt64(1782419367);
+
+var Reader,Contents:TRNLASN1Reader;
+    Value:TRNLInt64;
+    Data:PRNLUInt8Array;
+    Size:TRNLSizeInt;
+    Boolean_:boolean;
+    AllRefused:boolean;
+
+ function Accepts(const aData;const aSize:TRNLSizeInt):boolean;
+ var R,C:TRNLASN1Reader;
+     T:TRNLUInt8;
+ begin
+  R.Initialize(aData,aSize);
+  result:=R.ReadAny(T,C);
+ end;
+
+ procedure Refuse(const aWhat:TRNLRawByteString;const aData;const aSize:TRNLSizeInt);
+ begin
+  if Accepts(aData,aSize) then begin
+   AllRefused:=false;
+   writeln;
+   writeln('             accepted ',aWhat);
+  end;
+ end;
+
+begin
+
+ RNLSelfTestBegin('[ASN.1] a sequence with an integer in it reads back ... ');
+ Reader.Initialize(Good,SizeOf(Good));
+ if Reader.Read(TAG_SEQUENCE,Contents) and
+    Contents.ReadInteger(Value) and (Value=1) and
+    Contents.AtEnd and Reader.AtEnd then begin
+  RNLSelfTestSucceeded;
+ end else begin
+  RNLSelfTestFailure;
+ end;
+
+ RNLSelfTestBegin('[ASN.1] the encodings DER forbids are all refused ... ');
+ AllRefused:=true;
+ Refuse('the indefinite length form',Indefinite,SizeOf(Indefinite));
+ Refuse('a long form length the short form could carry',NonMinimalLength,SizeOf(NonMinimalLength));
+ Refuse('a length with a leading zero',PaddedLength,SizeOf(PaddedLength));
+ Refuse('a length past the end of the buffer',LengthPastTheEnd,SizeOf(LengthPastTheEnd));
+ Refuse('the high tag number form',HighTagNumber,SizeOf(HighTagNumber));
+ if AllRefused then begin
+  RNLSelfTestSucceeded;
+ end else begin
+  RNLSelfTestFailure;
+ end;
+
+ RNLSelfTestBegin('[ASN.1] and so are the values which have two encodings ... ');
+ AllRefused:=true;
+ Reader.Initialize(NonMinimalInteger,SizeOf(NonMinimalInteger));
+ if Reader.ReadInteger(Value) then begin
+  AllRefused:=false;
+ end;
+ Reader.Initialize(NonMinimalNegative,SizeOf(NonMinimalNegative));
+ if Reader.ReadInteger(Value) then begin
+  AllRefused:=false;
+ end;
+ Reader.Initialize(BitStringWithPadding,SizeOf(BitStringWithPadding));
+ if Reader.ReadBitString(Data,Size) then begin
+  AllRefused:=false;
+ end;
+ Reader.Initialize(SloppyBoolean,SizeOf(SloppyBoolean));
+ if Reader.ReadBoolean(Boolean_) then begin
+  AllRefused:=false;
+ end;
+ if AllRefused then begin
+  RNLSelfTestSucceeded;
+ end else begin
+  RNLSelfTestFailure;
+ end;
+
+ // The two time formats have to agree on the moment, which is the point of checking both against one
+ // number rather than each against itself
+ RNLSelfTestBegin('[ASN.1] both time formats give the same moment ... ');
+ Reader.Initialize(Time,SizeOf(Time));
+ if Reader.ReadTime(Value) and (Value=EXPECTED_TIME) then begin
+  Reader.Initialize(GeneralizedTime_,SizeOf(GeneralizedTime_));
+  if Reader.ReadTime(Value) and (Value=EXPECTED_TIME) then begin
+   RNLSelfTestSucceeded;
+  end else begin
+   RNLSelfTestFailure;
+  end;
+ end else begin
+  RNLSelfTestFailure;
+ end;
+
+ RNLSelfTestBegin('[ASN.1] a time without a zone or with a month of thirteen is refused ... ');
+ AllRefused:=true;
+ Reader.Initialize(TimeWithoutZone,SizeOf(TimeWithoutZone));
+ if Reader.ReadTime(Value) then begin
+  AllRefused:=false;
+ end;
+ Reader.Initialize(ImpossibleTime,SizeOf(ImpossibleTime));
+ if Reader.ReadTime(Value) then begin
+  AllRefused:=false;
+ end;
+ if AllRefused then begin
+  RNLSelfTestSucceeded;
+ end else begin
+  RNLSelfTestFailure;
+ end;
+
+end;
+
+// The real leaf certificate of nc-workhorse.rosseaux.com, fetched on 2026-08-03, and every value
+// checked against what openssl reads out of the same 930 bytes. That is the point of using a real
+// one rather than something built here: a certificate this code produced and then read back would
+// agree with itself about a layout nobody else uses.
+//
+// It is a fixed byte string and not a fetch, so the ninety day renewal of the real service does not
+// reach it. What it stops being able to say, once that renewal happens, is anything about the
+// service - which is what src/tools/turnprobe.dpr is for.
+class procedure TRNLX509Certificate.SelfTest;
+// What openssl reads out of the very same bytes
+const ExpectedPublicKey:array[0..64] of TRNLUInt8=
+       (
+        $04,$e3,$2d,$13,$ec,$7c,$f6,$33,$39,$30,$5f,$90,
+        $9a,$39,$32,$bb,$1d,$64,$8c,$d7,$d2,$6a,$e2,$0e,
+        $1c,$d5,$0c,$c8,$39,$54,$54,$8d,$af,$8e,$8f,$20,
+        $27,$75,$f6,$cf,$5e,$48,$f5,$29,$f0,$b7,$f9,$6e,
+        $27,$fe,$49,$dd,$5e,$68,$d5,$0f,$89,$8a,$1e,$2b,
+        $e9,$21,$c1,$34,$da
+       );
+      // notBefore Jun 25 20:29:27 2026 GMT, notAfter Sep 23 20:29:26 2026 GMT
+      EXPECTED_NOT_BEFORE=TRNLInt64(1782419367);
+      EXPECTED_NOT_AFTER=TRNLInt64(1790195366);
+      // The tbsCertificate begins four bytes in and runs for 809
+      EXPECTED_TBS_OFFSET=4;
+      EXPECTED_TBS_SIZE=809;
+      // SEQUENCE contents of the subjectAltName: one DNS name of twenty five characters
+      EXPECTED_SAN_SIZE=27;
+      DNS_NAME:array[0..24] of TRNLUInt8=
+       (
+        $6e,$63,$2d,$77,$6f,$72,$6b,$68,$6f,$72,$73,$65,
+        $2e,$72,$6f,$73,$73,$65,$61,$75,$78,$2e,$63,$6f,
+        $6d
+       );
+var Certificate:TRNLX509Certificate;
+    Damaged:array[0..929] of TRNLUInt8;
+    Point:TRNLECPoint;
+    AllRefused:boolean;
+
+ procedure Refuse(const aWhat:TRNLRawByteString;const aSize:TRNLSizeUInt);
+ var Other:TRNLX509Certificate;
+ begin
+  if Other.Parse(Damaged,aSize) then begin
+   AllRefused:=false;
+   writeln;
+   writeln('             accepted ',aWhat);
+  end;
+ end;
+
+begin
+
+ RNLSelfTestBegin('[X.509] the real leaf certificate parses ... ');
+ if Certificate.Parse(RNLX509SelfTestLeaf,SizeOf(RNLX509SelfTestLeaf)) then begin
+  RNLSelfTestSucceeded;
+ end else begin
+  RNLSelfTestFailure;
+ end;
+
+ // The span the signature is computed over. Getting it wrong by one byte in either direction gives a
+ // digest which verifies against nothing, and no vector for the digest itself would say where the
+ // error was.
+ RNLSelfTestBegin('[X.509] the tbsCertificate span is where openssl says it is ... ');
+ if (Certificate.TBSCertificateSize=EXPECTED_TBS_SIZE) and
+    (Certificate.TBSCertificate=PRNLUInt8Array(TRNLPointer(@RNLX509SelfTestLeaf[EXPECTED_TBS_OFFSET]))) then begin
+  RNLSelfTestSucceeded;
+ end else begin
+  RNLSelfTestFailure;
+ end;
+
+ RNLSelfTestBegin('[X.509] the public key is the point openssl reads, on the curve it names ... ');
+ if (Certificate.PublicKeyCurve=RNL_X509_PUBLIC_KEY_CURVE_P256) and
+    (Certificate.PublicKeySize=TRNLP256.PointSize) and
+    TRNLMemory.SecureIsEqual(Certificate.PublicKey,ExpectedPublicKey,SizeOf(ExpectedPublicKey)) and
+    TRNLP256.DecodePoint(Point,Certificate.PublicKey,Certificate.PublicKeySize) then begin
+  RNLSelfTestSucceeded;
+ end else begin
+  RNLSelfTestFailure;
+ end;
+
+ RNLSelfTestBegin('[X.509] the validity period is the one openssl prints ... ');
+ if (Certificate.NotBefore=EXPECTED_NOT_BEFORE) and
+    (Certificate.NotAfter=EXPECTED_NOT_AFTER) then begin
+  RNLSelfTestSucceeded;
+ end else begin
+  RNLSelfTestFailure;
+ end;
+
+ RNLSelfTestBegin('[X.509] version three, signed with ecdsa-with-SHA384 ... ');
+ if (Certificate.Version=3) and
+    (Certificate.SignatureAlgorithm=RNL_X509_SIGNATURE_ALGORITHM_ECDSA_SHA384) and
+    (Certificate.SignatureElementSize=TRNLP384.ElementSize) then begin
+  RNLSelfTestSucceeded;
+ end else begin
+  RNLSelfTestFailure;
+ end;
+
+ // Every extension openssl lists, and the two which are marked critical are among them - which is
+ // what says the critical handling did not simply refuse everything
+ RNLSelfTestBegin('[X.509] the extensions say leaf, digital signature and server authentication ... ');
+ if Certificate.HasBasicConstraints and
+    (not Certificate.IsCertificateAuthority) and
+    (not Certificate.HasPathLengthConstraint) and
+    Certificate.HasKeyUsage and
+    ((Certificate.KeyUsage and KEY_USAGE_DIGITAL_SIGNATURE)<>0) and
+    ((Certificate.KeyUsage and KEY_USAGE_KEY_CERT_SIGN)=0) and
+    Certificate.HasExtendedKeyUsage and
+    Certificate.AllowsServerAuthentication then begin
+  RNLSelfTestSucceeded;
+ end else begin
+  RNLSelfTestFailure;
+ end;
+
+ RNLSelfTestBegin('[X.509] the subject alternative name carries the host name ... ');
+ if (Certificate.SubjectAlternativeNamesSize=EXPECTED_SAN_SIZE) and
+    (Certificate.SubjectAlternativeNames^[0]=GENERAL_NAME_DNS) and
+    (Certificate.SubjectAlternativeNames^[1]=TRNLUInt8(SizeOf(DNS_NAME))) and
+    TRNLMemory.SecureIsEqual(Certificate.SubjectAlternativeNames^[2],DNS_NAME,SizeOf(DNS_NAME)) then begin
+  RNLSelfTestSucceeded;
+ end else begin
+  RNLSelfTestFailure;
+ end;
+
+ RNLSelfTestBegin('[X.509] issuer and subject are spans of encoded bytes, and they differ ... ');
+ if (Certificate.IssuerSize>0) and (Certificate.SubjectSize>0) and
+    ((Certificate.IssuerSize<>Certificate.SubjectSize) or
+     (not TRNLMemory.SecureIsEqual(Certificate.Issuer^[0],Certificate.Subject^[0],
+                                   Certificate.IssuerSize))) then begin
+  RNLSelfTestSucceeded;
+ end else begin
+  RNLSelfTestFailure;
+ end;
+
+ RNLSelfTestBegin('[X.509] and a certificate which was changed on the way is refused ... ');
+ AllRefused:=true;
+ Move(RNLX509SelfTestLeaf,Damaged,SizeOf(Damaged));
+ Refuse('one byte short of its own length',SizeOf(Damaged)-1);
+ Move(RNLX509SelfTestLeaf,Damaged,SizeOf(Damaged));
+ // The outer SEQUENCE length made one byte larger than what follows it
+ Damaged[3]:=Damaged[3]+1;
+ Refuse('an outer length past the end',SizeOf(Damaged));
+ Move(RNLX509SelfTestLeaf,Damaged,SizeOf(Damaged));
+ // The named curve turned into one this code does not know. prime256v1 runs from 183 to 190.
+ Damaged[185]:=Damaged[185] xor $ff;
+ Refuse('a named curve which is not one of the two',SizeOf(Damaged));
+ Move(RNLX509SelfTestLeaf,Damaged,SizeOf(Damaged));
+ // The last byte of the keyUsage identifier, turned from 2.5.29.15 into 2.5.29.14. That makes it
+ // subjectKeyIdentifier, which this code has no handling for - and it is still marked critical, so
+ // it is a constraint which cannot be honoured and must not be waved through. Without this case the
+ // rule is never exercised at all, because both critical extensions of the real certificate are
+ // ones this code knows.
+ Damaged[273]:=$0e;
+ Refuse('an unknown extension which is marked critical',SizeOf(Damaged));
+ if AllRefused then begin
+  RNLSelfTestSucceeded;
+ end else begin
+  RNLSelfTestFailure;
+ end;
+
+end;
+
+// The real two link chain of nc-workhorse.rosseaux.com, as `openssl verify -partial_chain -trusted`
+// accepts it. The leaf carries a P-256 key and is signed with ecdsa-with-SHA384 by the P-384 key of
+// Let's Encrypt YE2, so this one check exercises the digest of one size against the curve of
+// another - which is exactly the pair that would be confused if the algorithm were taken to decide
+// both.
+class procedure TRNLX509.SelfTest;
+const IssuerCertificate:array[0..655] of TRNLUInt8=
+       (
+        $30,$82,$02,$8c,$30,$82,$02,$11,$a0,$03,$02,$01,
+        $02,$02,$10,$4d,$f3,$b1,$5d,$d6,$c0,$78,$4c,$50,
+        $7c,$d3,$7b,$58,$e6,$f1,$15,$30,$0a,$06,$08,$2a,
+        $86,$48,$ce,$3d,$04,$03,$03,$30,$2e,$31,$0b,$30,
+        $09,$06,$03,$55,$04,$06,$13,$02,$55,$53,$31,$0d,
+        $30,$0b,$06,$03,$55,$04,$0a,$13,$04,$49,$53,$52,
+        $47,$31,$10,$30,$0e,$06,$03,$55,$04,$03,$13,$07,
+        $52,$6f,$6f,$74,$20,$59,$45,$30,$1e,$17,$0d,$32,
+        $35,$30,$39,$30,$33,$30,$30,$30,$30,$30,$30,$5a,
+        $17,$0d,$32,$38,$30,$39,$30,$32,$32,$33,$35,$39,
+        $35,$39,$5a,$30,$33,$31,$0b,$30,$09,$06,$03,$55,
+        $04,$06,$13,$02,$55,$53,$31,$16,$30,$14,$06,$03,
+        $55,$04,$0a,$13,$0d,$4c,$65,$74,$27,$73,$20,$45,
+        $6e,$63,$72,$79,$70,$74,$31,$0c,$30,$0a,$06,$03,
+        $55,$04,$03,$13,$03,$59,$45,$32,$30,$76,$30,$10,
+        $06,$07,$2a,$86,$48,$ce,$3d,$02,$01,$06,$05,$2b,
+        $81,$04,$00,$22,$03,$62,$00,$04,$71,$9a,$b4,$33,
+        $91,$d6,$c4,$10,$bd,$cc,$a9,$7b,$77,$74,$94,$2d,
+        $b5,$87,$38,$ed,$ac,$64,$74,$34,$c7,$b9,$de,$53,
+        $3e,$a3,$36,$cf,$9b,$92,$0f,$97,$26,$93,$45,$ab,
+        $1e,$55,$97,$be,$79,$6f,$a8,$12,$ea,$88,$1d,$f8,
+        $92,$5b,$b1,$21,$b9,$8c,$c8,$08,$aa,$df,$f6,$03,
+        $e9,$ef,$34,$fe,$f5,$76,$e7,$d2,$bc,$5d,$02,$1d,
+        $8c,$55,$e5,$a1,$83,$9a,$d2,$62,$14,$ef,$57,$fb,
+        $1d,$0d,$3d,$3e,$f6,$03,$97,$0f,$a3,$81,$ee,$30,
+        $81,$eb,$30,$0e,$06,$03,$55,$1d,$0f,$01,$01,$ff,
+        $04,$04,$03,$02,$01,$86,$30,$13,$06,$03,$55,$1d,
+        $25,$04,$0c,$30,$0a,$06,$08,$2b,$06,$01,$05,$05,
+        $07,$03,$01,$30,$12,$06,$03,$55,$1d,$13,$01,$01,
+        $ff,$04,$08,$30,$06,$01,$01,$ff,$02,$01,$00,$30,
+        $1d,$06,$03,$55,$1d,$0e,$04,$16,$04,$14,$b9,$59,
+        $f2,$8e,$cf,$22,$f0,$86,$d3,$37,$48,$ff,$76,$14,
+        $18,$ba,$82,$d8,$55,$87,$30,$1f,$06,$03,$55,$1d,
+        $23,$04,$18,$30,$16,$80,$14,$a3,$c8,$26,$5a,$8e,
+        $a1,$4c,$d0,$35,$63,$fc,$9b,$23,$c8,$3a,$ae,$56,
+        $f3,$4f,$56,$30,$32,$06,$08,$2b,$06,$01,$05,$05,
+        $07,$01,$01,$04,$26,$30,$24,$30,$22,$06,$08,$2b,
+        $06,$01,$05,$05,$07,$30,$02,$86,$16,$68,$74,$74,
+        $70,$3a,$2f,$2f,$79,$65,$2e,$69,$2e,$6c,$65,$6e,
+        $63,$72,$2e,$6f,$72,$67,$2f,$30,$13,$06,$03,$55,
+        $1d,$20,$04,$0c,$30,$0a,$30,$08,$06,$06,$67,$81,
+        $0c,$01,$02,$01,$30,$27,$06,$03,$55,$1d,$1f,$04,
+        $20,$30,$1e,$30,$1c,$a0,$1a,$a0,$18,$86,$16,$68,
+        $74,$74,$70,$3a,$2f,$2f,$79,$65,$2e,$63,$2e,$6c,
+        $65,$6e,$63,$72,$2e,$6f,$72,$67,$2f,$30,$0a,$06,
+        $08,$2a,$86,$48,$ce,$3d,$04,$03,$03,$03,$69,$00,
+        $30,$66,$02,$31,$00,$c8,$72,$7c,$39,$75,$c6,$4b,
+        $37,$d7,$df,$ca,$75,$e7,$9e,$42,$c3,$fe,$2b,$52,
+        $24,$4c,$9c,$24,$f6,$f7,$b1,$19,$33,$7a,$a0,$68,
+        $c2,$ea,$7b,$bc,$eb,$00,$c1,$aa,$a8,$0a,$73,$67,
+        $fe,$38,$7d,$c3,$27,$02,$31,$00,$89,$33,$a0,$8f,
+        $95,$a3,$82,$e2,$94,$18,$61,$b2,$6d,$54,$f6,$1b,
+        $0c,$aa,$c8,$6f,$61,$0a,$93,$93,$69,$3a,$91,$3a,
+        $fd,$7b,$6d,$41,$86,$55,$ff,$78,$22,$94,$1f,$65,
+        $f8,$27,$3f,$0c,$e5,$70,$9b,$28
+       );
+      // A subjectAltName built here rather than fetched, because no certificate of the measured
+      // service carries a wildcard and the rule for one is where the mistakes live. Two names:
+      // "*.example.com" and "*.co.uk".
+      WildcardNames:array[0..23] of TRNLUInt8=
+       (
+        $82,$0d,$2a,$2e,$65,$78,$61,$6d,$70,$6c,$65,$2e,
+        $63,$6f,$6d,
+        $82,$07,$2a,$2e,$63,$6f,$2e,$75,$6b
+       );
+var Leaf,Issuer,Damaged:TRNLX509Certificate;
+    DamagedBytes:array[0..929] of TRNLUInt8;
+    Wildcard:TRNLX509Certificate;
+    AllRight:boolean;
+
+ procedure Expect(const aHostName:TRNLRawByteString;const aWanted:boolean;
+                  const aCertificate:TRNLX509Certificate);
+ begin
+  if TRNLX509.MatchesHostName(aCertificate,aHostName)<>aWanted then begin
+   AllRight:=false;
+   writeln;
+   if aWanted then begin
+    writeln('             did not match "',aHostName,'" and should have');
+   end else begin
+    writeln('             matched "',aHostName,'" and should not have');
+   end;
+  end;
+ end;
+
+begin
+
+ RNLSelfTestBegin('[X.509] the real chain: the leaf is signed by the intermediate ... ');
+ if Leaf.Parse(RNLX509SelfTestLeaf,SizeOf(RNLX509SelfTestLeaf)) and
+    Issuer.Parse(IssuerCertificate,SizeOf(IssuerCertificate)) and
+    (Issuer.PublicKeyCurve=RNL_X509_PUBLIC_KEY_CURVE_P384) and
+    Issuer.IsCertificateAuthority and
+    ((Issuer.KeyUsage and TRNLX509Certificate.KEY_USAGE_KEY_CERT_SIGN)<>0) and
+    VerifySignature(Leaf,Issuer) then begin
+  RNLSelfTestSucceeded;
+ end else begin
+  RNLSelfTestFailure;
+ end;
+
+ // Without these two, a verification which always said yes would pass the one above
+ RNLSelfTestBegin('[X.509] and not by itself, nor after one byte of it was changed ... ');
+ Move(RNLX509SelfTestLeaf,DamagedBytes,SizeOf(DamagedBytes));
+ // Inside the tbsCertificate, so the signature covers it. The serial number will do.
+ DamagedBytes[20]:=DamagedBytes[20] xor 1;
+ if (not VerifySignature(Leaf,Leaf)) and
+    Damaged.Parse(DamagedBytes,SizeOf(DamagedBytes)) and
+    (not VerifySignature(Damaged,Issuer)) then begin
+  RNLSelfTestSucceeded;
+ end else begin
+  RNLSelfTestFailure;
+ end;
+
+ RNLSelfTestBegin('[X.509] the issuer name of the leaf is the subject name of the intermediate ... ');
+ if IsIssuedBy(Leaf,Issuer) and (not IsIssuedBy(Issuer,Leaf)) then begin
+  RNLSelfTestSucceeded;
+ end else begin
+  RNLSelfTestFailure;
+ end;
+
+ RNLSelfTestBegin('[X.509] the host name matches only what it should ... ');
+ AllRight:=true;
+ Expect('nc-workhorse.rosseaux.com',true,Leaf);
+ // Case is not part of a host name
+ Expect('NC-Workhorse.Rosseaux.COM',true,Leaf);
+ Expect('other.rosseaux.com',false,Leaf);
+ Expect('rosseaux.com',false,Leaf);
+ // The suffix trick, which is what a comparison anchored at the wrong end lets through
+ Expect('nc-workhorse.rosseaux.com.evil.example',false,Leaf);
+ Expect('evil.nc-workhorse.rosseaux.com',false,Leaf);
+ Expect('',false,Leaf);
+ if AllRight then begin
+  RNLSelfTestSucceeded;
+ end else begin
+  RNLSelfTestFailure;
+ end;
+
+ RNLSelfTestBegin('[X.509] and a wildcard covers one label and no more ... ');
+ Wildcard:=Leaf;
+ Wildcard.SubjectAlternativeNames:=PRNLUInt8Array(TRNLPointer(@WildcardNames[0]));
+ Wildcard.SubjectAlternativeNamesSize:=SizeOf(WildcardNames);
+ AllRight:=true;
+ Expect('a.example.com',true,Wildcard);
+ Expect('anything.example.com',true,Wildcard);
+ // One label, not several: a wildcard is not a suffix match
+ Expect('a.b.example.com',false,Wildcard);
+ // And not none either: it stands for a label which is there
+ Expect('example.com',false,Wildcard);
+ Expect('a.example.org',false,Wildcard);
+ // This one is here to state a limitation rather than a guarantee: "*.co.uk" is accepted, because
+ // turning it down needs the public suffix list and that is not carried here. Written down as a
+ // check so that the day somebody adds the list, the expectation which has to flip is visible.
+ Expect('anything.co.uk',true,Wildcard);
+ if AllRight then begin
+  RNLSelfTestSucceeded;
+ end else begin
+  RNLSelfTestFailure;
+ end;
+
+end;
+
+class procedure TRNLSHA384.SelfTest;
+const ExpectedEmpty:TRNLSHA384Hash=
+       (
+        $38,$b0,$60,$a7,$51,$ac,$96,$38,$4c,$d9,$32,$7e,
+        $b1,$b1,$e3,$6a,$21,$fd,$b7,$11,$14,$be,$07,$43,
+        $4c,$0c,$c7,$bf,$63,$f6,$e1,$da,$27,$4e,$de,$bf,
+        $e7,$6f,$65,$fb,$d5,$1a,$d2,$f1,$48,$98,$b9,$5b
+       );
+      ExpectedAbc:TRNLSHA384Hash=
+       (
+        $cb,$00,$75,$3f,$45,$a3,$5e,$8b,$b5,$a0,$3d,$69,
+        $9a,$c6,$50,$07,$27,$2c,$32,$ab,$0e,$de,$d1,$63,
+        $1a,$8b,$60,$5a,$43,$ff,$5b,$ed,$80,$86,$07,$2b,
+        $a1,$e7,$cc,$23,$58,$ba,$ec,$a1,$34,$c8,$25,$a7
+       );
+      DataAbc:array[0..2] of TRNLUInt8=
+       (
+        $61,$62,$63
+       );
+      // Two blocks worth, so the multi block path is exercised as well as the padding
+      ExpectedLonger:TRNLSHA384Hash=
+       (
+        $09,$33,$0c,$33,$f7,$11,$47,$e8,$3d,$19,$2f,$c7,
+        $82,$cd,$1b,$47,$53,$11,$1b,$17,$3b,$3b,$05,$d2,
+        $2f,$a0,$80,$86,$e3,$b0,$f7,$12,$fc,$c7,$c7,$1a,
+        $55,$7e,$2d,$b9,$66,$c3,$e9,$fa,$91,$74,$60,$39
+       );
+      DataLonger:array[0..111] of TRNLUInt8=
+       (
+        $61,$62,$63,$64,$65,$66,$67,$68,$62,$63,$64,$65,
+        $66,$67,$68,$69,$63,$64,$65,$66,$67,$68,$69,$6a,
+        $64,$65,$66,$67,$68,$69,$6a,$6b,$65,$66,$67,$68,
+        $69,$6a,$6b,$6c,$66,$67,$68,$69,$6a,$6b,$6c,$6d,
+        $67,$68,$69,$6a,$6b,$6c,$6d,$6e,$68,$69,$6a,$6b,
+        $6c,$6d,$6e,$6f,$69,$6a,$6b,$6c,$6d,$6e,$6f,$70,
+        $6a,$6b,$6c,$6d,$6e,$6f,$70,$71,$6b,$6c,$6d,$6e,
+        $6f,$70,$71,$72,$6c,$6d,$6e,$6f,$70,$71,$72,$73,
+        $6d,$6e,$6f,$70,$71,$72,$73,$74,$6e,$6f,$70,$71,
+        $72,$73,$74,$75
+       );
+var Value:TRNLSHA384Hash;
+    Guarded:array[0..63] of TRNLUInt8;
+    Index:TRNLSizeInt;
+    Untouched:boolean;
+    Nothing:TRNLUInt8;
+begin
+ Nothing:=0;
+ RNLSelfTestBegin('[SHA384] FIPS 180-4, the empty message ... ');
+ Process(Value,Nothing,0);
+ if TRNLMemory.SecureIsEqual(Value,ExpectedEmpty,SizeOf(TRNLSHA384Hash)) then begin
+  RNLSelfTestSucceeded;
+ end else begin
+  RNLSelfTestFailure;
+ end;
+
+ // Six words and not eight. Comparing only the first forty eight bytes would not notice a version
+ // which wrote all sixty four, and that one does not merely leak the two words which are supposed to
+ // stay behind - it writes them past the end of whatever the caller offered.
+ RNLSelfTestBegin('[SHA384] and it writes 48 bytes and no more ... ');
+ FillChar(Guarded,SizeOf(Guarded),#$5a);
+ Process(Guarded,Nothing,0);
+ Untouched:=true;
+ for Index:=SizeOf(TRNLSHA384Hash) to SizeOf(Guarded)-1 do begin
+  if Guarded[Index]<>$5a then begin
+   Untouched:=false;
+  end;
+ end;
+ if Untouched then begin
+  RNLSelfTestSucceeded;
+ end else begin
+  RNLSelfTestFailure;
+ end;
+ RNLSelfTestBegin('[SHA384] FIPS 180-4, "abc" ... ');
+ Process(Value,DataAbc,SizeOf(DataAbc));
+ if TRNLMemory.SecureIsEqual(Value,ExpectedAbc,SizeOf(TRNLSHA384Hash)) then begin
+  RNLSelfTestSucceeded;
+ end else begin
+  RNLSelfTestFailure;
+ end;
+ RNLSelfTestBegin('[SHA384] FIPS 180-4, 112 bytes over two blocks ... ');
+ Process(Value,DataLonger,SizeOf(DataLonger));
+ if TRNLMemory.SecureIsEqual(Value,ExpectedLonger,SizeOf(TRNLSHA384Hash)) then begin
+  RNLSelfTestSucceeded;
+ end else begin
+  RNLSelfTestFailure;
+ end;
+end;
+
+// The P_SHA256 vector which has been circulating since TLS 1.2 was being drafted, and which every
+// implementation of the function is checked against. A hundred bytes, so the counter runs to four
+// blocks and the last one is cut.
+class procedure TRNLTLS12PRF.SelfTest;
+const PRFSecret:array[0..15] of TRNLUInt8=
+       (
+        $9b,$be,$43,$6b,$a9,$40,$f0,$17,$b1,$76,$52,$84,
+        $9a,$71,$db,$35
+       );
+      PRFSeed:array[0..15] of TRNLUInt8=
+       (
+        $a0,$ba,$9f,$93,$6c,$da,$31,$18,$27,$a6,$f7,$96,
+        $ff,$d5,$19,$8c
+       );
+      ExpectedPRF:array[0..99] of TRNLUInt8=
+       (
+        $e3,$f2,$29,$ba,$72,$7b,$e1,$7b,$8d,$12,$26,$20,
+        $55,$7c,$d4,$53,$c2,$aa,$b2,$1d,$07,$c3,$d4,$95,
+        $32,$9b,$52,$d4,$e6,$1e,$db,$5a,$6b,$30,$17,$91,
+        $e9,$0d,$35,$c9,$c9,$a4,$6b,$4e,$14,$ba,$f9,$af,
+        $0f,$a0,$22,$f7,$07,$7d,$ef,$17,$ab,$fd,$37,$97,
+        $c0,$56,$4b,$ab,$4f,$bc,$91,$66,$6e,$9d,$ef,$9b,
+        $97,$fc,$e3,$4f,$79,$67,$89,$ba,$a4,$80,$82,$d1,
+        $22,$ee,$42,$c5,$a7,$2e,$5a,$51,$10,$ff,$f7,$01,
+        $87,$34,$7b,$66
+       );
+var Output:array[0..99] of TRNLUInt8;
+    Shorter:array[0..99] of TRNLUInt8;
+    Index:TRNLSizeInt;
+    AllPrefixes:boolean;
+begin
+
+ RNLSelfTestBegin('[TLS1.2-PRF] the P_SHA256 vector over "test label" ... ');
+ if TRNLTLS12PRF.Process(Output,SizeOf(Output),PRFSecret,SizeOf(PRFSecret),
+                         'test label',PRFSeed,SizeOf(PRFSeed)) and
+    TRNLMemory.SecureIsEqual(Output,ExpectedPRF,SizeOf(ExpectedPRF)) then begin
+  RNLSelfTestSucceeded;
+ end else begin
+  RNLSelfTestFailure;
+ end;
+
+ // The one length in the vector is a hundred, which lands inside the fourth block. Every shorter
+ // length has to be the front of it, which is what says the blocks are cut where they belong - the
+ // same thing the block boundary test does for HKDF, and needed here for the same reason.
+ RNLSelfTestBegin('[TLS1.2-PRF] and every shorter length is the front of it ... ');
+ AllPrefixes:=true;
+ for Index:=1 to SizeOf(Output) do begin
+  FillChar(Shorter,SizeOf(Shorter),#0);
+  if not (TRNLTLS12PRF.Process(Shorter,Index,PRFSecret,SizeOf(PRFSecret),
+                               'test label',PRFSeed,SizeOf(PRFSeed)) and
+          TRNLMemory.SecureIsEqual(Shorter,ExpectedPRF,Index)) then begin
+   AllPrefixes:=false;
+  end;
+ end;
+ if AllPrefixes then begin
+  RNLSelfTestSucceeded;
+ end else begin
+  RNLSelfTestFailure;
+ end;
+
+end;
+
+// Taken from a handshake which really completed against nc-workhorse.rosseaux.com on 2026-08-03,
+// and that is what makes it worth having. The exchange was driven from the outside with a fixed
+// client random and a fixed ephemeral key; the server accepted the Finished computed from these
+// numbers, and its own Finished verified against the same derivation.
+//
+// So this is not a vector somebody printed and this code copies - it is a vector a real server
+// agreed with, twice, in both directions. Everything downstream of the pre master secret is pinned
+// by it: the master secret, the key block, the transcript hash with its un-fragmented rule, and the
+// verify data.
+class procedure TRNLDTLS12KeySchedule.SelfTest;
+const PreMasterSecret:array[0..31] of TRNLUInt8=
+       (
+        $be,$ce,$cd,$2c,$5c,$f2,$3d,$3f,$53,$2b,$03,$c9,
+        $b8,$17,$b2,$b3,$bf,$96,$97,$52,$08,$93,$0e,$e9,
+        $24,$aa,$4d,$c5,$26,$42,$e2,$39
+       );
+      ScheduleClientRandom:array[0..31] of TRNLUInt8=
+       (
+        $00,$01,$02,$03,$04,$05,$06,$07,$08,$09,$0a,$0b,
+        $0c,$0d,$0e,$0f,$10,$11,$12,$13,$14,$15,$16,$17,
+        $18,$19,$1a,$1b,$1c,$1d,$1e,$1f
+       );
+      ScheduleServerRandom:array[0..31] of TRNLUInt8=
+       (
+        $9c,$f3,$d6,$61,$3a,$52,$8c,$61,$98,$88,$0e,$e2,
+        $37,$2d,$8c,$0a,$7c,$f0,$0c,$a9,$51,$2f,$3a,$ce,
+        $2a,$7f,$06,$13,$35,$5e,$18,$f8
+       );
+      ExpectedMasterSecret:array[0..47] of TRNLUInt8=
+       (
+        $10,$13,$29,$d7,$e9,$50,$15,$7e,$26,$0f,$d3,$6d,
+        $69,$08,$af,$97,$29,$09,$31,$29,$91,$8d,$aa,$71,
+        $de,$e0,$1e,$d3,$b1,$0c,$c8,$54,$f1,$0e,$05,$c1,
+        $9c,$20,$b4,$88,$25,$2d,$1a,$b9,$f9,$54,$94,$5d
+       );
+      // client_write_key, server_write_key, client_write_IV, server_write_IV, in that order
+      ExpectedKeyBlock:array[0..87] of TRNLUInt8=
+       (
+        $89,$33,$a4,$d8,$97,$e3,$38,$11,$96,$6b,$27,$74,
+        $33,$32,$45,$f5,$59,$37,$c9,$fa,$d3,$29,$e9,$cc,
+        $21,$fc,$c7,$ac,$c7,$5c,$00,$15,$16,$31,$31,$33,
+        $6c,$33,$9e,$d9,$7c,$76,$62,$b3,$43,$a4,$52,$04,
+        $44,$a3,$55,$a7,$62,$4a,$75,$2e,$9d,$4b,$f4,$a4,
+        $fe,$b4,$4c,$46,$c0,$97,$eb,$4f,$60,$1a,$00,$e2,
+        $bf,$e4,$8b,$4b,$ea,$5a,$82,$a2,$3c,$21,$c7,$9c,
+        $ca,$51,$18,$ab
+       );
+      TranscriptHash:array[0..31] of TRNLUInt8=
+       (
+        $27,$9b,$1f,$df,$95,$e8,$43,$8f,$76,$47,$d1,$a8,
+        $83,$2f,$b3,$20,$32,$1b,$91,$59,$aa,$1b,$79,$e3,
+        $5a,$6d,$74,$65,$21,$fd,$24,$b7
+       );
+      ExpectedClientVerifyData:array[0..11] of TRNLUInt8=
+       (
+        $20,$ca,$7d,$d1,$77,$f8,$e2,$ea,$07,$95,$b1,$5c
+       );
+      // Three short messages framed by the same code the completed handshake used, so the header
+      // this hash covers is the one a real server agreed to. Needed because the check further down
+      // only says a snapshot behaves; it says nothing about which bytes went in, and an offset or a
+      // fragment length written as it really was rather than as zero and the whole would slip past it.
+      TranscriptBodyA:array[0..15] of TRNLUInt8=
+       (
+        $40,$41,$42,$43,$44,$45,$46,$47,$48,$49,$4a,$4b,
+        $4c,$4d,$4e,$4f
+       );
+      TranscriptBodyB:array[0..2] of TRNLUInt8=
+       (
+        $80,$81,$82
+       );
+      ExpectedTranscriptOfThree:array[0..31] of TRNLUInt8=
+       (
+        $26,$97,$cc,$26,$a3,$a1,$98,$ec,$76,$2a,$1e,$b4,
+        $46,$cc,$04,$cb,$91,$e8,$34,$40,$56,$1b,$b2,$4b,
+        $93,$c9,$b2,$0d,$6b,$fa,$d6,$f7
+       );
+      // The same relay, asked on 2026-08-03 whether it honours RFC 7627. It does, and this handshake
+      // ran to the end with a master secret derived that way - the server took the Finished computed
+      // from it and sent back one which verified. That is the only anchor there can be for this
+      // derivation, because RFC 7627 publishes no test vectors at all. src/tools/emsprobe.c.
+      EMSPreMasterSecret:array[0..31] of TRNLUInt8=
+       (
+        $c4,$ae,$5f,$24,$0e,$25,$4f,$57,$72,$6b,$2d,$13,
+        $46,$33,$b8,$38,$c6,$2d,$c9,$f8,$94,$b5,$3d,$bc,
+        $52,$d9,$d5,$db,$b3,$75,$0f,$fb
+       );
+      // The hash of the handshake up to and including the ClientKeyExchange, which is what takes the
+      // place of the two randoms
+      EMSSessionHash:array[0..31] of TRNLUInt8=
+       (
+        $8d,$46,$71,$fa,$85,$52,$67,$75,$fa,$ef,$7a,$05,
+        $48,$2b,$1f,$18,$08,$5f,$24,$03,$d9,$f7,$73,$15,
+        $98,$b3,$fd,$ab,$00,$4f,$57,$c0
+       );
+      EMSExpectedMasterSecret:array[0..47] of TRNLUInt8=
+       (
+        $d8,$76,$90,$9c,$3b,$30,$ac,$08,$be,$b8,$da,$f7,
+        $89,$eb,$10,$08,$9e,$27,$43,$bd,$0e,$bd,$06,$50,
+        $7f,$43,$0a,$de,$bc,$db,$3b,$ff,$5d,$b6,$3a,$e3,
+        $ce,$1a,$28,$c7,$f3,$9e,$26,$58,$6f,$91,$e6,$12
+       );
+      EMSExpectedClientVerifyData:array[0..11] of TRNLUInt8=
+       (
+        $1e,$2d,$b8,$ff,$f1,$eb,$ac,$3c,$1d,$0c,$1b,$23
+       );
+var Schedule:TRNLDTLS12KeySchedule;
+    KeyBlock:array[0..87] of TRNLUInt8;
+    VerifyData:array[0..TRNLDTLS12KeySchedule.VerifyDataSize-1] of TRNLUInt8;
+    Other:array[0..TRNLDTLS12KeySchedule.VerifyDataSize-1] of TRNLUInt8;
+    Transcript:TRNLDTLS12Transcript;
+    Hash,Again:TRNLSHA256Hash;
+    Body:array[0..15] of TRNLUInt8;
+    Index:TRNLSizeInt;
+begin
+
+ RNLSelfTestBegin('[DTLS1.2] the master secret a real server agreed with ... ');
+ if Schedule.DeriveMasterSecret(PreMasterSecret,SizeOf(PreMasterSecret),
+                                ScheduleClientRandom,ScheduleServerRandom) and
+    TRNLMemory.SecureIsEqual(Schedule.MasterSecret,ExpectedMasterSecret,
+                             SizeOf(ExpectedMasterSecret)) then begin
+  RNLSelfTestSucceeded;
+ end else begin
+  RNLSelfTestFailure;
+ end;
+
+ // The two randoms go in the other order here than in the master secret, and nothing but a vector
+ // from a real exchange would catch getting that wrong
+ RNLSelfTestBegin('[DTLS1.2] and the key block it produced ... ');
+ if Schedule.DeriveKeyBlock(KeyBlock,SizeOf(KeyBlock),
+                            ScheduleClientRandom,ScheduleServerRandom) and
+    TRNLMemory.SecureIsEqual(KeyBlock,ExpectedKeyBlock,SizeOf(ExpectedKeyBlock)) then begin
+  RNLSelfTestSucceeded;
+ end else begin
+  RNLSelfTestFailure;
+ end;
+
+ RNLSelfTestBegin('[DTLS1.2] and the verify data the server accepted ... ');
+ if Schedule.DeriveVerifyData(VerifyData,true,TranscriptHash,SizeOf(TranscriptHash)) and
+    TRNLMemory.SecureIsEqual(VerifyData,ExpectedClientVerifyData,
+                             SizeOf(ExpectedClientVerifyData)) then begin
+  RNLSelfTestSucceeded;
+ end else begin
+  RNLSelfTestFailure;
+ end;
+
+ // The two directions must not agree, or a Finished could be reflected back at its sender
+ RNLSelfTestBegin('[DTLS1.2] the two directions of the verify data differ ... ');
+ if Schedule.DeriveVerifyData(Other,false,TranscriptHash,SizeOf(TranscriptHash)) and
+    (not TRNLMemory.SecureIsEqual(VerifyData,Other,SizeOf(VerifyData))) then begin
+  RNLSelfTestSucceeded;
+ end else begin
+  RNLSelfTestFailure;
+ end;
+
+ // RFC 7627, and the same relay again. Nothing in the plain derivation above would catch this one
+ // being wrong: it uses a different label over a different seed, and the two never meet.
+ RNLSelfTestBegin('[DTLS1.2] the extended master secret the same server agreed with ... ');
+ if Schedule.DeriveExtendedMasterSecret(EMSPreMasterSecret,SizeOf(EMSPreMasterSecret),
+                                        EMSSessionHash,SizeOf(EMSSessionHash)) and
+    TRNLMemory.SecureIsEqual(Schedule.MasterSecret,EMSExpectedMasterSecret,
+                             SizeOf(EMSExpectedMasterSecret)) then begin
+  RNLSelfTestSucceeded;
+ end else begin
+  RNLSelfTestFailure;
+ end;
+
+ RNLSelfTestBegin('[DTLS1.2] and the verify data it accepted under it ... ');
+ if Schedule.DeriveVerifyData(VerifyData,true,EMSSessionHash,SizeOf(EMSSessionHash)) and
+    TRNLMemory.SecureIsEqual(VerifyData,EMSExpectedClientVerifyData,
+                             SizeOf(EMSExpectedClientVerifyData)) then begin
+  RNLSelfTestSucceeded;
+ end else begin
+  RNLSelfTestFailure;
+ end;
+
+ // What the transcript actually hashes: a header with an offset of zero and a fragment length equal
+ // to the whole message, whatever really happened on the wire
+ RNLSelfTestBegin('[DTLS1.2] the transcript frames every message as if it were one fragment ... ');
+ Transcript.Initialize;
+ Transcript.AddMessage(TRNLDTLS12Handshake.TYPE_CLIENT_HELLO,1,TranscriptBodyA,SizeOf(TranscriptBodyA));
+ Transcript.AddMessage(TRNLDTLS12Handshake.TYPE_SERVER_HELLO,1,TranscriptBodyB,SizeOf(TranscriptBodyB));
+ Transcript.AddMessage(TRNLDTLS12Handshake.TYPE_SERVER_HELLO_DONE,4,Body,0);
+ Transcript.Snapshot(Hash);
+ if TRNLMemory.SecureIsEqual(Hash,ExpectedTranscriptOfThree,SizeOf(TRNLSHA256Hash)) then begin
+  RNLSelfTestSucceeded;
+ end else begin
+  RNLSelfTestFailure;
+ end;
+
+ // And taking a snapshot must not disturb what comes after it
+ RNLSelfTestBegin('[DTLS1.2] a transcript snapshot does not disturb what follows it ... ');
+ for Index:=0 to SizeOf(Body)-1 do begin
+  Body[Index]:=TRNLUInt8($40+Index);
+ end;
+ Transcript.Initialize;
+ Transcript.AddMessage(TRNLDTLS12Handshake.TYPE_CLIENT_HELLO,1,Body,SizeOf(Body));
+ Transcript.Snapshot(Hash);
+ Transcript.Snapshot(Again);
+ if TRNLMemory.SecureIsEqual(Hash,Again,SizeOf(TRNLSHA256Hash)) then begin
+  Transcript.AddMessage(TRNLDTLS12Handshake.TYPE_SERVER_HELLO,1,Body,SizeOf(Body));
+  Transcript.Snapshot(Again);
+  if not TRNLMemory.SecureIsEqual(Hash,Again,SizeOf(TRNLSHA256Hash)) then begin
+   RNLSelfTestSucceeded;
+  end else begin
+   RNLSelfTestFailure;
+  end;
+ end else begin
+  RNLSelfTestFailure;
+ end;
+
+end;
+
+// A real ServerHello and a real ServerKeyExchange, captured from nc-workhorse.rosseaux.com on
+// 2026-08-03 by sending it a ClientHello with a client random of 00 01 02 ... 1f. Knowing that random
+// is what makes the capture usable: the signature covers it, so the whole input can be reconstructed
+// here and the server's own signature checked against the key in its own certificate.
+//
+// This is the one anchor for the shape of the signed input, and there is no other way to get it. A
+// self built ServerKeyExchange would be signed over whatever this code thinks the input is, and the
+// two would agree while agreeing with no real server - which is exactly the failure the record layer
+// vectors and the AEAD vectors were also there to catch.
+class procedure TRNLDTLS12ServerKeyExchange.SelfTest;
+const CapturedClientRandom:array[0..31] of TRNLUInt8=
+       (
+        $00,$01,$02,$03,$04,$05,$06,$07,$08,$09,$0a,$0b,
+        $0c,$0d,$0e,$0f,$10,$11,$12,$13,$14,$15,$16,$17,
+        $18,$19,$1a,$1b,$1c,$1d,$1e,$1f
+       );
+      CapturedServerRandom:array[0..31] of TRNLUInt8=
+       (
+        $6f,$9b,$5c,$00,$f2,$34,$1d,$71,$d9,$ba,$37,$e7,
+        $f2,$af,$3d,$54,$ea,$01,$90,$7f,$66,$34,$1e,$03,
+        $95,$33,$ca,$b7,$22,$42,$11,$c2
+       );
+      // fe fd, the random, an empty session id, cc a9, no compression, then the extensions the
+      // server chose to echo
+      CapturedServerHello:array[0..47] of TRNLUInt8=
+       (
+        $fe,$fd,$6f,$9b,$5c,$00,$f2,$34,$1d,$71,$d9,$ba,
+        $37,$e7,$f2,$af,$3d,$54,$ea,$01,$90,$7f,$66,$34,
+        $1e,$03,$95,$33,$ca,$b7,$22,$42,$11,$c2,$00,$cc,
+        $a9,$00,$00,$08,$00,$0b,$00,$04,$03,$00,$01,$02
+       );
+      CapturedServerKeyExchange:array[0..144] of TRNLUInt8=
+       (
+        $03,$00,$17,$41,$04,$dc,$8f,$37,$fe,$c0,$b8,$74,
+        $d0,$67,$3e,$3f,$81,$38,$fd,$65,$7c,$47,$31,$51,
+        $16,$ca,$e8,$fd,$84,$b7,$40,$d1,$49,$da,$89,$59,
+        $a1,$41,$68,$4b,$ad,$f2,$09,$99,$e5,$cf,$e0,$a3,
+        $24,$c5,$b7,$38,$5d,$61,$86,$a6,$05,$7d,$66,$ec,
+        $da,$7b,$fb,$f7,$4e,$13,$93,$29,$9a,$04,$03,$00,
+        $48,$30,$46,$02,$21,$00,$ee,$bd,$ab,$55,$a4,$f1,
+        $a5,$47,$d3,$76,$a9,$03,$d8,$c5,$13,$51,$48,$58,
+        $8c,$4e,$bd,$41,$1e,$f1,$6f,$a7,$5b,$18,$b5,$cb,
+        $ba,$05,$02,$21,$00,$95,$57,$70,$b2,$73,$10,$9f,
+        $c8,$f4,$b0,$b6,$04,$a1,$e0,$87,$27,$b5,$b6,$e7,
+        $fc,$c9,$d3,$4e,$a6,$58,$ca,$f7,$3a,$0c,$63,$e8,
+        $c5
+       );
+var ServerHello:TRNLDTLS12ServerHello;
+    KeyExchange:TRNLDTLS12ServerKeyExchange;
+    Certificate:TRNLX509Certificate;
+    Damaged:array[0..144] of TRNLUInt8;
+    Body:array[0..511] of TRNLUInt8;
+    BodySize:TRNLSizeInt;
+    Reader,Extensions:TRNLTLSReader;
+    Data:PRNLUInt8Array;
+    Size:TRNLSizeInt;
+    Value:TRNLUInt16;
+    Found:boolean;
+begin
+
+ RNLSelfTestBegin('[DTLS1.2] the captured ServerHello reads back ... ');
+ if ServerHello.Parse(CapturedServerHello,SizeOf(CapturedServerHello)) and
+    (ServerHello.CipherSuite=TRNLDTLS12ClientHello.CIPHER_SUITE_ECDHE_ECDSA_CHACHA20_POLY1305) and
+    (ServerHello.CompressionMethod=0) and
+    TRNLMemory.SecureIsEqual(ServerHello.Random_,CapturedServerRandom,
+                             SizeOf(CapturedServerRandom)) then begin
+  RNLSelfTestSucceeded;
+ end else begin
+  RNLSelfTestFailure;
+ end;
+
+ RNLSelfTestBegin('[DTLS1.2] and so does the captured ServerKeyExchange ... ');
+ if KeyExchange.Parse(CapturedServerKeyExchange,SizeOf(CapturedServerKeyExchange)) and
+    (KeyExchange.NamedCurve=TRNLDTLS12ClientHello.NAMED_CURVE_SECP256R1) and
+    (KeyExchange.PointSize=TRNLP256.PointSize) and
+    (KeyExchange.HashAlgorithm=4) and (KeyExchange.SignatureAlgorithm=3) and
+    // The signed parameters are the curve type, the curve and the point with its length, and
+    // nothing after them
+    (KeyExchange.ParametersSize=(4+TRNLP256.PointSize)) then begin
+  RNLSelfTestSucceeded;
+ end else begin
+  RNLSelfTestFailure;
+ end;
+
+ // The point of the whole capture
+ RNLSelfTestBegin('[DTLS1.2] the server signed the two randoms and its parameters ... ');
+ if Certificate.Parse(RNLX509SelfTestLeaf,SizeOf(RNLX509SelfTestLeaf)) and
+    KeyExchange.VerifyWith(Certificate,CapturedClientRandom,CapturedServerRandom) then begin
+  RNLSelfTestSucceeded;
+ end else begin
+  RNLSelfTestFailure;
+ end;
+
+ // Without these, a verification which always said yes would pass the one above - and worse, so
+ // would one which signed the wrong bytes and never noticed
+ RNLSelfTestBegin('[DTLS1.2] and not with another random, nor with a changed point ... ');
+ Move(CapturedClientRandom,Damaged,SizeOf(CapturedClientRandom));
+ Damaged[0]:=Damaged[0] xor 1;
+ if not KeyExchange.VerifyWith(Certificate,Damaged,CapturedServerRandom) then begin
+  Move(CapturedServerKeyExchange,Damaged,SizeOf(CapturedServerKeyExchange));
+  // A byte of the ephemeral point, which is inside what the signature covers
+  Damaged[10]:=Damaged[10] xor 1;
+  if KeyExchange.Parse(Damaged,SizeOf(Damaged)) and
+     (not KeyExchange.VerifyWith(Certificate,CapturedClientRandom,CapturedServerRandom)) then begin
+   RNLSelfTestSucceeded;
+  end else begin
+   RNLSelfTestFailure;
+  end;
+ end else begin
+  RNLSelfTestFailure;
+ end;
+
+ // And the other direction: what this client sends has to be readable as what it claims to be
+ RNLSelfTestBegin('[DTLS1.2] the ClientHello this client writes reads back as one ... ');
+ Found:=false;
+ if TRNLDTLS12ClientHello.Write_(Body,BodySize,SizeOf(Body),CapturedClientRandom,
+                                 CapturedClientRandom,20,
+                                 CapturedClientRandom,0,'relay.test') then begin
+  Reader.Initialize(Body,BodySize);
+  if Reader.ReadUInt16(Value) and (Value=$fefd) and
+     Reader.ReadBytes(Data,TRNLDTLS12ClientHello.RandomSize) and
+     TRNLMemory.SecureIsEqual(Data^[0],CapturedClientRandom,TRNLDTLS12ClientHello.RandomSize) and
+     Reader.ReadVector8(Data,Size) and (Size=0) and
+     Reader.ReadVector8(Data,Size) and (Size=20) and
+     Reader.ReadVector16(Data,Size) and (Size=2) and
+     (TRNLMemoryAccess.LoadBigEndianUInt16(Data^[0])=
+      TRNLDTLS12ClientHello.CIPHER_SUITE_ECDHE_ECDSA_CHACHA20_POLY1305) and
+     Reader.ReadVector8(Data,Size) and (Size=1) and (Data^[0]=0) and
+     Reader.ReadVector16(Data,Size) then begin
+   // The extensions have to be a well formed list which ends exactly where it said it would
+   Extensions.Initialize(Data^[0],Size);
+   Found:=true;
+   while Found and not Extensions.AtEnd do begin
+    Found:=Extensions.ReadUInt16(Value) and Extensions.ReadVector16(Data,Size);
+   end;
+   Found:=Found and Reader.AtEnd;
+  end;
+ end;
+ if Found then begin
+  RNLSelfTestSucceeded;
+ end else begin
+  RNLSelfTestFailure;
+ end;
+
+end;
+
+// A message put back together out of fragments, which is the one thing DTLS has and TLS does not.
+// There is no vector for it; what there is instead is the set of arrivals which really happen on a
+// datagram path, and the set which does not add up and has to be refused.
+class procedure TRNLDTLS12Reassembler.SelfTest;
+const MESSAGE_SIZE=1000;
+      MESSAGE_TYPE=TRNLDTLS12Handshake.TYPE_CERTIFICATE;
+      MESSAGE_SEQUENCE=TRNLUInt16(7);
+var Reassembler:TRNLDTLS12Reassembler;
+    Message_:array[0..MESSAGE_SIZE-1] of TRNLUInt8;
+    Fragment:array[0..(TRNLDTLS12Handshake.HeaderSize+MESSAGE_SIZE)-1] of TRNLUInt8;
+    Index:TRNLSizeInt;
+
+ // One fragment of the message under test, laid out ready to hand over
+ function Make(const aOffset,aLength:TRNLSizeInt;
+               const aMessageType:TRNLUInt8;
+               const aMessageSequence:TRNLUInt16;
+               const aClaimedLength:TRNLSizeInt):TRNLSizeInt;
+ begin
+  TRNLDTLS12Handshake.WriteHeader(Fragment[0],aMessageType,aClaimedLength,aMessageSequence,
+                                  aOffset,aLength);
+  if aLength>0 then begin
+   Move(Message_[aOffset],Fragment[TRNLDTLS12Handshake.HeaderSize],aLength);
+  end;
+  result:=TRNLDTLS12Handshake.HeaderSize+aLength;
+ end;
+
+ function Feed(const aOffset,aLength:TRNLSizeInt):boolean;
+ var Size,Consumed:TRNLSizeInt;
+ begin
+  Size:=Make(aOffset,aLength,MESSAGE_TYPE,MESSAGE_SEQUENCE,MESSAGE_SIZE);
+  result:=Reassembler.Add(Fragment,Size,Consumed) and (Consumed=Size);
+ end;
+
+ function Assembled:boolean;
+ begin
+  result:=Reassembler.Complete and
+          (Reassembler.MessageType=MESSAGE_TYPE) and
+          (Reassembler.MessageSequence=MESSAGE_SEQUENCE) and
+          (Reassembler.Length_=MESSAGE_SIZE) and
+          TRNLMemory.SecureIsEqual(Reassembler.Body^[0],Message_,MESSAGE_SIZE);
+ end;
+
+begin
+
+ // Not all the same byte, so that a fragment written to the wrong offset shows
+ for Index:=0 to MESSAGE_SIZE-1 do begin
+  Message_[Index]:=TRNLUInt8((Index*11) xor (Index shr 5));
+ end;
+
+ RNLSelfTestBegin('[DTLS1.2] a message arriving in order comes back whole ... ');
+ Reassembler.Initialize;
+ if Feed(0,400) and (not Reassembler.Complete) and
+    Feed(400,400) and (not Reassembler.Complete) and
+    Feed(800,200) and Assembled then begin
+  RNLSelfTestSucceeded;
+ end else begin
+  RNLSelfTestFailure;
+ end;
+
+ RNLSelfTestBegin('[DTLS1.2] and so does one arriving backwards ... ');
+ Reassembler.Initialize;
+ if Feed(800,200) and Feed(400,400) and Feed(0,400) and Assembled then begin
+  RNLSelfTestSucceeded;
+ end else begin
+  RNLSelfTestFailure;
+ end;
+
+ // A retransmission repeats what already arrived, and a path whose MTU changed re-cuts the message
+ // at other boundaries - so the second copy of a byte need not sit where the first one did
+ RNLSelfTestBegin('[DTLS1.2] overlapping and repeated fragments do not make it look complete early ... ');
+ Reassembler.Initialize;
+ if Feed(0,600) and Feed(0,600) and (not Reassembler.Complete) and
+    Feed(300,500) and (not Reassembler.Complete) and
+    Feed(700,300) and Assembled then begin
+  RNLSelfTestSucceeded;
+ end else begin
+  RNLSelfTestFailure;
+ end;
+
+ // One byte short in the middle is the case a range based reassembler gets wrong: two ranges which
+ // touch but do not meet look like one
+ RNLSelfTestBegin('[DTLS1.2] a message with one byte missing stays incomplete ... ');
+ Reassembler.Initialize;
+ if Feed(0,500) and Feed(501,499) and (not Reassembler.Complete) and
+    Feed(500,1) and Assembled then begin
+  RNLSelfTestSucceeded;
+ end else begin
+  RNLSelfTestFailure;
+ end;
+
+ RNLSelfTestBegin('[DTLS1.2] and what does not add up is refused ... ');
+ Reassembler.Initialize;
+ if Feed(0,400) and
+    // A fragment which ends past its own message
+    (not Reassembler.Add(Fragment,Make(900,200,MESSAGE_TYPE,MESSAGE_SEQUENCE,MESSAGE_SIZE),Index)) and
+    // Another message type, arriving while this one is in progress
+    (not Reassembler.Add(Fragment,Make(400,100,TRNLDTLS12Handshake.TYPE_FINISHED,
+                                       MESSAGE_SEQUENCE,MESSAGE_SIZE),Index)) and
+    // Another sequence number
+    (not Reassembler.Add(Fragment,Make(400,100,MESSAGE_TYPE,MESSAGE_SEQUENCE+1,MESSAGE_SIZE),Index)) and
+    // And a length which disagrees with the one already in progress
+    (not Reassembler.Add(Fragment,Make(400,100,MESSAGE_TYPE,MESSAGE_SEQUENCE,MESSAGE_SIZE+1),Index)) and
+    // None of which may have counted towards the message
+    (not Reassembler.Complete) and
+    Feed(400,600) and Assembled then begin
+  RNLSelfTestSucceeded;
+ end else begin
+  RNLSelfTestFailure;
+ end;
+
+ RNLSelfTestBegin('[DTLS1.2] a message larger than the bound is refused outright ... ');
+ Reassembler.Initialize;
+ TRNLDTLS12Handshake.WriteHeader(Fragment[0],MESSAGE_TYPE,MaximumMessageSize+1,MESSAGE_SEQUENCE,0,1);
+ if not Reassembler.Add(Fragment,TRNLDTLS12Handshake.HeaderSize+1,Index) then begin
+  RNLSelfTestSucceeded;
+ end else begin
+  RNLSelfTestFailure;
+ end;
+
+end;
+
+// One whole DTLS 1.2 record, built by a separate implementation of RFC 6347 section 4.1 over another
+// library's ChaCha20-Poly1305, and compared byte for byte. There is no published record vector for
+// this either, and a round trip through Protect and Unprotect would prove nothing: both halves share
+// the header, the nonce and the associated data, so both would be wrong together and agree.
+class procedure TRNLDTLS12Record.SelfTest;
+const Key:array[0..31] of TRNLUInt8=
+       (
+        $20,$21,$22,$23,$24,$25,$26,$27,$28,$29,$2a,$2b,
+        $2c,$2d,$2e,$2f,$30,$31,$32,$33,$34,$35,$36,$37,
+        $38,$39,$3a,$3b,$3c,$3d,$3e,$3f
+       );
+      IV:array[0..11] of TRNLUInt8=
+       (
+        $50,$51,$52,$53,$54,$55,$56,$57,$58,$59,$5a,$5b
+       );
+      Content:array[0..19] of TRNLUInt8=
+       (
+        $60,$61,$62,$63,$64,$65,$66,$67,$68,$69,$6a,$6b,
+        $6c,$6d,$6e,$6f,$70,$71,$72,$73
+       );
+      EPOCH=1;
+      // Wide enough that all six bytes of the sequence number carry something, so a field written
+      // in the wrong order would show
+      SEQUENCE_NUMBER=TRNLUInt64($0000000012345);
+      // 16 fe fd 00 01 00 00 00 01 23 45 00 24 : handshake, DTLS 1.2, epoch one, the sequence
+      // number, and a fragment of 0x24 which is the twenty bytes plus the sixteen of the tag
+      ExpectedRecord:array[0..48] of TRNLUInt8=
+       (
+        $16,$fe,$fd,$00,$01,$00,$00,$00,$01,$23,$45,$00,
+        $24,$da,$3a,$b9,$9b,$4f,$fd,$c4,$74,$68,$96,$0e,
+        $61,$56,$95,$21,$d2,$2c,$ed,$45,$8e,$9c,$c0,$a8,
+        $0f,$c5,$38,$21,$1a,$f4,$47,$a5,$40,$02,$82,$bd,
+        $b2
+       );
+var Keys:TRNLDTLS12TrafficKeys;
+    Window:TRNLDTLSReplayWindow;
+    Datagram,Damaged,Recovered:array[0..127] of TRNLUInt8;
+    DatagramSize,RecoveredSize,ConsumedSize:TRNLSizeUInt;
+    ContentType:TRNLUInt8;
+    SequenceNumber:TRNLUInt64;
+    ReadEpoch:TRNLUInt16;
+begin
+
+ Move(Key,Keys.Key,SizeOf(Key));
+ Move(IV,Keys.IV,SizeOf(IV));
+
+ RNLSelfTestBegin('[DTLS1.2] one protected record, byte for byte ... ');
+ if Protect(Datagram,DatagramSize,SizeOf(Datagram),Keys,EPOCH,SEQUENCE_NUMBER,
+            CONTENT_TYPE_HANDSHAKE,Content,SizeOf(Content)) and
+    (DatagramSize=TRNLSizeUInt(SizeOf(ExpectedRecord))) and
+    TRNLMemory.SecureIsEqual(Datagram,ExpectedRecord,SizeOf(ExpectedRecord)) then begin
+  RNLSelfTestSucceeded;
+ end else begin
+  RNLSelfTestFailure;
+ end;
+
+ RNLSelfTestBegin('[DTLS1.2] and read back with its sequence number and content type ... ');
+ Window.Initialize;
+ if Unprotect(Recovered,RecoveredSize,ContentType,SequenceNumber,ConsumedSize,
+              SizeOf(Recovered),Keys,EPOCH,Window,ExpectedRecord,SizeOf(ExpectedRecord)) and
+    (RecoveredSize=TRNLSizeUInt(SizeOf(Content))) and
+    (ContentType=CONTENT_TYPE_HANDSHAKE) and
+    (SequenceNumber=SEQUENCE_NUMBER) and
+    TRNLMemory.SecureIsEqual(Recovered,Content,SizeOf(Content)) then begin
+  RNLSelfTestSucceeded;
+ end else begin
+  RNLSelfTestFailure;
+ end;
+
+ RNLSelfTestBegin('[DTLS1.2] the very same record a second time is refused ... ');
+ if not Unprotect(Recovered,RecoveredSize,ContentType,SequenceNumber,ConsumedSize,
+                  SizeOf(Recovered),Keys,EPOCH,Window,ExpectedRecord,SizeOf(ExpectedRecord)) then begin
+  RNLSelfTestSucceeded;
+ end else begin
+  RNLSelfTestFailure;
+ end;
+
+ // The header is the associated data here as much as in 1.3, so rewriting any of it has to be caught
+ // by the tag rather than by a check written out by hand
+ RNLSelfTestBegin('[DTLS1.2] a record whose content type was rewritten is refused ... ');
+ Window.Initialize;
+ Move(ExpectedRecord,Damaged,SizeOf(ExpectedRecord));
+ Damaged[0]:=CONTENT_TYPE_APPLICATION_DATA;
+ if not Unprotect(Recovered,RecoveredSize,ContentType,SequenceNumber,ConsumedSize,
+                  SizeOf(Recovered),Keys,EPOCH,Window,Damaged,SizeOf(ExpectedRecord)) then begin
+  RNLSelfTestSucceeded;
+ end else begin
+  RNLSelfTestFailure;
+ end;
+
+ RNLSelfTestBegin('[DTLS1.2] and one which claims another epoch ... ');
+ Window.Initialize;
+ Move(ExpectedRecord,Damaged,SizeOf(ExpectedRecord));
+ Damaged[4]:=EPOCH+1;
+ if not Unprotect(Recovered,RecoveredSize,ContentType,SequenceNumber,ConsumedSize,
+                  SizeOf(Recovered),Keys,EPOCH,Window,Damaged,SizeOf(ExpectedRecord)) then begin
+  RNLSelfTestSucceeded;
+ end else begin
+  RNLSelfTestFailure;
+ end;
+
+ // Epoch zero, where the handshake starts and nothing is protected yet
+ RNLSelfTestBegin('[DTLS1.2] a plaintext record goes out and comes back ... ');
+ if WritePlain(Datagram,DatagramSize,SizeOf(Datagram),0,7,
+               CONTENT_TYPE_HANDSHAKE,Content,SizeOf(Content)) and
+    (DatagramSize=TRNLSizeUInt(HeaderSize+SizeOf(Content))) and
+    ReadPlain(Recovered,RecoveredSize,ContentType,ReadEpoch,SequenceNumber,ConsumedSize,
+              SizeOf(Recovered),Datagram,DatagramSize) and
+    (RecoveredSize=TRNLSizeUInt(SizeOf(Content))) and
+    (ContentType=CONTENT_TYPE_HANDSHAKE) and
+    (ReadEpoch=0) and (SequenceNumber=7) and
+    (ConsumedSize=DatagramSize) and
+    TRNLMemory.SecureIsEqual(Recovered,Content,SizeOf(Content)) then begin
+  RNLSelfTestSucceeded;
+ end else begin
+  RNLSelfTestFailure;
+ end;
+
+end;
 
 // Two anchors, and they do different jobs.
 //
@@ -11812,37 +14864,37 @@ begin
 
  Nothing:=0;
 
- write('[DTLS1.3] RFC 8448 write key, which pins the "key" label at sixteen bytes ... ');
+ RNLSelfTestBegin('[DTLS1.3] RFC 8448 write key, which pins the "key" label at sixteen bytes ... ');
  if TRNLTLS13KeySchedule.ExpandLabel(TRNLSHA256.Descriptor,AESKey,SizeOf(AESKey),
                                      TrafficSecret,SizeOf(TrafficSecret),'key',Nothing,0) and
     TRNLMemory.SecureIsEqual(AESKey,ExpectedAESKey,SizeOf(ExpectedAESKey)) then begin
-  writeln('OK!');
+  RNLSelfTestSucceeded;
  end else begin
   RNLSelfTestFailure;
  end;
 
- write('[DTLS1.3] the three traffic keys out of one secret ... ');
+ RNLSelfTestBegin('[DTLS1.3] the three traffic keys out of one secret ... ');
  if Keys.DeriveFrom(TrafficSecret,SizeOf(TrafficSecret)) and
     TRNLMemory.SecureIsEqual(Keys.Key,ExpectedKey,SizeOf(ExpectedKey)) and
     TRNLMemory.SecureIsEqual(Keys.IV,ExpectedIV,SizeOf(ExpectedIV)) and
     TRNLMemory.SecureIsEqual(Keys.SequenceNumberKey,ExpectedSequenceNumberKey,
                              SizeOf(ExpectedSequenceNumberKey)) then begin
-  writeln('OK!');
+  RNLSelfTestSucceeded;
  end else begin
   RNLSelfTestFailure;
  end;
 
- write('[DTLS1.3] one protected record, byte for byte ... ');
+ RNLSelfTestBegin('[DTLS1.3] one protected record, byte for byte ... ');
  if Protect(Datagram,DatagramSize,SizeOf(Datagram),Keys,EPOCH,SEQUENCE_NUMBER,
             CONTENT_TYPE_HANDSHAKE,Content,SizeOf(Content)) and
     (DatagramSize=TRNLSizeUInt(SizeOf(ExpectedDatagram))) and
     TRNLMemory.SecureIsEqual(Datagram,ExpectedDatagram,SizeOf(ExpectedDatagram)) then begin
-  writeln('OK!');
+  RNLSelfTestSucceeded;
  end else begin
   RNLSelfTestFailure;
  end;
 
- write('[DTLS1.3] and read back with its sequence number and content type ... ');
+ RNLSelfTestBegin('[DTLS1.3] and read back with its sequence number and content type ... ');
  Window.Initialize;
  if Unprotect(Recovered,RecoveredSize,ContentType,SequenceNumber,ConsumedSize,
               SizeOf(Recovered),Keys,EPOCH,Window,ExpectedDatagram,SizeOf(ExpectedDatagram)) and
@@ -11851,40 +14903,40 @@ begin
     (SequenceNumber=SEQUENCE_NUMBER) and
     (ConsumedSize=TRNLSizeUInt(SizeOf(ExpectedDatagram))) and
     TRNLMemory.SecureIsEqual(Recovered,Content,SizeOf(Content)) then begin
-  writeln('OK!');
+  RNLSelfTestSucceeded;
  end else begin
   RNLSelfTestFailure;
  end;
 
  // Without this one, a replay window which never said no would pass everything above
- write('[DTLS1.3] the very same record a second time is refused ... ');
+ RNLSelfTestBegin('[DTLS1.3] the very same record a second time is refused ... ');
  if not Unprotect(Recovered,RecoveredSize,ContentType,SequenceNumber,ConsumedSize,
                   SizeOf(Recovered),Keys,EPOCH,Window,ExpectedDatagram,SizeOf(ExpectedDatagram)) then begin
-  writeln('OK!');
+  RNLSelfTestSucceeded;
  end else begin
   RNLSelfTestFailure;
  end;
 
- write('[DTLS1.3] a record whose ciphertext was changed on the way is refused ... ');
+ RNLSelfTestBegin('[DTLS1.3] a record whose ciphertext was changed on the way is refused ... ');
  Window.Initialize;
  Move(ExpectedDatagram,Damaged,SizeOf(ExpectedDatagram));
  Damaged[SizeOf(ExpectedDatagram)-1]:=Damaged[SizeOf(ExpectedDatagram)-1] xor 1;
  if not Unprotect(Recovered,RecoveredSize,ContentType,SequenceNumber,ConsumedSize,
                   SizeOf(Recovered),Keys,EPOCH,Window,Damaged,SizeOf(ExpectedDatagram)) then begin
-  writeln('OK!');
+  RNLSelfTestSucceeded;
  end else begin
   RNLSelfTestFailure;
  end;
 
  // The header is the associated data, so changing it has to be caught by the tag rather than by any
  // check written out by hand - which is what makes the header protected instead of merely present
- write('[DTLS1.3] and so is one whose header length was rewritten ... ');
+ RNLSelfTestBegin('[DTLS1.3] and so is one whose header length was rewritten ... ');
  Window.Initialize;
  Move(ExpectedDatagram,Damaged,SizeOf(ExpectedDatagram));
  Damaged[4]:=Damaged[4]-1;
  if not Unprotect(Recovered,RecoveredSize,ContentType,SequenceNumber,ConsumedSize,
                   SizeOf(Recovered),Keys,EPOCH,Window,Damaged,SizeOf(ExpectedDatagram)) then begin
-  writeln('OK!');
+  RNLSelfTestSucceeded;
  end else begin
   RNLSelfTestFailure;
  end;
@@ -11972,62 +15024,62 @@ var Context:TRNLChaCha20Context;
     DamagedAssociatedData:array[0..11] of TRNLUInt8;
 begin
 
- write('[ChaCha20] RFC 8439 section 2.4.2, the ietf state layout at counter one ... ');
+ RNLSelfTestBegin('[ChaCha20] RFC 8439 section 2.4.2, the ietf state layout at counter one ... ');
  Context.RFC8439Initialize(Key,Nonce,1);
  Context.Process(CipherText,PlainText,SizeOf(PlainText));
  if TRNLMemory.SecureIsEqual(CipherText,ExpectedCipherText,SizeOf(ExpectedCipherText)) then begin
-  writeln('OK!');
+  RNLSelfTestSucceeded;
  end else begin
   RNLSelfTestFailure;
  end;
 
- write('[ChaCha20-Poly1305] RFC 8439 section 2.8.2, ciphertext ... ');
+ RNLSelfTestBegin('[ChaCha20-Poly1305] RFC 8439 section 2.8.2, ciphertext ... ');
  Encrypt(CipherText,Tag,AEADKey,AEADNonce,
          AEADAssociatedData,SizeOf(AEADAssociatedData),
          PlainText,SizeOf(PlainText));
  if TRNLMemory.SecureIsEqual(CipherText,ExpectedAEADCipherText,SizeOf(ExpectedAEADCipherText)) then begin
-  writeln('OK!');
+  RNLSelfTestSucceeded;
  end else begin
   RNLSelfTestFailure;
  end;
 
- write('[ChaCha20-Poly1305] RFC 8439 section 2.8.2, tag ... ');
+ RNLSelfTestBegin('[ChaCha20-Poly1305] RFC 8439 section 2.8.2, tag ... ');
  if TRNLMemory.SecureIsEqual(Tag,ExpectedAEADTag,SizeOf(ExpectedAEADTag)) then begin
-  writeln('OK!');
+  RNLSelfTestSucceeded;
  end else begin
   RNLSelfTestFailure;
  end;
 
- write('[ChaCha20-Poly1305] and the plaintext comes back out ... ');
+ RNLSelfTestBegin('[ChaCha20-Poly1305] and the plaintext comes back out ... ');
  if Decrypt(Recovered,AEADKey,AEADNonce,Tag,
             AEADAssociatedData,SizeOf(AEADAssociatedData),
             CipherText,SizeOf(CipherText)) and
     TRNLMemory.SecureIsEqual(Recovered,PlainText,SizeOf(PlainText)) then begin
-  writeln('OK!');
+  RNLSelfTestSucceeded;
  end else begin
   RNLSelfTestFailure;
  end;
 
  // Without these two, a Decrypt which returned true unconditionally would pass everything above
- write('[ChaCha20-Poly1305] a tag with one bit turned over is refused ... ');
+ RNLSelfTestBegin('[ChaCha20-Poly1305] a tag with one bit turned over is refused ... ');
  Move(Tag,DamagedTag,SizeOf(Tag));
  DamagedTag[0]:=DamagedTag[0] xor 1;
  if not Decrypt(Recovered,AEADKey,AEADNonce,DamagedTag,
                 AEADAssociatedData,SizeOf(AEADAssociatedData),
                 CipherText,SizeOf(CipherText)) then begin
-  writeln('OK!');
+  RNLSelfTestSucceeded;
  end else begin
   RNLSelfTestFailure;
  end;
 
- write('[ChaCha20-Poly1305] and so is associated data which was changed on the way ... ');
+ RNLSelfTestBegin('[ChaCha20-Poly1305] and so is associated data which was changed on the way ... ');
  Move(AEADAssociatedData,DamagedAssociatedData,SizeOf(AEADAssociatedData));
  DamagedAssociatedData[SizeOf(DamagedAssociatedData)-1]:=
   DamagedAssociatedData[SizeOf(DamagedAssociatedData)-1] xor 1;
  if not Decrypt(Recovered,AEADKey,AEADNonce,Tag,
                 DamagedAssociatedData,SizeOf(DamagedAssociatedData),
                 CipherText,SizeOf(CipherText)) then begin
-  writeln('OK!');
+  RNLSelfTestSucceeded;
  end else begin
   RNLSelfTestFailure;
  end;
@@ -12131,31 +15183,31 @@ const Expected0:TRNLSHA512Hash=
        );
 var Value:TRNLSHA512Hash;
 begin
- write('[HMAC-SHA512] RFC 4231 case 1 ... ');
+ RNLSelfTestBegin('[HMAC-SHA512] RFC 4231 case 1 ... ');
  Process(Value,Key0,SizeOf(Key0),Data0,SizeOf(Data0));
  if TRNLMemory.SecureIsEqual(Value,Expected0,SizeOf(TRNLSHA512Hash)) then begin
-  writeln('OK!');
+  RNLSelfTestSucceeded;
  end else begin
   RNLSelfTestFailure;
  end;
- write('[HMAC-SHA512] RFC 4231 case 2 ... ');
+ RNLSelfTestBegin('[HMAC-SHA512] RFC 4231 case 2 ... ');
  Process(Value,Key1,SizeOf(Key1),Data1,SizeOf(Data1));
  if TRNLMemory.SecureIsEqual(Value,Expected1,SizeOf(TRNLSHA512Hash)) then begin
-  writeln('OK!');
+  RNLSelfTestSucceeded;
  end else begin
   RNLSelfTestFailure;
  end;
- write('[HMAC-SHA512] RFC 4231 case 3 ... ');
+ RNLSelfTestBegin('[HMAC-SHA512] RFC 4231 case 3 ... ');
  Process(Value,Key2,SizeOf(Key2),Data2,SizeOf(Data2));
  if TRNLMemory.SecureIsEqual(Value,Expected2,SizeOf(TRNLSHA512Hash)) then begin
-  writeln('OK!');
+  RNLSelfTestSucceeded;
  end else begin
   RNLSelfTestFailure;
  end;
- write('[HMAC-SHA512] RFC 4231 case 6, key longer than one block ... ');
+ RNLSelfTestBegin('[HMAC-SHA512] RFC 4231 case 6, key longer than one block ... ');
  Process(Value,Key3,SizeOf(Key3),Data3,SizeOf(Data3));
  if TRNLMemory.SecureIsEqual(Value,Expected3,SizeOf(TRNLSHA512Hash)) then begin
-  writeln('OK!');
+  RNLSelfTestSucceeded;
  end else begin
   RNLSelfTestFailure;
  end;
@@ -12266,56 +15318,56 @@ begin
  // passed with a size of zero, but an untyped const parameter still wants an address.
  Nothing:=0;
 
- write('[HKDF-SHA256] RFC 5869 case A.1, extract ... ');
+ RNLSelfTestBegin('[HKDF-SHA256] RFC 5869 case A.1, extract ... ');
  if Extract(TRNLSHA256.Descriptor,PseudoRandomKey,Salt1,SizeOf(Salt1),
             InputKeyingMaterial1,SizeOf(InputKeyingMaterial1)) and
     TRNLMemory.SecureIsEqual(PseudoRandomKey,ExpectedPseudoRandomKey1,SizeOf(TRNLSHA256Hash)) then begin
-  writeln('OK!');
+  RNLSelfTestSucceeded;
  end else begin
   RNLSelfTestFailure;
  end;
- write('[HKDF-SHA256] RFC 5869 case A.1, expand to 42 bytes ... ');
+ RNLSelfTestBegin('[HKDF-SHA256] RFC 5869 case A.1, expand to 42 bytes ... ');
  if Expand(TRNLSHA256.Descriptor,Output,SizeOf(ExpectedOutput1),
            PseudoRandomKey,SizeOf(TRNLSHA256Hash),Info1,SizeOf(Info1)) and
     TRNLMemory.SecureIsEqual(Output,ExpectedOutput1,SizeOf(ExpectedOutput1)) then begin
-  writeln('OK!');
+  RNLSelfTestSucceeded;
  end else begin
   RNLSelfTestFailure;
  end;
 
- write('[HKDF-SHA256] RFC 5869 case A.2, extract ... ');
+ RNLSelfTestBegin('[HKDF-SHA256] RFC 5869 case A.2, extract ... ');
  if Extract(TRNLSHA256.Descriptor,PseudoRandomKey,Salt2,SizeOf(Salt2),
             InputKeyingMaterial2,SizeOf(InputKeyingMaterial2)) and
     TRNLMemory.SecureIsEqual(PseudoRandomKey,ExpectedPseudoRandomKey2,SizeOf(TRNLSHA256Hash)) then begin
-  writeln('OK!');
+  RNLSelfTestSucceeded;
  end else begin
   RNLSelfTestFailure;
  end;
  // 82 bytes are three blocks of hash size and a remainder, so this is the one which says the counter
  // advances and the last block is cut rather than rounded up to
- write('[HKDF-SHA256] RFC 5869 case A.2, expand to 82 bytes over three blocks ... ');
+ RNLSelfTestBegin('[HKDF-SHA256] RFC 5869 case A.2, expand to 82 bytes over three blocks ... ');
  if Expand(TRNLSHA256.Descriptor,Output,SizeOf(ExpectedOutput2),
            PseudoRandomKey,SizeOf(TRNLSHA256Hash),Info2,SizeOf(Info2)) and
     TRNLMemory.SecureIsEqual(Output,ExpectedOutput2,SizeOf(ExpectedOutput2)) then begin
-  writeln('OK!');
+  RNLSelfTestSucceeded;
  end else begin
   RNLSelfTestFailure;
  end;
 
  // The case with neither salt nor info, which is the one the TLS 1.3 key schedule starts from
- write('[HKDF-SHA256] RFC 5869 case A.3, extract with an empty salt ... ');
+ RNLSelfTestBegin('[HKDF-SHA256] RFC 5869 case A.3, extract with an empty salt ... ');
  if Extract(TRNLSHA256.Descriptor,PseudoRandomKey,Nothing,0,
             InputKeyingMaterial3,SizeOf(InputKeyingMaterial3)) and
     TRNLMemory.SecureIsEqual(PseudoRandomKey,ExpectedPseudoRandomKey3,SizeOf(TRNLSHA256Hash)) then begin
-  writeln('OK!');
+  RNLSelfTestSucceeded;
  end else begin
   RNLSelfTestFailure;
  end;
- write('[HKDF-SHA256] RFC 5869 case A.3, expand with an empty info ... ');
+ RNLSelfTestBegin('[HKDF-SHA256] RFC 5869 case A.3, expand with an empty info ... ');
  if Expand(TRNLSHA256.Descriptor,Output,SizeOf(ExpectedOutput3),
            PseudoRandomKey,SizeOf(TRNLSHA256Hash),Nothing,0) and
     TRNLMemory.SecureIsEqual(Output,ExpectedOutput3,SizeOf(ExpectedOutput3)) then begin
-  writeln('OK!');
+  RNLSelfTestSucceeded;
  end else begin
   RNLSelfTestFailure;
  end;
@@ -12357,10 +15409,10 @@ begin
 
  Nothing:=0;
 
- write('[TLS1.3-KDF] RFC 8448 early secret, extract of zeros from zeros ... ');
+ RNLSelfTestBegin('[TLS1.3-KDF] RFC 8448 early secret, extract of zeros from zeros ... ');
  if TRNLHKDF.Extract(TRNLSHA256.Descriptor,EarlySecret,Zero,SizeOf(Zero),Zero,SizeOf(Zero)) and
     TRNLMemory.SecureIsEqual(EarlySecret,ExpectedEarlySecret,SizeOf(TRNLSHA256Hash)) then begin
-  writeln('OK!');
+  RNLSelfTestSucceeded;
  end else begin
   RNLSelfTestFailure;
  end;
@@ -12369,13 +15421,13 @@ begin
  // two zero bytes - a confusion which would come out here and nowhere else
  TRNLSHA256.Process(EmptyTranscriptHash,Nothing,0);
 
- write('[TLS1.3-KDF] RFC 8448 derived secret, expand-label "derived" ... ');
+ RNLSelfTestBegin('[TLS1.3-KDF] RFC 8448 derived secret, expand-label "derived" ... ');
  if DeriveSecret(TRNLSHA256.Descriptor,DerivedSecret,
                  EarlySecret,SizeOf(TRNLSHA256Hash),
                  'derived',
                  EmptyTranscriptHash,SizeOf(TRNLSHA256Hash)) and
     TRNLMemory.SecureIsEqual(DerivedSecret,ExpectedDerivedSecret,SizeOf(TRNLSHA256Hash)) then begin
-  writeln('OK!');
+  RNLSelfTestSucceeded;
  end else begin
   RNLSelfTestFailure;
  end;
@@ -13424,7 +16476,7 @@ class procedure TRNLBLAKE2B.SelfTest;
   end;
   Context.Finalize(MD);
   if TRNLMemory.SecureIsEqual(MD,BLACK2B_RES,32) then begin
-   writeln('OK!');
+   RNLSelfTestSucceeded;
   end else begin
    RNLSelfTestFailure;
   end;
@@ -16009,7 +19061,7 @@ class procedure TRNLBLAKE2B.SelfTest;
    write('[BLAKE2B] Testing offical vector #',Index,' ... ');
    TRNLBLAKE2B.Process(Hash,Buf,Index,TRNLBLAKE2BContext.BLAKE2B_OUTBYTES,@Key,TRNLBLAKE2BContext.BLAKE2B_KEYBYTES);
    if TRNLMemory.SecureIsEqual(Hash,BLAKB2B_KEYED_KAT[Index],SizeOf(TRNLBLAKE2BHash)) then begin
-    writeln('OK!');
+    RNLSelfTestSucceeded;
    end else begin
     RNLSelfTestFailure;
    end;
@@ -16065,7 +19117,7 @@ begin
     RefHash[HashIndex]:=StrToInt('$'+Copy(TestVector^.Hash,(HashIndex shl 1)+1,2));
    end;
    if TRNLMemory.SecureIsEqual(Hash,RefHash,HashLen) then begin
-    writeln('OK!');
+    RNLSelfTestSucceeded;
    end else begin
     RNLSelfTestFailure;
    end;
@@ -16356,52 +19408,52 @@ const PrivateKey0:array[0..31] of TRNLUInt8=
 var Signature:array[0..63] of TRNLUInt8;
 begin
 
- write('[ED25519] Signing message 0 ... ');
+ RNLSelfTestBegin('[ED25519] Signing message 0 ... ');
  FillChar(Signature,64,#0);
  Sign(Signature,PrivateKey0,PublicKey0,Message0,MessageSize0);
  if TRNLMemory.SecureIsEqual(Signature,Signature0,64) then begin
-  writeln('OK!');
+  RNLSelfTestSucceeded;
  end else begin
   RNLSelfTestFailure;
  end;
 
- write('[ED25519] Verifing message 0 ... ');
+ RNLSelfTestBegin('[ED25519] Verifing message 0 ... ');
  if Verify(Signature,PublicKey0,Message0,MessageSize0) then begin
-  writeln('OK!');
+  RNLSelfTestSucceeded;
  end else begin
   RNLSelfTestFailure;
  end;
 
- write('[ED25519] Deriving public key 0 ... ');
+ RNLSelfTestBegin('[ED25519] Deriving public key 0 ... ');
  FillChar(Signature,32,#0);
  DerivePublicKey(Signature,PrivateKey0);
  if TRNLMemory.SecureIsEqual(Signature,PublicKey0,32) then begin
-  writeln('OK!');
+  RNLSelfTestSucceeded;
  end else begin
   RNLSelfTestFailure;
  end;
 
- write('[ED25519] Signing message 1 ... ');
+ RNLSelfTestBegin('[ED25519] Signing message 1 ... ');
  FillChar(Signature,64,#0);
  Sign(Signature,PrivateKey1,PublicKey1,Message1,MessageSize1);
  if TRNLMemory.SecureIsEqual(Signature,Signature1,64) then begin
-  writeln('OK!');
+  RNLSelfTestSucceeded;
  end else begin
   RNLSelfTestFailure;
  end;
 
- write('[ED25519] Verifing message 1 ... ');
+ RNLSelfTestBegin('[ED25519] Verifing message 1 ... ');
  if Verify(Signature,PublicKey1,Message1,MessageSize1) then begin
-  writeln('OK!');
+  RNLSelfTestSucceeded;
  end else begin
   RNLSelfTestFailure;
  end;
 
- write('[ED25519] Deriving public key 1 ... ');
+ RNLSelfTestBegin('[ED25519] Deriving public key 1 ... ');
  FillChar(Signature,32,#0);
  DerivePublicKey(Signature,PrivateKey1);
  if TRNLMemory.SecureIsEqual(Signature,PublicKey1,32) then begin
-  writeln('OK!');
+  RNLSelfTestSucceeded;
  end else begin
   RNLSelfTestFailure;
  end;
@@ -16768,26 +19820,26 @@ var Context:TRNLChaCha20Context;
 begin
 
 {$if not defined(NEXTGEN)}
- write('[ChaCha20] RFC 8439 2.4.2 encrypting 114 bytes ... ');
+ RNLSelfTestBegin('[ChaCha20] RFC 8439 2.4.2 encrypting 114 bytes ... ');
 {$ifend}
  Context.Initialize(Key,Nonce,Counter);
  Context.Process(Buffer,PlainText,SizeOf(PlainText));
  if TRNLMemory.SecureIsEqual(Buffer,CipherText,SizeOf(CipherText)) then begin
 {$if not defined(NEXTGEN)}
-  writeln('OK!');
+  RNLSelfTestSucceeded;
 {$ifend}
  end else begin
   RNLSelfTestFailure;
  end;
 
 {$if not defined(NEXTGEN)}
- write('[ChaCha20] RFC 8439 2.4.2 decrypting it again ... ');
+ RNLSelfTestBegin('[ChaCha20] RFC 8439 2.4.2 decrypting it again ... ');
 {$ifend}
  Context.Initialize(Key,Nonce,Counter);
  Context.Process(Buffer,CipherText,SizeOf(CipherText));
  if TRNLMemory.SecureIsEqual(Buffer,PlainText,SizeOf(PlainText)) then begin
 {$if not defined(NEXTGEN)}
-  writeln('OK!');
+  RNLSelfTestSucceeded;
 {$ifend}
  end else begin
   RNLSelfTestFailure;
@@ -16900,6 +19952,4060 @@ begin
   FillChar(OneTimeKey,SizeOf(OneTimeKey),#0);
   FillChar(Context,SizeOf(TRNLChaCha20Context),#0);
  end;
+end;
+
+class procedure TRNLEC.Zero(out aResult:TRNLECFieldElement);
+begin
+ FillChar(aResult,SizeOf(TRNLECFieldElement),#0);
+end;
+
+class procedure TRNLEC.Copy_(out aResult:TRNLECFieldElement;const aValue:TRNLECFieldElement);
+begin
+ Move(aValue,aResult,SizeOf(TRNLECFieldElement));
+end;
+
+class function TRNLEC.EqualMask(const aLeft,aRight:TRNLECFieldElement):TRNLUInt32;
+var Index:TRNLSizeInt;
+    Difference,Folded:TRNLUInt32;
+begin
+ // The whole width, not just the limbs the curve uses, because every routine which writes an
+ // element writes all of it - so the limbs above the curve are zero on both sides and cost a word
+ // each rather than a decision about which curve this is
+ Difference:=0;
+ for Index:=0 to MaximumLimbs-1 do begin
+  Difference:=Difference or (aLeft[Index] xor aRight[Index]);
+ end;
+ // x or -x has its top bit set for every x but zero, so the shift is one exactly when the two
+ // differ, and subtracting one turns that into all ones for equal and nothing for unequal
+ Folded:=Difference or TRNLUInt32(TRNLUInt32(0)-Difference);
+ result:=TRNLUInt32(Folded shr 31)-TRNLUInt32(1);
+end;
+
+class function TRNLEC.IsZeroMask(const aValue:TRNLECFieldElement):TRNLUInt32;
+var Zeroes:TRNLECFieldElement;
+begin
+ Zero(Zeroes);
+ result:=EqualMask(aValue,Zeroes);
+end;
+
+class procedure TRNLEC.Select(out aResult:TRNLECFieldElement;
+                              const aWhenZero,aWhenOnes:TRNLECFieldElement;
+                              const aMask:TRNLUInt32);
+var Index:TRNLSizeInt;
+begin
+ for Index:=0 to MaximumLimbs-1 do begin
+  aResult[Index]:=(aWhenOnes[Index] and aMask) or (aWhenZero[Index] and not aMask);
+ end;
+end;
+
+class function TRNLEC.Below(const aValue,aModulus:TRNLECFieldElement):boolean;
+var Index:TRNLSizeInt;
+    Borrow,Difference:TRNLUInt64;
+begin
+ // Full width again, and correct for the same reason: the limbs above the curve are zero on both
+ // sides, so the borrow runs through them unchanged
+ Borrow:=0;
+ for Index:=0 to MaximumLimbs-1 do begin
+  Difference:=TRNLUInt64(aValue[Index])-TRNLUInt64(aModulus[Index])-Borrow;
+  Borrow:=(Difference shr 63) and 1;
+ end;
+ result:=Borrow<>0;
+end;
+
+class procedure TRNLEC.Add(out aResult:TRNLECFieldElement;
+                           const aLeft,aRight,aModulus:TRNLECFieldElement;
+                           const aLimbs:TRNLSizeInt);
+var Index:TRNLSizeInt;
+    Carry,Borrow,Sum,Difference:TRNLUInt64;
+    Sums,Reduced:TRNLECFieldElement;
+    Mask:TRNLUInt32;
+begin
+ Zero(Sums);
+ Zero(Reduced);
+ Carry:=0;
+ for Index:=0 to aLimbs-1 do begin
+  Sum:=TRNLUInt64(aLeft[Index])+TRNLUInt64(aRight[Index])+Carry;
+  Sums[Index]:=TRNLUInt32(Sum and $ffffffff);
+  Carry:=Sum shr 32;
+ end;
+ Borrow:=0;
+ for Index:=0 to aLimbs-1 do begin
+  Difference:=TRNLUInt64(Sums[Index])-TRNLUInt64(aModulus[Index])-Borrow;
+  Reduced[Index]:=TRNLUInt32(Difference and $ffffffff);
+  Borrow:=(Difference shr 63) and 1;
+ end;
+ // Take the reduced value when the sum overflowed the top limb, or when it did not but is still at
+ // or above the modulus
+ Mask:=TRNLUInt32(TRNLUInt32(0)-TRNLUInt32(TRNLUInt32(Carry) or TRNLUInt32(1-Borrow)));
+ Select(aResult,Sums,Reduced,Mask);
+end;
+
+class procedure TRNLEC.Subtract(out aResult:TRNLECFieldElement;
+                                const aLeft,aRight,aModulus:TRNLECFieldElement;
+                                const aLimbs:TRNLSizeInt);
+var Index:TRNLSizeInt;
+    Carry,Borrow,Sum,Difference:TRNLUInt64;
+    Differences,Restored:TRNLECFieldElement;
+    Mask:TRNLUInt32;
+begin
+ Zero(Differences);
+ Zero(Restored);
+ Borrow:=0;
+ for Index:=0 to aLimbs-1 do begin
+  Difference:=TRNLUInt64(aLeft[Index])-TRNLUInt64(aRight[Index])-Borrow;
+  Differences[Index]:=TRNLUInt32(Difference and $ffffffff);
+  Borrow:=(Difference shr 63) and 1;
+ end;
+ Carry:=0;
+ for Index:=0 to aLimbs-1 do begin
+  Sum:=TRNLUInt64(Differences[Index])+TRNLUInt64(aModulus[Index])+Carry;
+  Restored[Index]:=TRNLUInt32(Sum and $ffffffff);
+  Carry:=Sum shr 32;
+ end;
+ // The modulus goes back on exactly when the subtraction went below zero
+ Mask:=TRNLUInt32(TRNLUInt32(0)-TRNLUInt32(Borrow));
+ Select(aResult,Differences,Restored,Mask);
+end;
+
+class procedure TRNLEC.MontgomeryMultiply(out aResult:TRNLECFieldElement;
+                                          const aLeft,aRight,aModulus:TRNLECFieldElement;
+                                          const aNegativeInverse:TRNLUInt32;
+                                          const aLimbs:TRNLSizeInt);
+var Accumulator:array[0..MaximumLimbs+1] of TRNLUInt32;
+    Products,Reduced:TRNLECFieldElement;
+    Index,Inner:TRNLSizeInt;
+    Carry,Borrow,Sum,Difference:TRNLUInt64;
+    Factor,Mask:TRNLUInt32;
+begin
+
+ FillChar(Accumulator,SizeOf(Accumulator),#0);
+ Zero(Products);
+ Zero(Reduced);
+
+ // CIOS: one limb of the right operand at a time, each followed by one reduction step which shifts
+ // the accumulator down by a limb. What comes out is left*right/R rather than left*right, which is
+ // exactly why one operand goes in already multiplied by R.
+ for Index:=0 to aLimbs-1 do begin
+
+  Carry:=0;
+  for Inner:=0 to aLimbs-1 do begin
+   Sum:=TRNLUInt64(Accumulator[Inner])+
+        (TRNLUInt64(aLeft[Inner])*TRNLUInt64(aRight[Index]))+
+        Carry;
+   Accumulator[Inner]:=TRNLUInt32(Sum and $ffffffff);
+   Carry:=Sum shr 32;
+  end;
+  Sum:=TRNLUInt64(Accumulator[aLimbs])+Carry;
+  Accumulator[aLimbs]:=TRNLUInt32(Sum and $ffffffff);
+  Accumulator[aLimbs+1]:=TRNLUInt32(Sum shr 32);
+
+  // The multiple of the modulus which makes the lowest limb vanish, so that dividing by 2^32 is a
+  // shift rather than a division
+  Factor:=TRNLUInt32(TRNLUInt64(Accumulator[0])*TRNLUInt64(aNegativeInverse));
+  Carry:=0;
+  for Inner:=0 to aLimbs-1 do begin
+   Sum:=TRNLUInt64(Accumulator[Inner])+
+        (TRNLUInt64(Factor)*TRNLUInt64(aModulus[Inner]))+
+        Carry;
+   if Inner>0 then begin
+    Accumulator[Inner-1]:=TRNLUInt32(Sum and $ffffffff);
+   end;
+   Carry:=Sum shr 32;
+  end;
+  Sum:=TRNLUInt64(Accumulator[aLimbs])+Carry;
+  Accumulator[aLimbs-1]:=TRNLUInt32(Sum and $ffffffff);
+  Accumulator[aLimbs]:=TRNLUInt32(TRNLUInt64(Accumulator[aLimbs+1])+(Sum shr 32));
+
+ end;
+
+ for Index:=0 to aLimbs-1 do begin
+  Products[Index]:=Accumulator[Index];
+ end;
+ Borrow:=0;
+ for Index:=0 to aLimbs-1 do begin
+  Difference:=TRNLUInt64(Products[Index])-TRNLUInt64(aModulus[Index])-Borrow;
+  Reduced[Index]:=TRNLUInt32(Difference and $ffffffff);
+  Borrow:=(Difference shr 63) and 1;
+ end;
+ Mask:=TRNLUInt32(TRNLUInt32(0)-TRNLUInt32(Accumulator[aLimbs] or TRNLUInt32(1-Borrow)));
+ Select(aResult,Products,Reduced,Mask);
+
+ FillChar(Accumulator,SizeOf(Accumulator),#0);
+ Zero(Products);
+ Zero(Reduced);
+
+end;
+
+class procedure TRNLEC.MontgomeryInvert(out aResult:TRNLECFieldElement;
+                                        const aValue,aModulus:TRNLECFieldElement;
+                                        const aNegativeInverse:TRNLUInt32;
+                                        const aMontgomeryOne:TRNLECFieldElement;
+                                        const aLimbs:TRNLSizeInt);
+var Exponent,Accumulator,Product,Squared,Two:TRNLECFieldElement;
+    Index,Bit:TRNLSizeInt;
+    Mask:TRNLUInt32;
+begin
+
+ // m-2, which is what Fermat wants. Formed rather than written down, so that the same routine can
+ // invert in the field and in the group order of any curve without a second constant per case.
+ Zero(Two);
+ Two[0]:=2;
+ Subtract(Exponent,aModulus,Two,aModulus,aLimbs);
+
+ Copy_(Accumulator,aMontgomeryOne);
+ Copy_(Squared,aValue);
+
+ // Least significant bit first, multiplying always and keeping the product only when the bit is
+ // set. Half the work is thrown away on purpose: the value being inverted comes off the secret
+ // scalar, and a loop which skipped the multiplications would say in its timing which bits were set.
+ for Index:=0 to aLimbs-1 do begin
+  for Bit:=0 to 31 do begin
+   MontgomeryMultiply(Product,Accumulator,Squared,aModulus,aNegativeInverse,aLimbs);
+   Mask:=TRNLUInt32(TRNLUInt32(0)-TRNLUInt32((Exponent[Index] shr Bit) and 1));
+   Select(Accumulator,Accumulator,Product,Mask);
+   MontgomeryMultiply(Squared,Squared,Squared,aModulus,aNegativeInverse,aLimbs);
+  end;
+ end;
+
+ Copy_(aResult,Accumulator);
+
+ Zero(Accumulator);
+ Zero(Product);
+ Zero(Squared);
+
+end;
+
+class procedure TRNLEC.FromBigEndian(out aResult:TRNLECFieldElement;
+                                     const aData;const aLimbs:TRNLSizeInt);
+var Index:TRNLSizeInt;
+begin
+ // Network order outside, least significant limb first inside, and the limbs above the curve zeroed
+ // so that the full width comparisons stay right
+ Zero(aResult);
+ for Index:=0 to aLimbs-1 do begin
+  aResult[Index]:=TRNLMemoryAccess.LoadBigEndianUInt32(PRNLUInt8Array(TRNLPointer(@aData))^[((aLimbs-1)-Index)*4]);
+ end;
+end;
+
+class procedure TRNLEC.ToBigEndian(out aData;const aValue:TRNLECFieldElement;
+                                   const aLimbs:TRNLSizeInt);
+var Index:TRNLSizeInt;
+begin
+ for Index:=0 to aLimbs-1 do begin
+  TRNLMemoryAccess.StoreBigEndianUInt32(PRNLUInt8Array(TRNLPointer(@aData))^[((aLimbs-1)-Index)*4],aValue[Index]);
+ end;
+end;
+
+class procedure TRNLEC.PointSetInfinity(out aPoint:TRNLECPoint;const aCurve:TRNLECCurve);
+begin
+ // Z of zero is the point at infinity, and X and Y are then meaningless rather than wrong
+ Copy_(aPoint.X,aCurve.FieldMontgomeryOne);
+ Copy_(aPoint.Y,aCurve.FieldMontgomeryOne);
+ Zero(aPoint.Z);
+end;
+
+class procedure TRNLEC.PointDouble(out aResult:TRNLECPoint;const aPoint:TRNLECPoint;
+                                   const aCurve:TRNLECCurve);
+var Delta,Gamma,Beta,Alpha,Temp,Other:TRNLECFieldElement;
+begin
+
+ // dbl-2001-b, which is the doubling that a = -3 buys: alpha comes out as 3*(X-Z^2)*(X+Z^2) instead
+ // of 3*X^2+a*Z^4, so two squarings and a multiplication go away. Both curves here have a = -3.
+ MontgomeryMultiply(Delta,aPoint.Z,aPoint.Z,aCurve.FieldModulus,aCurve.FieldNegativeInverse,aCurve.Limbs);
+ MontgomeryMultiply(Gamma,aPoint.Y,aPoint.Y,aCurve.FieldModulus,aCurve.FieldNegativeInverse,aCurve.Limbs);
+ MontgomeryMultiply(Beta,aPoint.X,Gamma,aCurve.FieldModulus,aCurve.FieldNegativeInverse,aCurve.Limbs);
+
+ Subtract(Temp,aPoint.X,Delta,aCurve.FieldModulus,aCurve.Limbs);
+ Add(Other,aPoint.X,Delta,aCurve.FieldModulus,aCurve.Limbs);
+ MontgomeryMultiply(Alpha,Temp,Other,aCurve.FieldModulus,aCurve.FieldNegativeInverse,aCurve.Limbs);
+ Add(Temp,Alpha,Alpha,aCurve.FieldModulus,aCurve.Limbs);
+ Add(Alpha,Temp,Alpha,aCurve.FieldModulus,aCurve.Limbs);
+
+ // Z' = (Y+Z)^2 - gamma - delta, which is 2*Y*Z without needing the multiplication
+ Add(Temp,aPoint.Y,aPoint.Z,aCurve.FieldModulus,aCurve.Limbs);
+ MontgomeryMultiply(Temp,Temp,Temp,aCurve.FieldModulus,aCurve.FieldNegativeInverse,aCurve.Limbs);
+ Subtract(Temp,Temp,Gamma,aCurve.FieldModulus,aCurve.Limbs);
+ Subtract(aResult.Z,Temp,Delta,aCurve.FieldModulus,aCurve.Limbs);
+
+ // X' = alpha^2 - 8*beta
+ MontgomeryMultiply(Temp,Alpha,Alpha,aCurve.FieldModulus,aCurve.FieldNegativeInverse,aCurve.Limbs);
+ Add(Other,Beta,Beta,aCurve.FieldModulus,aCurve.Limbs);
+ Add(Other,Other,Other,aCurve.FieldModulus,aCurve.Limbs);
+ Add(Other,Other,Other,aCurve.FieldModulus,aCurve.Limbs);
+ Subtract(aResult.X,Temp,Other,aCurve.FieldModulus,aCurve.Limbs);
+
+ // Y' = alpha*(4*beta - X') - 8*gamma^2
+ Add(Other,Beta,Beta,aCurve.FieldModulus,aCurve.Limbs);
+ Add(Other,Other,Other,aCurve.FieldModulus,aCurve.Limbs);
+ Subtract(Other,Other,aResult.X,aCurve.FieldModulus,aCurve.Limbs);
+ MontgomeryMultiply(Other,Alpha,Other,aCurve.FieldModulus,aCurve.FieldNegativeInverse,aCurve.Limbs);
+ MontgomeryMultiply(Temp,Gamma,Gamma,aCurve.FieldModulus,aCurve.FieldNegativeInverse,aCurve.Limbs);
+ Add(Temp,Temp,Temp,aCurve.FieldModulus,aCurve.Limbs);
+ Add(Temp,Temp,Temp,aCurve.FieldModulus,aCurve.Limbs);
+ Add(Temp,Temp,Temp,aCurve.FieldModulus,aCurve.Limbs);
+ Subtract(aResult.Y,Other,Temp,aCurve.FieldModulus,aCurve.Limbs);
+
+end;
+
+class procedure TRNLEC.PointAdd(out aResult:TRNLECPoint;const aLeft,aRight:TRNLECPoint;
+                                const aCurve:TRNLECCurve);
+var Z1Z1,Z2Z2,U1,U2,S1,S2,H,I_,J,R_,V,Temp,Other:TRNLECFieldElement;
+    Doubled,General:TRNLECPoint;
+    SameX,SameY,LeftInfinite,RightInfinite:TRNLUInt32;
+begin
+
+ // add-2007-bl. Every branch of it is computed and then chosen between with a mask, because which
+ // branch was taken is itself something worth not saying out loud.
+ MontgomeryMultiply(Z1Z1,aLeft.Z,aLeft.Z,aCurve.FieldModulus,aCurve.FieldNegativeInverse,aCurve.Limbs);
+ MontgomeryMultiply(Z2Z2,aRight.Z,aRight.Z,aCurve.FieldModulus,aCurve.FieldNegativeInverse,aCurve.Limbs);
+ MontgomeryMultiply(U1,aLeft.X,Z2Z2,aCurve.FieldModulus,aCurve.FieldNegativeInverse,aCurve.Limbs);
+ MontgomeryMultiply(U2,aRight.X,Z1Z1,aCurve.FieldModulus,aCurve.FieldNegativeInverse,aCurve.Limbs);
+ MontgomeryMultiply(Temp,aRight.Z,Z2Z2,aCurve.FieldModulus,aCurve.FieldNegativeInverse,aCurve.Limbs);
+ MontgomeryMultiply(S1,aLeft.Y,Temp,aCurve.FieldModulus,aCurve.FieldNegativeInverse,aCurve.Limbs);
+ MontgomeryMultiply(Temp,aLeft.Z,Z1Z1,aCurve.FieldModulus,aCurve.FieldNegativeInverse,aCurve.Limbs);
+ MontgomeryMultiply(S2,aRight.Y,Temp,aCurve.FieldModulus,aCurve.FieldNegativeInverse,aCurve.Limbs);
+
+ Subtract(H,U2,U1,aCurve.FieldModulus,aCurve.Limbs);
+ Add(I_,H,H,aCurve.FieldModulus,aCurve.Limbs);
+ MontgomeryMultiply(I_,I_,I_,aCurve.FieldModulus,aCurve.FieldNegativeInverse,aCurve.Limbs);
+ MontgomeryMultiply(J,H,I_,aCurve.FieldModulus,aCurve.FieldNegativeInverse,aCurve.Limbs);
+ Subtract(R_,S2,S1,aCurve.FieldModulus,aCurve.Limbs);
+ Add(R_,R_,R_,aCurve.FieldModulus,aCurve.Limbs);
+ MontgomeryMultiply(V,U1,I_,aCurve.FieldModulus,aCurve.FieldNegativeInverse,aCurve.Limbs);
+
+ MontgomeryMultiply(Temp,R_,R_,aCurve.FieldModulus,aCurve.FieldNegativeInverse,aCurve.Limbs);
+ Subtract(Temp,Temp,J,aCurve.FieldModulus,aCurve.Limbs);
+ Subtract(Temp,Temp,V,aCurve.FieldModulus,aCurve.Limbs);
+ Subtract(General.X,Temp,V,aCurve.FieldModulus,aCurve.Limbs);
+
+ Subtract(Temp,V,General.X,aCurve.FieldModulus,aCurve.Limbs);
+ MontgomeryMultiply(Temp,R_,Temp,aCurve.FieldModulus,aCurve.FieldNegativeInverse,aCurve.Limbs);
+ MontgomeryMultiply(Other,S1,J,aCurve.FieldModulus,aCurve.FieldNegativeInverse,aCurve.Limbs);
+ Add(Other,Other,Other,aCurve.FieldModulus,aCurve.Limbs);
+ Subtract(General.Y,Temp,Other,aCurve.FieldModulus,aCurve.Limbs);
+
+ Add(Temp,aLeft.Z,aRight.Z,aCurve.FieldModulus,aCurve.Limbs);
+ MontgomeryMultiply(Temp,Temp,Temp,aCurve.FieldModulus,aCurve.FieldNegativeInverse,aCurve.Limbs);
+ Subtract(Temp,Temp,Z1Z1,aCurve.FieldModulus,aCurve.Limbs);
+ Subtract(Temp,Temp,Z2Z2,aCurve.FieldModulus,aCurve.Limbs);
+ MontgomeryMultiply(General.Z,Temp,H,aCurve.FieldModulus,aCurve.FieldNegativeInverse,aCurve.Limbs);
+
+ // The three cases the general formula cannot state. H of zero means the two have the same affine
+ // x: with the same y as well it is a doubling, and with the opposite y the two cancel and the
+ // answer is the point at infinity, which is what General already holds since Z comes out zero.
+ SameX:=IsZeroMask(H);
+ SameY:=IsZeroMask(R_);
+ PointDouble(Doubled,aLeft,aCurve);
+ Select(General.X,General.X,Doubled.X,SameX and SameY);
+ Select(General.Y,General.Y,Doubled.Y,SameX and SameY);
+ Select(General.Z,General.Z,Doubled.Z,SameX and SameY);
+
+ // And either operand being the point at infinity makes the answer the other one
+ LeftInfinite:=IsZeroMask(aLeft.Z);
+ RightInfinite:=IsZeroMask(aRight.Z);
+ Select(General.X,General.X,aLeft.X,RightInfinite);
+ Select(General.Y,General.Y,aLeft.Y,RightInfinite);
+ Select(General.Z,General.Z,aLeft.Z,RightInfinite);
+ Select(aResult.X,General.X,aRight.X,LeftInfinite);
+ Select(aResult.Y,General.Y,aRight.Y,LeftInfinite);
+ Select(aResult.Z,General.Z,aRight.Z,LeftInfinite);
+
+end;
+
+class procedure TRNLEC.PointMultiply(out aResult:TRNLECPoint;
+                                     const aScalar:TRNLECFieldElement;
+                                     const aPoint:TRNLECPoint;
+                                     const aCurve:TRNLECCurve);
+var Accumulator,Sum:TRNLECPoint;
+    Index,Bit:TRNLSizeInt;
+    Mask:TRNLUInt32;
+begin
+
+ PointSetInfinity(Accumulator,aCurve);
+
+ // Most significant bit first, doubling every round and adding every round, keeping the sum only
+ // where the bit is set. The addition is done whether or not it is wanted, because a loop which
+ // skipped it would take a different length of time for every scalar and so describe the key.
+ for Index:=aCurve.Limbs-1 downto 0 do begin
+  for Bit:=31 downto 0 do begin
+   PointDouble(Accumulator,Accumulator,aCurve);
+   PointAdd(Sum,Accumulator,aPoint,aCurve);
+   Mask:=TRNLUInt32(TRNLUInt32(0)-TRNLUInt32((aScalar[Index] shr Bit) and 1));
+   Select(Accumulator.X,Accumulator.X,Sum.X,Mask);
+   Select(Accumulator.Y,Accumulator.Y,Sum.Y,Mask);
+   Select(Accumulator.Z,Accumulator.Z,Sum.Z,Mask);
+  end;
+ end;
+
+ aResult:=Accumulator;
+
+ FillChar(Accumulator,SizeOf(TRNLECPoint),#0);
+ FillChar(Sum,SizeOf(TRNLECPoint),#0);
+
+end;
+
+class function TRNLEC.PointToAffine(out aX,aY:TRNLECFieldElement;const aPoint:TRNLECPoint;
+                                    const aCurve:TRNLECCurve):boolean;
+var Inverse,InverseSquared,InverseCubed,One:TRNLECFieldElement;
+begin
+
+ result:=IsZeroMask(aPoint.Z)=0;
+ if not result then begin
+  Zero(aX);
+  Zero(aY);
+  exit;
+ end;
+
+ // x = X/Z^2 and y = Y/Z^3, and one inversion pays for both
+ MontgomeryInvert(Inverse,aPoint.Z,aCurve.FieldModulus,aCurve.FieldNegativeInverse,
+                  aCurve.FieldMontgomeryOne,aCurve.Limbs);
+ MontgomeryMultiply(InverseSquared,Inverse,Inverse,aCurve.FieldModulus,aCurve.FieldNegativeInverse,aCurve.Limbs);
+ MontgomeryMultiply(InverseCubed,InverseSquared,Inverse,aCurve.FieldModulus,aCurve.FieldNegativeInverse,aCurve.Limbs);
+ MontgomeryMultiply(aX,aPoint.X,InverseSquared,aCurve.FieldModulus,aCurve.FieldNegativeInverse,aCurve.Limbs);
+ MontgomeryMultiply(aY,aPoint.Y,InverseCubed,aCurve.FieldModulus,aCurve.FieldNegativeInverse,aCurve.Limbs);
+
+ // Out of Montgomery form, which is a multiplication by one
+ Zero(One);
+ One[0]:=1;
+ MontgomeryMultiply(aX,aX,One,aCurve.FieldModulus,aCurve.FieldNegativeInverse,aCurve.Limbs);
+ MontgomeryMultiply(aY,aY,One,aCurve.FieldModulus,aCurve.FieldNegativeInverse,aCurve.Limbs);
+
+ Zero(Inverse);
+ Zero(InverseSquared);
+ Zero(InverseCubed);
+
+end;
+
+class procedure TRNLEC.BasePoint(out aPoint:TRNLECPoint;const aCurve:TRNLECCurve);
+begin
+ Copy_(aPoint.X,aCurve.BaseX);
+ Copy_(aPoint.Y,aCurve.BaseY);
+ MontgomeryMultiply(aPoint.X,aPoint.X,aCurve.FieldMontgomeryRSquared,aCurve.FieldModulus,
+                    aCurve.FieldNegativeInverse,aCurve.Limbs);
+ MontgomeryMultiply(aPoint.Y,aPoint.Y,aCurve.FieldMontgomeryRSquared,aCurve.FieldModulus,
+                    aCurve.FieldNegativeInverse,aCurve.Limbs);
+ Copy_(aPoint.Z,aCurve.FieldMontgomeryOne);
+end;
+
+class function TRNLEC.DecodePoint(out aPoint:TRNLECPoint;
+                                  const aData;const aDataSize:TRNLSizeUInt;
+                                  const aCurve:TRNLECCurve):boolean;
+var X,Y,Left,Right,Three,B:TRNLECFieldElement;
+    Data:PRNLUInt8Array;
+begin
+
+ result:=false;
+ PointSetInfinity(aPoint,aCurve);
+
+ if aDataSize<>TRNLSizeUInt(1+(aCurve.ElementSize*2)) then begin
+  exit;
+ end;
+
+ Data:=PRNLUInt8Array(TRNLPointer(@aData));
+ if Data^[0]<>UncompressedPointTag then begin
+  exit;
+ end;
+
+ FromBigEndian(X,Data^[1],aCurve.Limbs);
+ FromBigEndian(Y,Data^[1+aCurve.ElementSize],aCurve.Limbs);
+
+ // A coordinate at or above p is not a field element, whatever else it might look like. Two
+ // encodings of one point is how a signature gets to be valid twice.
+ if not (Below(X,aCurve.FieldModulus) and Below(Y,aCurve.FieldModulus)) then begin
+  exit;
+ end;
+
+ // Into Montgomery form, then the curve equation. Skipping this is the invalid curve attack: a peer
+ // sends a point on some other curve whose order has small factors, and reads the private key out of
+ // the shared secret one factor at a time.
+ MontgomeryMultiply(X,X,aCurve.FieldMontgomeryRSquared,aCurve.FieldModulus,aCurve.FieldNegativeInverse,aCurve.Limbs);
+ MontgomeryMultiply(Y,Y,aCurve.FieldMontgomeryRSquared,aCurve.FieldModulus,aCurve.FieldNegativeInverse,aCurve.Limbs);
+
+ MontgomeryMultiply(Left,Y,Y,aCurve.FieldModulus,aCurve.FieldNegativeInverse,aCurve.Limbs);
+
+ MontgomeryMultiply(Right,X,X,aCurve.FieldModulus,aCurve.FieldNegativeInverse,aCurve.Limbs);
+ MontgomeryMultiply(Right,Right,X,aCurve.FieldModulus,aCurve.FieldNegativeInverse,aCurve.Limbs);
+ Add(Three,X,X,aCurve.FieldModulus,aCurve.Limbs);
+ Add(Three,Three,X,aCurve.FieldModulus,aCurve.Limbs);
+ Subtract(Right,Right,Three,aCurve.FieldModulus,aCurve.Limbs);
+ MontgomeryMultiply(B,aCurve.CurveB,aCurve.FieldMontgomeryRSquared,aCurve.FieldModulus,
+                    aCurve.FieldNegativeInverse,aCurve.Limbs);
+ Add(Right,Right,B,aCurve.FieldModulus,aCurve.Limbs);
+
+ if EqualMask(Left,Right)=0 then begin
+  exit;
+ end;
+
+ Copy_(aPoint.X,X);
+ Copy_(aPoint.Y,Y);
+ Copy_(aPoint.Z,aCurve.FieldMontgomeryOne);
+ result:=true;
+
+end;
+
+class procedure TRNLEC.EncodePoint(out aData;const aX,aY:TRNLECFieldElement;
+                                   const aCurve:TRNLECCurve);
+var Data:PRNLUInt8Array;
+begin
+ Data:=PRNLUInt8Array(TRNLPointer(@aData));
+ Data^[0]:=UncompressedPointTag;
+ ToBigEndian(Data^[1],aX,aCurve.Limbs);
+ ToBigEndian(Data^[1+aCurve.ElementSize],aY,aCurve.Limbs);
+end;
+
+class procedure TRNLEC.GenerateKeyPair(const aRandomGenerator:TRNLRandomGenerator;
+                                       out aPrivateKey;out aPublicKey;
+                                       const aCurve:TRNLECCurve);
+var Scalar,X,Y:TRNLECFieldElement;
+    Base,Public_:TRNLECPoint;
+    Bytes:array[0..MaximumElementSize-1] of TRNLUInt8;
+begin
+
+ // Rejection rather than reduction. Reducing a uniform number of the field width modulo n would
+ // make the low scalars very slightly likelier than the rest, and rejection costs nothing here
+ // because n is so close to the top that the loop practically never runs twice.
+ repeat
+  aRandomGenerator.GetRandomBytes(Bytes,aCurve.ElementSize);
+  FromBigEndian(Scalar,Bytes,aCurve.Limbs);
+ until Below(Scalar,aCurve.OrderModulus) and (IsZeroMask(Scalar)=0);
+
+ Move(Bytes,aPrivateKey,aCurve.ElementSize);
+
+ BasePoint(Base,aCurve);
+ PointMultiply(Public_,Scalar,Base,aCurve);
+ PointToAffine(X,Y,Public_,aCurve);
+ EncodePoint(aPublicKey,X,Y,aCurve);
+
+ Zero(Scalar);
+ FillChar(Bytes,SizeOf(Bytes),#0);
+ FillChar(Public_,SizeOf(TRNLECPoint),#0);
+
+end;
+
+class function TRNLEC.SharedSecret(out aSecret;
+                                   const aPrivateKey;
+                                   const aPeerPublicKey;const aPeerPublicKeySize:TRNLSizeUInt;
+                                   const aCurve:TRNLECCurve):boolean;
+var Scalar,X,Y:TRNLECFieldElement;
+    Peer,Product:TRNLECPoint;
+begin
+
+ result:=false;
+ FillChar(aSecret,aCurve.ElementSize,#0);
+
+ if not DecodePoint(Peer,aPeerPublicKey,aPeerPublicKeySize,aCurve) then begin
+  exit;
+ end;
+
+ FromBigEndian(Scalar,aPrivateKey,aCurve.Limbs);
+ if not (Below(Scalar,aCurve.OrderModulus) and (IsZeroMask(Scalar)=0)) then begin
+  exit;
+ end;
+
+ PointMultiply(Product,Scalar,Peer,aCurve);
+
+ // The point at infinity is what comes back when the peer sent a point of small order, and it has
+ // no x coordinate to hand over. Refused rather than turned into a fixed answer both sides agree on.
+ if not PointToAffine(X,Y,Product,aCurve) then begin
+  exit;
+ end;
+
+ // RFC 8422 section 5.10: the shared secret is the x coordinate and nothing else
+ ToBigEndian(aSecret,X,aCurve.Limbs);
+ result:=true;
+
+ Zero(Scalar);
+ FillChar(Product,SizeOf(TRNLECPoint),#0);
+ Zero(X);
+ Zero(Y);
+
+end;
+
+class function TRNLEC.VerifySignature(const aPublicKey;const aPublicKeySize:TRNLSizeUInt;
+                                      const aHash;const aHashSize:TRNLSizeUInt;
+                                      const aSignatureR;const aSignatureS;
+                                      const aCurve:TRNLECCurve):boolean;
+var PublicPoint,Base,First,Second,Sum:TRNLECPoint;
+    R_,S,E,W,U1,U2,X,Y,One:TRNLECFieldElement;
+    Buffer:array[0..MaximumElementSize-1] of TRNLUInt8;
+    Taken:TRNLSizeUInt;
+begin
+
+ result:=false;
+
+ if not DecodePoint(PublicPoint,aPublicKey,aPublicKeySize,aCurve) then begin
+  exit;
+ end;
+
+ FromBigEndian(R_,aSignatureR,aCurve.Limbs);
+ FromBigEndian(S,aSignatureS,aCurve.Limbs);
+
+ // Both have to be in [1,n-1]. Zero is the value which makes the arithmetic below degenerate, and
+ // anything at or above n is a second encoding of a signature which is already valid - which is how
+ // a signature gets to be accepted twice under two different bit patterns.
+ if not (Below(R_,aCurve.OrderModulus) and Below(S,aCurve.OrderModulus) and
+         (IsZeroMask(R_)=0) and (IsZeroMask(S)=0)) then begin
+  exit;
+ end;
+
+ // FIPS 186-4 section 6.4: as many of the leftmost bits of the hash as the order is wide. A longer
+ // digest is cut, a shorter one is the number it is, and the difference matters because SHA-384 over
+ // P-256 is a combination which does occur.
+ Taken:=aHashSize;
+ if Taken>TRNLSizeUInt(aCurve.ElementSize) then begin
+  Taken:=aCurve.ElementSize;
+ end;
+ FillChar(Buffer,SizeOf(Buffer),#0);
+ if Taken>0 then begin
+  Move(aHash,Buffer[TRNLSizeUInt(aCurve.ElementSize)-Taken],Taken);
+ end;
+ FromBigEndian(E,Buffer,aCurve.Limbs);
+ // Below 2n, so one conditional subtraction is the whole reduction. Subtract with the modulus as
+ // both the right hand side and the modulus is exactly that: it takes n off when it fits and puts
+ // it back when it does not.
+ Subtract(E,E,aCurve.OrderModulus,aCurve.OrderModulus,aCurve.Limbs);
+
+ // w = s^-1, and u1 = e*w, u2 = r*w, all modulo n. Montgomery form throughout: inverting a value
+ // which is already in that form gives the inverse in it as well, so only the way in and the way
+ // out need saying.
+ MontgomeryMultiply(S,S,aCurve.OrderMontgomeryRSquared,aCurve.OrderModulus,aCurve.OrderNegativeInverse,aCurve.Limbs);
+ MontgomeryInvert(W,S,aCurve.OrderModulus,aCurve.OrderNegativeInverse,aCurve.OrderMontgomeryOne,aCurve.Limbs);
+ MontgomeryMultiply(E,E,aCurve.OrderMontgomeryRSquared,aCurve.OrderModulus,aCurve.OrderNegativeInverse,aCurve.Limbs);
+ MontgomeryMultiply(U1,E,W,aCurve.OrderModulus,aCurve.OrderNegativeInverse,aCurve.Limbs);
+ MontgomeryMultiply(U2,R_,aCurve.OrderMontgomeryRSquared,aCurve.OrderModulus,aCurve.OrderNegativeInverse,aCurve.Limbs);
+ MontgomeryMultiply(U2,U2,W,aCurve.OrderModulus,aCurve.OrderNegativeInverse,aCurve.Limbs);
+ Zero(One);
+ One[0]:=1;
+ MontgomeryMultiply(U1,U1,One,aCurve.OrderModulus,aCurve.OrderNegativeInverse,aCurve.Limbs);
+ MontgomeryMultiply(U2,U2,One,aCurve.OrderModulus,aCurve.OrderNegativeInverse,aCurve.Limbs);
+
+ BasePoint(Base,aCurve);
+ PointMultiply(First,U1,Base,aCurve);
+ PointMultiply(Second,U2,PublicPoint,aCurve);
+ PointAdd(Sum,First,Second,aCurve);
+
+ // The point at infinity has no x coordinate to compare against r, so there is nothing to accept
+ if not PointToAffine(X,Y,Sum,aCurve) then begin
+  exit;
+ end;
+
+ // x is below p and r below n, and p is the larger of the two, so again one conditional subtraction
+ Subtract(X,X,aCurve.OrderModulus,aCurve.OrderModulus,aCurve.Limbs);
+
+ result:=EqualMask(X,R_)<>0;
+
+end;
+
+class function TRNLP256.Curve:TRNLECCurve;
+begin
+ result.Limbs:=Limbs;
+ result.ElementSize:=ElementSize;
+ result.FieldModulus:=FieldModulus;
+ result.FieldMontgomeryOne:=FieldMontgomeryOne;
+ result.FieldMontgomeryRSquared:=FieldMontgomeryRSquared;
+ result.FieldNegativeInverse:=FieldNegativeInverse;
+ result.OrderModulus:=OrderModulus;
+ result.OrderMontgomeryOne:=OrderMontgomeryOne;
+ result.OrderMontgomeryRSquared:=OrderMontgomeryRSquared;
+ result.OrderNegativeInverse:=OrderNegativeInverse;
+ result.CurveB:=CurveB;
+ result.BaseX:=BaseX;
+ result.BaseY:=BaseY;
+end;
+
+class function TRNLP256.DecodePoint(out aPoint:TRNLECPoint;
+                                    const aData;const aDataSize:TRNLSizeUInt):boolean;
+begin
+ result:=TRNLEC.DecodePoint(aPoint,aData,aDataSize,Curve);
+end;
+
+class procedure TRNLP256.GenerateKeyPair(const aRandomGenerator:TRNLRandomGenerator;
+                                         out aPrivateKey;out aPublicKey);
+begin
+ TRNLEC.GenerateKeyPair(aRandomGenerator,aPrivateKey,aPublicKey,Curve);
+end;
+
+class function TRNLP256.SharedSecret(out aSecret;
+                                     const aPrivateKey;
+                                     const aPeerPublicKey;const aPeerPublicKeySize:TRNLSizeUInt):boolean;
+begin
+ result:=TRNLEC.SharedSecret(aSecret,aPrivateKey,aPeerPublicKey,aPeerPublicKeySize,Curve);
+end;
+
+class function TRNLP256.VerifySignature(const aPublicKey;const aPublicKeySize:TRNLSizeUInt;
+                                        const aHash;const aHashSize:TRNLSizeUInt;
+                                        const aSignatureR;const aSignatureS):boolean;
+begin
+ result:=TRNLEC.VerifySignature(aPublicKey,aPublicKeySize,aHash,aHashSize,
+                                aSignatureR,aSignatureS,Curve);
+end;
+
+procedure TRNLASN1Reader.Initialize(const aData;const aDataSize:TRNLSizeUInt);
+begin
+ fData:=PRNLUInt8Array(TRNLPointer(@aData));
+ fPosition:=0;
+ fEnd:=aDataSize;
+ fElementStart:=0;
+ fElementEnd:=0;
+end;
+
+function TRNLASN1Reader.AtEnd:boolean;
+begin
+ result:=fPosition>=fEnd;
+end;
+
+function TRNLASN1Reader.Remaining:TRNLSizeInt;
+begin
+ result:=fEnd-fPosition;
+end;
+
+function TRNLASN1Reader.ReadAny(out aTag:TRNLUInt8;out aContents:TRNLASN1Reader):boolean;
+var Length_,Count,Index,Start:TRNLSizeInt;
+    First:TRNLUInt8;
+begin
+
+ result:=false;
+ aTag:=0;
+ FillChar(aContents,SizeOf(TRNLASN1Reader),#0);
+
+ // A tag and at least one length byte
+ if (fEnd-fPosition)<2 then begin
+  exit;
+ end;
+
+ Start:=fPosition;
+ aTag:=fData^[fPosition];
+ inc(fPosition);
+
+ // The high tag number form continues the tag into further bytes. Nothing in a certificate uses it,
+ // so it is refused rather than parsed - an encoding this code cannot lay out is one it must not
+ // walk past.
+ if (aTag and $1f)=$1f then begin
+  exit;
+ end;
+
+ First:=fData^[fPosition];
+ inc(fPosition);
+
+ if First<$80 then begin
+  Length_:=First;
+ end else begin
+  Count:=First and $7f;
+  // Zero is the indefinite form, which BER allows and DER forbids; $ff is reserved and lands here
+  // as a count of 127, which the bound below refuses
+  if (Count=0) or (Count>MaximumLengthBytes) then begin
+   exit;
+  end;
+  if (fEnd-fPosition)<Count then begin
+   exit;
+  end;
+  // Minimal encoding: a leading zero means the same length could have been written shorter
+  if fData^[fPosition]=0 then begin
+   exit;
+  end;
+  Length_:=0;
+  for Index:=0 to Count-1 do begin
+   Length_:=(Length_ shl 8) or TRNLSizeInt(fData^[fPosition+Index]);
+  end;
+  inc(fPosition,Count);
+  // And the long form must not encode what the short form could have
+  if Length_<$80 then begin
+   exit;
+  end;
+  if Length_<0 then begin
+   exit;
+  end;
+ end;
+
+ // The one check everything else rests on
+ if Length_>(fEnd-fPosition) then begin
+  exit;
+ end;
+
+ aContents.fData:=fData;
+ aContents.fPosition:=fPosition;
+ aContents.fEnd:=fPosition+Length_;
+ aContents.fElementStart:=fPosition;
+ aContents.fElementEnd:=fPosition;
+
+ inc(fPosition,Length_);
+ fElementStart:=Start;
+ fElementEnd:=fPosition;
+ result:=true;
+
+end;
+
+function TRNLASN1Reader.Read(const aTag:TRNLUInt8;out aContents:TRNLASN1Reader):boolean;
+var Tag:TRNLUInt8;
+    Saved:TRNLSizeInt;
+begin
+ Saved:=fPosition;
+ result:=ReadAny(Tag,aContents) and (Tag=aTag);
+ if not result then begin
+  // Put the cursor back, so that a caller trying one tag and then another is not left halfway
+  fPosition:=Saved;
+ end;
+end;
+
+function TRNLASN1Reader.PeekTag(out aTag:TRNLUInt8):boolean;
+begin
+ result:=(fEnd-fPosition)>=2;
+ if result then begin
+  aTag:=fData^[fPosition];
+ end else begin
+  aTag:=0;
+ end;
+end;
+
+function TRNLASN1Reader.Skip:boolean;
+var Tag:TRNLUInt8;
+    Contents:TRNLASN1Reader;
+begin
+ result:=ReadAny(Tag,Contents);
+end;
+
+function TRNLASN1Reader.LastElement(out aData:PRNLUInt8Array;out aSize:TRNLSizeInt):boolean;
+begin
+ result:=fElementEnd>fElementStart;
+ if result then begin
+  aData:=PRNLUInt8Array(TRNLPointer(@fData^[fElementStart]));
+  aSize:=fElementEnd-fElementStart;
+ end else begin
+  aData:=nil;
+  aSize:=0;
+ end;
+end;
+
+procedure TRNLASN1Reader.Rest(out aData:PRNLUInt8Array;out aSize:TRNLSizeInt);
+begin
+ aSize:=fEnd-fPosition;
+ if aSize>0 then begin
+  aData:=PRNLUInt8Array(TRNLPointer(@fData^[fPosition]));
+ end else begin
+  aData:=nil;
+  aSize:=0;
+ end;
+end;
+
+function TRNLASN1Reader.ReadObjectIdentifier(out aData:PRNLUInt8Array;out aSize:TRNLSizeInt):boolean;
+var Contents:TRNLASN1Reader;
+begin
+ result:=Read(TAG_OBJECT_IDENTIFIER,Contents);
+ if result then begin
+  Contents.Rest(aData,aSize);
+  // An empty identifier is not one
+  result:=aSize>0;
+ end else begin
+  aData:=nil;
+  aSize:=0;
+ end;
+end;
+
+function TRNLASN1Reader.ObjectIdentifierIs(const aOID;const aOIDSize:TRNLSizeInt):boolean;
+var Data:PRNLUInt8Array;
+    Size:TRNLSizeInt;
+begin
+ result:=ReadObjectIdentifier(Data,Size) and
+         (Size=aOIDSize) and
+         TRNLMemory.SecureIsEqual(Data^[0],aOID,aOIDSize);
+end;
+
+function TRNLASN1Reader.ReadBitString(out aData:PRNLUInt8Array;out aSize:TRNLSizeInt):boolean;
+var Contents:TRNLASN1Reader;
+    Whole:PRNLUInt8Array;
+    WholeSize:TRNLSizeInt;
+begin
+ aData:=nil;
+ aSize:=0;
+ result:=Read(TAG_BIT_STRING,Contents);
+ if not result then begin
+  exit;
+ end;
+ Contents.Rest(Whole,WholeSize);
+ // The first byte says how many bits of the last one are padding. A certificate holds whole bytes
+ // everywhere it uses this type, so anything but zero is refused rather than shifted away.
+ if (WholeSize<1) or (Whole^[0]<>0) then begin
+  result:=false;
+  exit;
+ end;
+ aSize:=WholeSize-1;
+ if aSize>0 then begin
+  aData:=PRNLUInt8Array(TRNLPointer(@Whole^[1]));
+ end;
+end;
+
+function TRNLASN1Reader.ReadIntegerBytes(out aData:PRNLUInt8Array;out aSize:TRNLSizeInt):boolean;
+var Contents:TRNLASN1Reader;
+begin
+ aData:=nil;
+ aSize:=0;
+ result:=Read(TAG_INTEGER,Contents);
+ if not result then begin
+  exit;
+ end;
+ Contents.Rest(aData,aSize);
+ if aSize<1 then begin
+  result:=false;
+  exit;
+ end;
+ // DER wants the shortest two's complement encoding, so a leading $00 is allowed only to keep a
+ // high bit from meaning negative, and a leading $ff only where the next byte does not already say
+ // negative. Two encodings of one number is two fingerprints of one certificate.
+ if aSize>1 then begin
+  if ((aData^[0]=$00) and ((aData^[1] and $80)=0)) or
+     ((aData^[0]=$ff) and ((aData^[1] and $80)<>0)) then begin
+   result:=false;
+  end;
+ end;
+end;
+
+function TRNLASN1Reader.ReadInteger(out aValue:TRNLInt64):boolean;
+var Data:PRNLUInt8Array;
+    Size,Index:TRNLSizeInt;
+begin
+ aValue:=0;
+ result:=ReadIntegerBytes(Data,Size);
+ if not result then begin
+  exit;
+ end;
+ // Refused rather than truncated. Everything this reads is small by definition - a version, a path
+ // length - and a serial number, which is not, is read as bytes instead.
+ if Size>8 then begin
+  result:=false;
+  exit;
+ end;
+ if (Data^[0] and $80)<>0 then begin
+  aValue:=-1;
+ end;
+ for Index:=0 to Size-1 do begin
+  aValue:=(aValue shl 8) or TRNLInt64(Data^[Index]);
+ end;
+end;
+
+function TRNLASN1Reader.ReadBoolean(out aValue:boolean):boolean;
+var Contents:TRNLASN1Reader;
+    Data:PRNLUInt8Array;
+    Size:TRNLSizeInt;
+begin
+ aValue:=false;
+ result:=Read(TAG_BOOLEAN,Contents);
+ if not result then begin
+  exit;
+ end;
+ Contents.Rest(Data,Size);
+ // DER has exactly two encodings of a boolean, $00 and $ff. BER has two hundred and fifty six.
+ if (Size<>1) or ((Data^[0]<>$00) and (Data^[0]<>$ff)) then begin
+  result:=false;
+  exit;
+ end;
+ aValue:=Data^[0]=$ff;
+end;
+
+class function TRNLASN1Reader.DaysFromCivil(const aYear,aMonth,aDay:TRNLInt64):TRNLInt64;
+var Year,Era,YearOfEra,DayOfYear,DayOfEra,Shifted:TRNLInt64;
+begin
+ // Days since 1 January 1970, without a table and without a loop over years. March is treated as
+ // the first month so that the leap day lands at the end of the year and the month lengths become
+ // the arithmetic progression the division below relies on.
+ Year:=aYear;
+ if aMonth<=2 then begin
+  dec(Year);
+ end;
+ if Year>=0 then begin
+  Era:=Year div 400;
+ end else begin
+  Era:=(Year-399) div 400;
+ end;
+ YearOfEra:=Year-(Era*400);
+ if aMonth>2 then begin
+  Shifted:=aMonth-3;
+ end else begin
+  Shifted:=aMonth+9;
+ end;
+ DayOfYear:=(((153*Shifted)+2) div 5)+aDay-1;
+ DayOfEra:=(YearOfEra*365)+(YearOfEra div 4)-(YearOfEra div 100)+DayOfYear;
+ result:=(Era*146097)+DayOfEra-719468;
+end;
+
+function TRNLASN1Reader.ReadTime(out aSecondsSinceUnixEpoch:TRNLInt64):boolean;
+var Contents:TRNLASN1Reader;
+    Data:PRNLUInt8Array;
+    Size,Index,Offset:TRNLSizeInt;
+    Tag:TRNLUInt8;
+    Year,Month,Day,Hour,Minute,Second:TRNLInt64;
+    Saved:TRNLSizeInt;
+
+ function TwoDigits(const aAt:TRNLSizeInt):TRNLInt64;
+ begin
+  result:=(TRNLInt64(Data^[aAt]-TRNLUInt8(Ord('0')))*10)+TRNLInt64(Data^[aAt+1]-TRNLUInt8(Ord('0')));
+ end;
+
+begin
+
+ result:=false;
+ aSecondsSinceUnixEpoch:=0;
+
+ Saved:=fPosition;
+ if not ReadAny(Tag,Contents) then begin
+  exit;
+ end;
+ if (Tag<>TAG_UTC_TIME) and (Tag<>TAG_GENERALIZED_TIME) then begin
+  fPosition:=Saved;
+  exit;
+ end;
+
+ Contents.Rest(Data,Size);
+
+ if Tag=TAG_UTC_TIME then begin
+  // YYMMDDHHMMSSZ, and DER allows no other shape: no local time, no offset, no missing seconds
+  if Size<>13 then begin
+   exit;
+  end;
+  Offset:=0;
+ end else begin
+  // YYYYMMDDHHMMSSZ
+  if Size<>15 then begin
+   exit;
+  end;
+  Offset:=2;
+ end;
+
+ for Index:=0 to (Size-2) do begin
+  if (Data^[Index]<TRNLUInt8(Ord('0'))) or (Data^[Index]>TRNLUInt8(Ord('9'))) then begin
+   exit;
+  end;
+ end;
+ if Data^[Size-1]<>TRNLUInt8(Ord('Z')) then begin
+  exit;
+ end;
+
+ if Tag=TAG_UTC_TIME then begin
+  Year:=TwoDigits(0);
+  // RFC 5280 section 4.1.2.5.1: below fifty is this century, from fifty on it is the last one
+  if Year<50 then begin
+   inc(Year,2000);
+  end else begin
+   inc(Year,1900);
+  end;
+ end else begin
+  Year:=(TwoDigits(0)*100)+TwoDigits(2);
+ end;
+
+ Month:=TwoDigits(Offset+2);
+ Day:=TwoDigits(Offset+4);
+ Hour:=TwoDigits(Offset+6);
+ Minute:=TwoDigits(Offset+8);
+ Second:=TwoDigits(Offset+10);
+
+ // A date which does not exist is a date this code refuses to place on a timeline. Leap seconds
+ // reach sixty, which is why the second goes to sixty rather than fifty nine.
+ if (Month<1) or (Month>12) or (Day<1) or (Day>31) or
+    (Hour>23) or (Minute>59) or (Second>60) then begin
+  exit;
+ end;
+
+ aSecondsSinceUnixEpoch:=(DaysFromCivil(Year,Month,Day)*86400)+(Hour*3600)+(Minute*60)+Second;
+ result:=true;
+
+end;
+
+// The object identifiers which occur, as encoded content bytes without the tag and the length. They
+// are compared as bytes rather than decoded into arc numbers, because decoding buys nothing here and
+// costs a second thing to get wrong.
+const RNLX509OIDECPublicKey:array[0..6] of TRNLUInt8=
+       ($2a,$86,$48,$ce,$3d,$02,$01);                     // 1.2.840.10045.2.1
+      RNLX509OIDPrime256v1:array[0..7] of TRNLUInt8=
+       ($2a,$86,$48,$ce,$3d,$03,$01,$07);                 // 1.2.840.10045.3.1.7
+      RNLX509OIDSecp384r1:array[0..4] of TRNLUInt8=
+       ($2b,$81,$04,$00,$22);                             // 1.3.132.0.34
+      RNLX509OIDECDSAWithSHA256:array[0..7] of TRNLUInt8=
+       ($2a,$86,$48,$ce,$3d,$04,$03,$02);                 // 1.2.840.10045.4.3.2
+      RNLX509OIDECDSAWithSHA384:array[0..7] of TRNLUInt8=
+       ($2a,$86,$48,$ce,$3d,$04,$03,$03);                 // 1.2.840.10045.4.3.3
+      RNLX509OIDKeyUsage:array[0..2] of TRNLUInt8=
+       ($55,$1d,$0f);                                     // 2.5.29.15
+      RNLX509OIDSubjectAltName:array[0..2] of TRNLUInt8=
+       ($55,$1d,$11);                                     // 2.5.29.17
+      RNLX509OIDBasicConstraints:array[0..2] of TRNLUInt8=
+       ($55,$1d,$13);                                     // 2.5.29.19
+      RNLX509OIDExtendedKeyUsage:array[0..2] of TRNLUInt8=
+       ($55,$1d,$25);                                     // 2.5.29.37
+      RNLX509OIDServerAuthentication:array[0..7] of TRNLUInt8=
+       ($2b,$06,$01,$05,$05,$07,$03,$01);                 // 1.3.6.1.5.5.7.3.1
+
+function TRNLX509Certificate.Parse(const aData;const aDataSize:TRNLSizeUInt):boolean;
+var Outer,Certificate,TBS,Contents,Inner,Algorithm,Extensions,Extension:TRNLASN1Reader;
+    OID:PRNLUInt8Array;
+    OIDSize:TRNLSizeInt;
+    Tag:TRNLUInt8;
+
+ // AlgorithmIdentifier, of which only the identifier matters here
+ function ReadSignatureAlgorithm(var aReader:TRNLASN1Reader;
+                                 out aAlgorithm:TRNLX509SignatureAlgorithm):boolean;
+ var Sequence:TRNLASN1Reader;
+     Data:PRNLUInt8Array;
+     Size:TRNLSizeInt;
+ begin
+  aAlgorithm:=RNL_X509_SIGNATURE_ALGORITHM_UNSUPPORTED;
+  result:=aReader.Read(TRNLASN1Reader.TAG_SEQUENCE,Sequence) and
+          Sequence.ReadObjectIdentifier(Data,Size);
+  if not result then begin
+   exit;
+  end;
+  if (Size=TRNLSizeInt(SizeOf(RNLX509OIDECDSAWithSHA256))) and
+     TRNLMemory.SecureIsEqual(Data^[0],RNLX509OIDECDSAWithSHA256,Size) then begin
+   aAlgorithm:=RNL_X509_SIGNATURE_ALGORITHM_ECDSA_SHA256;
+  end else if (Size=TRNLSizeInt(SizeOf(RNLX509OIDECDSAWithSHA384))) and
+              TRNLMemory.SecureIsEqual(Data^[0],RNLX509OIDECDSAWithSHA384,Size) then begin
+   aAlgorithm:=RNL_X509_SIGNATURE_ALGORITHM_ECDSA_SHA384;
+  end;
+  // The parameters, if any, are not read: for ECDSA they are absent, and for anything else this
+  // client does not speak the algorithm anyway
+ end;
+
+ function ReadExtensions:boolean;
+ var Value,Sequence,Usage:TRNLASN1Reader;
+     Data:PRNLUInt8Array;
+     Size:TRNLSizeInt;
+     Critical,Known:boolean;
+ begin
+
+  result:=false;
+
+  while not Extensions.AtEnd do begin
+
+   if not Extensions.Read(TRNLASN1Reader.TAG_SEQUENCE,Extension) then begin
+    exit;
+   end;
+   if not Extension.ReadObjectIdentifier(OID,OIDSize) then begin
+    exit;
+   end;
+
+   Critical:=false;
+   if Extension.PeekTag(Tag) and (Tag=TRNLASN1Reader.TAG_BOOLEAN) then begin
+    if not Extension.ReadBoolean(Critical) then begin
+     exit;
+    end;
+    // DER says a DEFAULT value is not encoded at all, so an explicit FALSE here is a second
+    // encoding of the same certificate
+    if not Critical then begin
+     exit;
+    end;
+   end;
+
+   if not Extension.Read(TRNLASN1Reader.TAG_OCTET_STRING,Value) then begin
+    exit;
+   end;
+
+   Known:=false;
+
+   if (OIDSize=TRNLSizeInt(SizeOf(RNLX509OIDBasicConstraints))) and
+      TRNLMemory.SecureIsEqual(OID^[0],RNLX509OIDBasicConstraints,OIDSize) then begin
+    Known:=true;
+    HasBasicConstraints:=true;
+    if not Value.Read(TRNLASN1Reader.TAG_SEQUENCE,Sequence) then begin
+     exit;
+    end;
+    if Sequence.PeekTag(Tag) and (Tag=TRNLASN1Reader.TAG_BOOLEAN) then begin
+     if not Sequence.ReadBoolean(IsCertificateAuthority) then begin
+      exit;
+     end;
+     if not IsCertificateAuthority then begin
+      exit;
+     end;
+    end;
+    if Sequence.PeekTag(Tag) and (Tag=TRNLASN1Reader.TAG_INTEGER) then begin
+     if not Sequence.ReadInteger(PathLengthConstraint) then begin
+      exit;
+     end;
+     if PathLengthConstraint<0 then begin
+      exit;
+     end;
+     HasPathLengthConstraint:=true;
+    end;
+
+   end else if (OIDSize=TRNLSizeInt(SizeOf(RNLX509OIDKeyUsage))) and
+               TRNLMemory.SecureIsEqual(OID^[0],RNLX509OIDKeyUsage,OIDSize) then begin
+    Known:=true;
+    HasKeyUsage:=true;
+    // A BIT STRING with unused bits in its last byte, which is the one place a certificate really
+    // does use them - so the padding is taken off by masking rather than refused
+    if not Value.Read(TRNLASN1Reader.TAG_BIT_STRING,Sequence) then begin
+     exit;
+    end;
+    Sequence.Rest(Data,Size);
+    if (Size<2) or (Data^[0]>7) then begin
+     exit;
+    end;
+    KeyUsage:=TRNLUInt16(Data^[1]) shl 8;
+    if Size>=3 then begin
+     KeyUsage:=KeyUsage or TRNLUInt16(Data^[2]);
+    end;
+
+   end else if (OIDSize=TRNLSizeInt(SizeOf(RNLX509OIDExtendedKeyUsage))) and
+               TRNLMemory.SecureIsEqual(OID^[0],RNLX509OIDExtendedKeyUsage,OIDSize) then begin
+    Known:=true;
+    HasExtendedKeyUsage:=true;
+    if not Value.Read(TRNLASN1Reader.TAG_SEQUENCE,Sequence) then begin
+     exit;
+    end;
+    while not Sequence.AtEnd do begin
+     if not Sequence.ReadObjectIdentifier(Data,Size) then begin
+      exit;
+     end;
+     if (Size=TRNLSizeInt(SizeOf(RNLX509OIDServerAuthentication))) and
+        TRNLMemory.SecureIsEqual(Data^[0],RNLX509OIDServerAuthentication,Size) then begin
+      AllowsServerAuthentication:=true;
+     end;
+    end;
+
+   end else if (OIDSize=TRNLSizeInt(SizeOf(RNLX509OIDSubjectAltName))) and
+               TRNLMemory.SecureIsEqual(OID^[0],RNLX509OIDSubjectAltName,OIDSize) then begin
+    Known:=true;
+    if not Value.Read(TRNLASN1Reader.TAG_SEQUENCE,Sequence) then begin
+     exit;
+    end;
+    // Kept as the encoded GeneralNames and walked when a name is matched, rather than taken apart
+    // into a list here. There is nothing to gain from a second representation of it.
+    Sequence.Rest(SubjectAlternativeNames,SubjectAlternativeNamesSize);
+   end;
+
+   // An extension marked critical which this code does not understand is a constraint it cannot
+   // honour, and honouring it by ignoring it is exactly the failure RFC 5280 section 4.2 forbids
+   if Critical and not Known then begin
+    exit;
+   end;
+
+   if not Extension.AtEnd then begin
+    exit;
+   end;
+
+  end;
+
+  result:=true;
+
+ end;
+
+var TBSAlgorithm:TRNLX509SignatureAlgorithm;
+    Data:PRNLUInt8Array;
+    Size:TRNLSizeInt;
+begin
+
+ result:=false;
+ FillChar(self,SizeOf(TRNLX509Certificate),#0);
+ Version:=1;
+ PathLengthConstraint:=-1;
+
+ Outer.Initialize(aData,aDataSize);
+ if not Outer.Read(TRNLASN1Reader.TAG_SEQUENCE,Certificate) then begin
+  exit;
+ end;
+ // Nothing may follow the certificate. A trailing byte is a second certificate as far as a
+ // fingerprint is concerned.
+ if not Outer.AtEnd then begin
+  exit;
+ end;
+
+ if not Certificate.Read(TRNLASN1Reader.TAG_SEQUENCE,TBS) then begin
+  exit;
+ end;
+ // The whole tbsCertificate, tag and length included, which is what the signature covers
+ if not Certificate.LastElement(TBSCertificate,TBSCertificateSize) then begin
+  exit;
+ end;
+
+ if not ReadSignatureAlgorithm(Certificate,SignatureAlgorithm) then begin
+  exit;
+ end;
+ if SignatureAlgorithm=RNL_X509_SIGNATURE_ALGORITHM_ECDSA_SHA256 then begin
+  SignatureElementSize:=TRNLP256.ElementSize;
+ end else if SignatureAlgorithm=RNL_X509_SIGNATURE_ALGORITHM_ECDSA_SHA384 then begin
+  // The digest says SHA-384, the curve of the issuer's key says how wide r and s are, and the two
+  // are not the same question. P-384 is the wider of the two this code knows, so it is what the
+  // components are read into; a narrower pair simply arrives with leading zeros.
+  SignatureElementSize:=TRNLP384.ElementSize;
+ end else begin
+  exit;
+ end;
+
+ if not Certificate.ReadBitString(Data,Size) then begin
+  exit;
+ end;
+ if not TRNLX509.DecodeSignature(Data^[0],Size,SignatureElementSize,
+                                 SignatureR,SignatureS) then begin
+  exit;
+ end;
+ if not Certificate.AtEnd then begin
+  exit;
+ end;
+
+ // tbsCertificate itself
+ if TBS.PeekTag(Tag) and (Tag=TRNLASN1Reader.TAG_CONTEXT_0) then begin
+  if not TBS.Read(TRNLASN1Reader.TAG_CONTEXT_0,Contents) then begin
+   exit;
+  end;
+  if not Contents.ReadInteger(Version) then begin
+   exit;
+  end;
+  // Encoded as the number minus one, so v3 travels as two
+  inc(Version);
+  if (Version<2) or (Version>3) or not Contents.AtEnd then begin
+   exit;
+  end;
+ end;
+
+ // serialNumber, read only to step over it. Its value decides nothing here, and a certificate is
+ // told from another by its bytes rather than by a number its issuer chose.
+ if not TBS.ReadIntegerBytes(Data,Size) then begin
+  exit;
+ end;
+
+ // The algorithm named inside has to be the one named outside, or a signature could be verified
+ // under one algorithm while claiming another
+ if not ReadSignatureAlgorithm(TBS,TBSAlgorithm) then begin
+  exit;
+ end;
+ if TBSAlgorithm<>SignatureAlgorithm then begin
+  exit;
+ end;
+
+ if not TBS.Read(TRNLASN1Reader.TAG_SEQUENCE,Contents) then begin
+  exit;
+ end;
+ if not TBS.LastElement(Issuer,IssuerSize) then begin
+  exit;
+ end;
+
+ if not TBS.Read(TRNLASN1Reader.TAG_SEQUENCE,Contents) then begin
+  exit;
+ end;
+ if not (Contents.ReadTime(NotBefore) and Contents.ReadTime(NotAfter) and Contents.AtEnd) then begin
+  exit;
+ end;
+ if NotAfter<NotBefore then begin
+  exit;
+ end;
+
+ if not TBS.Read(TRNLASN1Reader.TAG_SEQUENCE,Contents) then begin
+  exit;
+ end;
+ if not TBS.LastElement(Subject,SubjectSize) then begin
+  exit;
+ end;
+
+ // subjectPublicKeyInfo
+ if not TBS.Read(TRNLASN1Reader.TAG_SEQUENCE,Contents) then begin
+  exit;
+ end;
+ if not Contents.Read(TRNLASN1Reader.TAG_SEQUENCE,Algorithm) then begin
+  exit;
+ end;
+ if not Algorithm.ObjectIdentifierIs(RNLX509OIDECPublicKey,SizeOf(RNLX509OIDECPublicKey)) then begin
+  exit;
+ end;
+ // The named curve travels as the parameters of the algorithm, and an EC key without one is a key
+ // whose curve this code would have to guess at
+ if not Algorithm.ReadObjectIdentifier(Data,Size) then begin
+  exit;
+ end;
+ if (Size=TRNLSizeInt(SizeOf(RNLX509OIDPrime256v1))) and
+    TRNLMemory.SecureIsEqual(Data^[0],RNLX509OIDPrime256v1,Size) then begin
+  PublicKeyCurve:=RNL_X509_PUBLIC_KEY_CURVE_P256;
+  PublicKeySize:=TRNLP256.PointSize;
+ end else if (Size=TRNLSizeInt(SizeOf(RNLX509OIDSecp384r1))) and
+             TRNLMemory.SecureIsEqual(Data^[0],RNLX509OIDSecp384r1,Size) then begin
+  PublicKeyCurve:=RNL_X509_PUBLIC_KEY_CURVE_P384;
+  PublicKeySize:=TRNLP384.PointSize;
+ end else begin
+  exit;
+ end;
+ if not Algorithm.AtEnd then begin
+  exit;
+ end;
+ if not Contents.ReadBitString(Data,Size) then begin
+  exit;
+ end;
+ if Size<>PublicKeySize then begin
+  exit;
+ end;
+ Move(Data^[0],PublicKey[0],Size);
+ if not Contents.AtEnd then begin
+  exit;
+ end;
+
+ // The two unique identifiers of version two, which nothing issues any more but which have to be
+ // stepped over rather than tripped on
+ if TBS.PeekTag(Tag) and (Tag=TRNLASN1Reader.TAG_CONTEXT_1) then begin
+  if not TBS.Skip then begin
+   exit;
+  end;
+ end;
+ if TBS.PeekTag(Tag) and (Tag=TRNLASN1Reader.TAG_CONTEXT_2) then begin
+  if not TBS.Skip then begin
+   exit;
+  end;
+ end;
+
+ if TBS.PeekTag(Tag) and (Tag=TRNLASN1Reader.TAG_CONTEXT_3) then begin
+  if not TBS.Read(TRNLASN1Reader.TAG_CONTEXT_3,Contents) then begin
+   exit;
+  end;
+  if not Contents.Read(TRNLASN1Reader.TAG_SEQUENCE,Extensions) then begin
+   exit;
+  end;
+  if not Contents.AtEnd then begin
+   exit;
+  end;
+  if not ReadExtensions then begin
+   exit;
+  end;
+  // Extensions are a version three thing and nothing else may carry them
+  if Version<3 then begin
+   exit;
+  end;
+ end;
+
+ result:=TBS.AtEnd;
+
+end;
+
+class function TRNLX509.DecodeSignature(const aData;const aDataSize:TRNLSizeInt;
+                                        const aElementSize:TRNLSizeInt;
+                                        out aR,aS_):boolean;
+var Reader,Sequence:TRNLASN1Reader;
+    Data:PRNLUInt8Array;
+    Size:TRNLSizeInt;
+
+ // One INTEGER into the right hand end of a buffer of the curve's width
+ function ReadComponent(out aTarget):boolean;
+ begin
+  result:=false;
+  if not Sequence.ReadIntegerBytes(Data,Size) then begin
+   exit;
+  end;
+  // A leading zero is there to keep the top bit from meaning negative; past it the number is what
+  // it is. Anything wider than the curve is not a component of a signature over it.
+  if (Size>0) and (Data^[0]=0) then begin
+   inc(TRNLPtrUInt(Data),1);
+   dec(Size);
+  end;
+  if (Size<1) or (Size>aElementSize) then begin
+   exit;
+  end;
+  Move(Data^[0],PRNLUInt8Array(TRNLPointer(@aTarget))^[aElementSize-Size],Size);
+  result:=true;
+ end;
+
+begin
+ result:=false;
+ FillChar(aR,aElementSize,#0);
+ FillChar(aS_,aElementSize,#0);
+ Reader.Initialize(aData,aDataSize);
+ if not Reader.Read(TRNLASN1Reader.TAG_SEQUENCE,Sequence) then begin
+  exit;
+ end;
+ if not (ReadComponent(aR) and ReadComponent(aS_)) then begin
+  exit;
+ end;
+ // Nothing may follow the two integers, inside the sequence or after it
+ result:=Sequence.AtEnd and Reader.AtEnd;
+end;
+
+class function TRNLX509.VerifySignature(const aCertificate,aIssuer:TRNLX509Certificate):boolean;
+var Digest:TRNLSHA384Hash;
+    DigestSize,IssuerElementSize,Offset,Index:TRNLSizeInt;
+begin
+
+ result:=false;
+
+ if (aCertificate.TBSCertificateSize<1) or not assigned(aCertificate.TBSCertificate) then begin
+  exit;
+ end;
+
+ case aCertificate.SignatureAlgorithm of
+  RNL_X509_SIGNATURE_ALGORITHM_ECDSA_SHA256:begin
+   TRNLSHA256.Process(Digest,aCertificate.TBSCertificate^[0],aCertificate.TBSCertificateSize);
+   DigestSize:=SizeOf(TRNLSHA256Hash);
+  end;
+  RNL_X509_SIGNATURE_ALGORITHM_ECDSA_SHA384:begin
+   TRNLSHA384.Process(Digest,aCertificate.TBSCertificate^[0],aCertificate.TBSCertificateSize);
+   DigestSize:=SizeOf(TRNLSHA384Hash);
+  end;
+  else begin
+   exit;
+  end;
+ end;
+
+ case aIssuer.PublicKeyCurve of
+  RNL_X509_PUBLIC_KEY_CURVE_P256:begin
+   IssuerElementSize:=TRNLP256.ElementSize;
+  end;
+  RNL_X509_PUBLIC_KEY_CURVE_P384:begin
+   IssuerElementSize:=TRNLP384.ElementSize;
+  end;
+  else begin
+   exit;
+  end;
+ end;
+
+ // r and s were read into a buffer as wide as the digest's curve would need, right aligned. The
+ // issuer's curve decides how wide they really are, and anything sticking out to the left of that
+ // has to be zero - a component wider than the group order is not a component of a signature over it.
+ Offset:=aCertificate.SignatureElementSize-IssuerElementSize;
+ if Offset<0 then begin
+  exit;
+ end;
+ for Index:=0 to Offset-1 do begin
+  if (aCertificate.SignatureR[Index]<>0) or (aCertificate.SignatureS[Index]<>0) then begin
+   exit;
+  end;
+ end;
+
+ case aIssuer.PublicKeyCurve of
+  RNL_X509_PUBLIC_KEY_CURVE_P256:begin
+   result:=TRNLP256.VerifySignature(aIssuer.PublicKey,aIssuer.PublicKeySize,
+                                    Digest,DigestSize,
+                                    aCertificate.SignatureR[Offset],aCertificate.SignatureS[Offset]);
+  end;
+  else begin
+   result:=TRNLP384.VerifySignature(aIssuer.PublicKey,aIssuer.PublicKeySize,
+                                    Digest,DigestSize,
+                                    aCertificate.SignatureR[Offset],aCertificate.SignatureS[Offset]);
+  end;
+ end;
+
+end;
+
+class function TRNLX509.IsIssuedBy(const aCertificate,aIssuer:TRNLX509Certificate):boolean;
+begin
+ result:=(aCertificate.IssuerSize>0) and
+         (aCertificate.IssuerSize=aIssuer.SubjectSize) and
+         assigned(aCertificate.Issuer) and assigned(aIssuer.Subject) and
+         TRNLMemory.SecureIsEqual(aCertificate.Issuer^[0],aIssuer.Subject^[0],aCertificate.IssuerSize);
+end;
+
+class function TRNLX509.VerifyChain(const aChain:TChainEntries;const aChainLength:TRNLSizeInt;
+                                    const aTrustedRoots:TChainEntries;const aCountTrustedRoots:TRNLSizeInt;
+                                    const aHostName:TRNLRawByteString;
+                                    const aNowSecondsSinceUnixEpoch:TRNLInt64;
+                                    out aLeaf:TRNLX509Certificate):TRNLX509Verdict;
+var Parsed:array[0..MaximumChainLength-1] of TRNLX509Certificate;
+    Root:TRNLX509Certificate;
+    Index,RootIndex,ChainLength:TRNLSizeInt;
+    Found:boolean;
+
+ // What a certificate authority has to be before anything below it counts for something.
+ // aIntermediatesBelow is how many non self issued certificates sit under it in this path, which is
+ // what RFC 5280 section 6.1.4 measures a path length constraint against.
+ function AuthorityIsUsable(const aAuthority:TRNLX509Certificate;
+                            const aIntermediatesBelow:TRNLSizeInt):TRNLX509Verdict;
+ begin
+  result:=RNL_X509_VERDICT_ACCEPTED;
+  // Version three says so with basicConstraints. A certificate without them is not a certificate
+  // authority, whatever else it says about itself.
+  if not (aAuthority.HasBasicConstraints and aAuthority.IsCertificateAuthority) then begin
+   result:=RNL_X509_VERDICT_NOT_A_CERTIFICATE_AUTHORITY;
+  end else if aAuthority.HasKeyUsage and
+              ((aAuthority.KeyUsage and TRNLX509Certificate.KEY_USAGE_KEY_CERT_SIGN)=0) then begin
+   // Present and not saying keyCertSign is a refusal; absent is silence, and RFC 5280 treats
+   // silence as no restriction
+   result:=RNL_X509_VERDICT_MISSING_KEY_CERT_SIGN;
+  end else if aAuthority.HasPathLengthConstraint and
+              (TRNLInt64(aIntermediatesBelow)>aAuthority.PathLengthConstraint) then begin
+   result:=RNL_X509_VERDICT_PATH_TOO_LONG;
+  end;
+ end;
+
+ function StillValid(const aCertificate:TRNLX509Certificate):TRNLX509Verdict;
+ begin
+  result:=RNL_X509_VERDICT_ACCEPTED;
+  if aNowSecondsSinceUnixEpoch=0 then begin
+   // Every certificate here carries a validity period, since X.509 makes it mandatory. Without a
+   // clock there is nothing to hold it against, and waving it through is what turns the field into
+   // decoration.
+   result:=RNL_X509_VERDICT_NO_CLOCK;
+  end else if aNowSecondsSinceUnixEpoch<aCertificate.NotBefore then begin
+   result:=RNL_X509_VERDICT_NOT_YET_VALID;
+  end else if aNowSecondsSinceUnixEpoch>aCertificate.NotAfter then begin
+   result:=RNL_X509_VERDICT_EXPIRED;
+  end;
+ end;
+
+begin
+
+ FillChar(aLeaf,SizeOf(TRNLX509Certificate),#0);
+
+ if aChainLength<1 then begin
+  result:=RNL_X509_VERDICT_EMPTY_CHAIN;
+  exit;
+ end;
+ if aChainLength>MaximumChainLength then begin
+  result:=RNL_X509_VERDICT_CHAIN_TOO_LONG;
+  exit;
+ end;
+
+ // Read from the leaf upwards, and the path is however far that gets. What will not parse beyond
+ // that is surplus and is left where it lies rather than held against the sender: a real chain
+ // routinely ends with a cross signed root whose own signature is RSA, which this code cannot check
+ // and has no reason to - the root above it is trusted on its own account, not on that signature.
+ // Measured against nc-workhorse.rosseaux.com on 2026-08-03, whose fourth certificate is exactly
+ // that. RFC 5280 section 6.1 ends path validation at a trust anchor, and everything past it is
+ // extra.
+ //
+ // This can only make the accepted path shorter, never longer: every link in what is left is
+ // checked exactly as it was before, and a path which needs one of the dropped entries no longer
+ // reaches a trusted root at all.
+ ChainLength:=0;
+ while ChainLength<aChainLength do begin
+  if not Parsed[ChainLength].Parse(aChain[ChainLength].Data^[0],aChain[ChainLength].Size) then begin
+   break;
+  end;
+  inc(ChainLength);
+ end;
+ if ChainLength=0 then begin
+  // The leaf, which is never surplus
+  result:=RNL_X509_VERDICT_MALFORMED;
+  exit;
+ end;
+
+ // Every certificate in the path has to be valid now, the leaf as much as the authorities above it
+ for Index:=0 to ChainLength-1 do begin
+  result:=StillValid(Parsed[Index]);
+  if result<>RNL_X509_VERDICT_ACCEPTED then begin
+   exit;
+  end;
+ end;
+
+ // The leaf, and what it is for. An extended key usage which is present and does not name server
+ // authentication is a certificate issued for something else.
+ if Parsed[0].HasExtendedKeyUsage and not Parsed[0].AllowsServerAuthentication then begin
+  result:=RNL_X509_VERDICT_NOT_A_SERVER_CERTIFICATE;
+  exit;
+ end;
+ if not MatchesHostName(Parsed[0],aHostName) then begin
+  result:=RNL_X509_VERDICT_WRONG_HOST_NAME;
+  exit;
+ end;
+
+ // Link the path up, from the leaf towards the root
+ for Index:=0 to ChainLength-2 do begin
+  if not IsIssuedBy(Parsed[Index],Parsed[Index+1]) then begin
+   result:=RNL_X509_VERDICT_ISSUER_MISMATCH;
+   exit;
+  end;
+  // The authority is at Index+1, so the certificates between it and the leaf are the ones from 1 to
+  // Index, which is Index of them
+  result:=AuthorityIsUsable(Parsed[Index+1],Index);
+  if result<>RNL_X509_VERDICT_ACCEPTED then begin
+   exit;
+  end;
+  if not VerifySignature(Parsed[Index],Parsed[Index+1]) then begin
+   result:=RNL_X509_VERDICT_BAD_SIGNATURE;
+   exit;
+  end;
+ end;
+
+ // And anchor the top of it. Either the last entry is itself one of the trusted roots, byte for
+ // byte, or a trusted root signed it.
+ Found:=false;
+ for RootIndex:=0 to aCountTrustedRoots-1 do begin
+  if (aTrustedRoots[RootIndex].Size=aChain[ChainLength-1].Size) and
+     TRNLMemory.SecureIsEqual(aTrustedRoots[RootIndex].Data^[0],
+                              aChain[ChainLength-1].Data^[0],
+                              aTrustedRoots[RootIndex].Size) then begin
+   Found:=true;
+   break;
+  end;
+ end;
+
+ if Found then begin
+  // A root which is in the store is trusted because it is in the store, and its own signature says
+  // nothing - it signed itself. What still has to hold is that it is allowed to have signed what is
+  // under it.
+  if ChainLength>1 then begin
+   result:=AuthorityIsUsable(Parsed[ChainLength-1],ChainLength-2);
+   if result<>RNL_X509_VERDICT_ACCEPTED then begin
+    exit;
+   end;
+  end;
+  aLeaf:=Parsed[0];
+  result:=RNL_X509_VERDICT_ACCEPTED;
+  exit;
+ end;
+
+ for RootIndex:=0 to aCountTrustedRoots-1 do begin
+  if not Root.Parse(aTrustedRoots[RootIndex].Data^[0],aTrustedRoots[RootIndex].Size) then begin
+   continue;
+  end;
+  if not IsIssuedBy(Parsed[ChainLength-1],Root) then begin
+   continue;
+  end;
+  // The root sits one above the last entry, so everything from 1 to ChainLength-1 is between it
+  // and the leaf
+  if AuthorityIsUsable(Root,ChainLength-1)<>RNL_X509_VERDICT_ACCEPTED then begin
+   continue;
+  end;
+  if StillValid(Root)<>RNL_X509_VERDICT_ACCEPTED then begin
+   continue;
+  end;
+  if VerifySignature(Parsed[ChainLength-1],Root) then begin
+   aLeaf:=Parsed[0];
+   result:=RNL_X509_VERDICT_ACCEPTED;
+   exit;
+  end;
+ end;
+
+ result:=RNL_X509_VERDICT_UNTRUSTED_ROOT;
+
+end;
+
+class function TRNLX509.MatchesHostName(const aCertificate:TRNLX509Certificate;
+                                        const aHostName:TRNLRawByteString):boolean;
+var Names:TRNLASN1Reader;
+    Presented:PRNLUInt8Array;
+    PresentedSize,Index,HostSize:TRNLSizeInt;
+    Tag:TRNLUInt8;
+    Contents:TRNLASN1Reader;
+
+ function LowerCase_(const aValue:TRNLUInt8):TRNLUInt8;
+ begin
+  // ASCII only, and on purpose. A host name is not text here; folding anything beyond A to Z is how
+  // two names which are not the same come to compare equal.
+  if (aValue>=TRNLUInt8(Ord('A'))) and (aValue<=TRNLUInt8(Ord('Z'))) then begin
+   result:=aValue+(TRNLUInt8(Ord('a'))-TRNLUInt8(Ord('A')));
+  end else begin
+   result:=aValue;
+  end;
+ end;
+
+ // Everything from a given position, compared without regard to case
+ function TailMatches(const aPresentedAt,aHostAt:TRNLSizeInt):boolean;
+ var Position:TRNLSizeInt;
+ begin
+  result:=(PresentedSize-aPresentedAt)=(HostSize-aHostAt);
+  if result then begin
+   for Position:=0 to (PresentedSize-aPresentedAt)-1 do begin
+    if LowerCase_(Presented^[aPresentedAt+Position])<>
+       LowerCase_(TRNLUInt8(aHostName[(aHostAt+Position)+1])) then begin
+     result:=false;
+     break;
+    end;
+   end;
+  end;
+ end;
+
+ function OneNameMatches:boolean;
+ var Dot,Position:TRNLSizeInt;
+ begin
+
+  result:=false;
+
+  // A name of nothing matches nothing, and a name with a zero byte in it is a name somebody wrote
+  // hoping the comparison would stop there
+  if PresentedSize<1 then begin
+   exit;
+  end;
+  for Position:=0 to PresentedSize-1 do begin
+   if Presented^[Position]=0 then begin
+    exit;
+   end;
+  end;
+
+  if (PresentedSize>=2) and
+     (Presented^[0]=TRNLUInt8(Ord('*'))) and
+     (Presented^[1]=TRNLUInt8(Ord('.'))) then begin
+
+   // RFC 6125 section 6.4.3: the wildcard is the whole of the leftmost label and matches exactly
+   // one label of the host name. So "*.example.com" covers "a.example.com" and neither
+   // "example.com" nor "a.b.example.com", and "w*.example.com" is not a wildcard at all.
+   Dot:=-1;
+   for Position:=0 to HostSize-1 do begin
+    if aHostName[Position+1]='.' then begin
+     Dot:=Position;
+     break;
+    end;
+   end;
+   if Dot<1 then begin
+    exit;
+   end;
+   // Deliberately not checked: whether the rest of the presented name is a public suffix, so that
+   // "*.co.uk" would be turned down. That rule cannot be written here - it needs the public suffix
+   // list, which is a few thousand lines that change without notice and would have to be shipped
+   // and kept current. A heuristic in its place is wrong in one direction or the other: "co.uk" and
+   // "example.com" are both two labels, and nothing in the name itself tells them apart. What is
+   // enforced is what RFC 6125 section 6.4.3 actually states, which is that the wildcard is the
+   // whole of the leftmost label and stands for exactly one label.
+   result:=TailMatches(1,Dot);
+
+  end else begin
+   result:=TailMatches(0,0);
+  end;
+
+ end;
+
+begin
+
+ result:=false;
+ HostSize:=Length(aHostName);
+ if (HostSize<1) or
+    (aCertificate.SubjectAlternativeNamesSize<1) or
+    not assigned(aCertificate.SubjectAlternativeNames) then begin
+  exit;
+ end;
+ for Index:=1 to HostSize do begin
+  if aHostName[Index]=#0 then begin
+   exit;
+  end;
+ end;
+
+ Names.Initialize(aCertificate.SubjectAlternativeNames^[0],aCertificate.SubjectAlternativeNamesSize);
+ while not Names.AtEnd do begin
+  if not Names.ReadAny(Tag,Contents) then begin
+   result:=false;
+   exit;
+  end;
+  if Tag=TRNLX509Certificate.GENERAL_NAME_DNS then begin
+   Contents.Rest(Presented,PresentedSize);
+   if OneNameMatches then begin
+    result:=true;
+    exit;
+   end;
+  end;
+ end;
+
+end;
+
+class function TRNLP384.Curve:TRNLECCurve;
+begin
+ result.Limbs:=Limbs;
+ result.ElementSize:=ElementSize;
+ result.FieldModulus:=FieldModulus;
+ result.FieldMontgomeryOne:=FieldMontgomeryOne;
+ result.FieldMontgomeryRSquared:=FieldMontgomeryRSquared;
+ result.FieldNegativeInverse:=FieldNegativeInverse;
+ result.OrderModulus:=OrderModulus;
+ result.OrderMontgomeryOne:=OrderMontgomeryOne;
+ result.OrderMontgomeryRSquared:=OrderMontgomeryRSquared;
+ result.OrderNegativeInverse:=OrderNegativeInverse;
+ result.CurveB:=CurveB;
+ result.BaseX:=BaseX;
+ result.BaseY:=BaseY;
+end;
+
+class function TRNLP384.DecodePoint(out aPoint:TRNLECPoint;
+                                    const aData;const aDataSize:TRNLSizeUInt):boolean;
+begin
+ result:=TRNLEC.DecodePoint(aPoint,aData,aDataSize,Curve);
+end;
+
+class procedure TRNLP384.GenerateKeyPair(const aRandomGenerator:TRNLRandomGenerator;
+                                         out aPrivateKey;out aPublicKey);
+begin
+ TRNLEC.GenerateKeyPair(aRandomGenerator,aPrivateKey,aPublicKey,Curve);
+end;
+
+class function TRNLP384.SharedSecret(out aSecret;
+                                     const aPrivateKey;
+                                     const aPeerPublicKey;const aPeerPublicKeySize:TRNLSizeUInt):boolean;
+begin
+ result:=TRNLEC.SharedSecret(aSecret,aPrivateKey,aPeerPublicKey,aPeerPublicKeySize,Curve);
+end;
+
+class function TRNLP384.VerifySignature(const aPublicKey;const aPublicKeySize:TRNLSizeUInt;
+                                        const aHash;const aHashSize:TRNLSizeUInt;
+                                        const aSignatureR;const aSignatureS):boolean;
+begin
+ result:=TRNLEC.VerifySignature(aPublicKey,aPublicKeySize,aHash,aHashSize,
+                                aSignatureR,aSignatureS,Curve);
+end;
+
+
+procedure TRNLTLSReader.Initialize(const aData;const aDataSize:TRNLSizeInt);
+begin
+ fData:=PRNLUInt8Array(TRNLPointer(@aData));
+ fPosition:=0;
+ fEnd:=aDataSize;
+end;
+
+function TRNLTLSReader.Remaining:TRNLSizeInt;
+begin
+ result:=fEnd-fPosition;
+end;
+
+function TRNLTLSReader.AtEnd:boolean;
+begin
+ result:=fPosition>=fEnd;
+end;
+
+function TRNLTLSReader.Mark:TRNLSizeInt;
+begin
+ result:=fPosition;
+end;
+
+procedure TRNLTLSReader.Since(const aMark:TRNLSizeInt;out aData:PRNLUInt8Array;out aSize:TRNLSizeInt);
+begin
+ aData:=PRNLUInt8Array(TRNLPointer(@fData^[aMark]));
+ aSize:=fPosition-aMark;
+end;
+
+function TRNLTLSReader.ReadUInt8(out aValue:TRNLUInt8):boolean;
+begin
+ aValue:=0;
+ result:=(fEnd-fPosition)>=1;
+ if result then begin
+  aValue:=fData^[fPosition];
+  inc(fPosition);
+ end;
+end;
+
+function TRNLTLSReader.ReadUInt16(out aValue:TRNLUInt16):boolean;
+begin
+ aValue:=0;
+ result:=(fEnd-fPosition)>=2;
+ if result then begin
+  aValue:=TRNLMemoryAccess.LoadBigEndianUInt16(fData^[fPosition]);
+  inc(fPosition,2);
+ end;
+end;
+
+function TRNLTLSReader.ReadUInt24(out aValue:TRNLSizeInt):boolean;
+begin
+ aValue:=0;
+ result:=(fEnd-fPosition)>=3;
+ if result then begin
+  aValue:=(TRNLSizeInt(fData^[fPosition]) shl 16) or
+          (TRNLSizeInt(fData^[fPosition+1]) shl 8) or
+          TRNLSizeInt(fData^[fPosition+2]);
+  inc(fPosition,3);
+ end;
+end;
+
+function TRNLTLSReader.ReadBytes(out aData:PRNLUInt8Array;const aSize:TRNLSizeInt):boolean;
+begin
+ aData:=nil;
+ result:=(aSize>=0) and ((fEnd-fPosition)>=aSize);
+ if result then begin
+  if aSize>0 then begin
+   aData:=PRNLUInt8Array(TRNLPointer(@fData^[fPosition]));
+  end;
+  inc(fPosition,aSize);
+ end;
+end;
+
+function TRNLTLSReader.ReadVector8(out aData:PRNLUInt8Array;out aSize:TRNLSizeInt):boolean;
+var Length_:TRNLUInt8;
+begin
+ aData:=nil;
+ aSize:=0;
+ result:=ReadUInt8(Length_);
+ if result then begin
+  aSize:=Length_;
+  result:=ReadBytes(aData,aSize);
+  if not result then begin
+   aSize:=0;
+  end;
+ end;
+end;
+
+function TRNLTLSReader.ReadVector16(out aData:PRNLUInt8Array;out aSize:TRNLSizeInt):boolean;
+var Length_:TRNLUInt16;
+begin
+ aData:=nil;
+ aSize:=0;
+ result:=ReadUInt16(Length_);
+ if result then begin
+  aSize:=Length_;
+  result:=ReadBytes(aData,aSize);
+  if not result then begin
+   aSize:=0;
+  end;
+ end;
+end;
+
+function TRNLTLSReader.ReadVector24(out aData:PRNLUInt8Array;out aSize:TRNLSizeInt):boolean;
+var Length_:TRNLSizeInt;
+begin
+ aData:=nil;
+ aSize:=0;
+ result:=ReadUInt24(Length_);
+ if result then begin
+  aSize:=Length_;
+  result:=ReadBytes(aData,aSize);
+  if not result then begin
+   aSize:=0;
+  end;
+ end;
+end;
+
+procedure TRNLTLSWriter.Initialize(out aData;const aMaximumSize:TRNLSizeInt);
+begin
+ fData:=PRNLUInt8Array(TRNLPointer(@aData));
+ fPosition:=0;
+ fEnd:=aMaximumSize;
+ fValid:=true;
+end;
+
+function TRNLTLSWriter.Valid:boolean;
+begin
+ result:=fValid;
+end;
+
+function TRNLTLSWriter.Size:TRNLSizeInt;
+begin
+ result:=fPosition;
+end;
+
+procedure TRNLTLSWriter.WriteUInt8(const aValue:TRNLUInt8);
+begin
+ if fValid and ((fEnd-fPosition)>=1) then begin
+  fData^[fPosition]:=aValue;
+  inc(fPosition);
+ end else begin
+  fValid:=false;
+ end;
+end;
+
+procedure TRNLTLSWriter.WriteUInt16(const aValue:TRNLUInt16);
+begin
+ if fValid and ((fEnd-fPosition)>=2) then begin
+  TRNLMemoryAccess.StoreBigEndianUInt16(fData^[fPosition],aValue);
+  inc(fPosition,2);
+ end else begin
+  fValid:=false;
+ end;
+end;
+
+procedure TRNLTLSWriter.WriteUInt24(const aValue:TRNLSizeInt);
+begin
+ if fValid and ((fEnd-fPosition)>=3) and (aValue>=0) and (aValue<=$ffffff) then begin
+  fData^[fPosition]:=TRNLUInt8((aValue shr 16) and $ff);
+  fData^[fPosition+1]:=TRNLUInt8((aValue shr 8) and $ff);
+  fData^[fPosition+2]:=TRNLUInt8(aValue and $ff);
+  inc(fPosition,3);
+ end else begin
+  fValid:=false;
+ end;
+end;
+
+procedure TRNLTLSWriter.WriteBytes(const aData;const aSize:TRNLSizeInt);
+begin
+ if fValid and (aSize>=0) and ((fEnd-fPosition)>=aSize) then begin
+  if aSize>0 then begin
+   Move(aData,fData^[fPosition],aSize);
+  end;
+  inc(fPosition,aSize);
+ end else begin
+  fValid:=false;
+ end;
+end;
+
+function TRNLTLSWriter.BeginVector8:TRNLSizeInt;
+begin
+ result:=fPosition;
+ WriteUInt8(0);
+end;
+
+function TRNLTLSWriter.BeginVector16:TRNLSizeInt;
+begin
+ result:=fPosition;
+ WriteUInt16(0);
+end;
+
+procedure TRNLTLSWriter.EndVector8(const aMark:TRNLSizeInt);
+var Length_:TRNLSizeInt;
+begin
+ if fValid then begin
+  Length_:=(fPosition-aMark)-1;
+  if (Length_>=0) and (Length_<=$ff) then begin
+   fData^[aMark]:=TRNLUInt8(Length_);
+  end else begin
+   fValid:=false;
+  end;
+ end;
+end;
+
+procedure TRNLTLSWriter.EndVector16(const aMark:TRNLSizeInt);
+var Length_:TRNLSizeInt;
+begin
+ if fValid then begin
+  Length_:=(fPosition-aMark)-2;
+  if (Length_>=0) and (Length_<=$ffff) then begin
+   TRNLMemoryAccess.StoreBigEndianUInt16(fData^[aMark],TRNLUInt16(Length_));
+  end else begin
+   fValid:=false;
+  end;
+ end;
+end;
+
+class procedure TRNLDTLS12Handshake.WriteHeader(out aHeader;
+                                                const aMessageType:TRNLUInt8;
+                                                const aLength:TRNLSizeInt;
+                                                const aMessageSequence:TRNLUInt16;
+                                                const aFragmentOffset,aFragmentLength:TRNLSizeInt);
+var Header:PRNLUInt8Array;
+begin
+ Header:=PRNLUInt8Array(TRNLPointer(@aHeader));
+ Header^[0]:=aMessageType;
+ // Three bytes, big endian, three times over. Written out rather than through a helper because a
+ // uint24 has no natural type and a helper for it would take a uint32 and hide the truncation.
+ Header^[1]:=TRNLUInt8((aLength shr 16) and $ff);
+ Header^[2]:=TRNLUInt8((aLength shr 8) and $ff);
+ Header^[3]:=TRNLUInt8(aLength and $ff);
+ TRNLMemoryAccess.StoreBigEndianUInt16(Header^[4],aMessageSequence);
+ Header^[6]:=TRNLUInt8((aFragmentOffset shr 16) and $ff);
+ Header^[7]:=TRNLUInt8((aFragmentOffset shr 8) and $ff);
+ Header^[8]:=TRNLUInt8(aFragmentOffset and $ff);
+ Header^[9]:=TRNLUInt8((aFragmentLength shr 16) and $ff);
+ Header^[10]:=TRNLUInt8((aFragmentLength shr 8) and $ff);
+ Header^[11]:=TRNLUInt8(aFragmentLength and $ff);
+end;
+
+class function TRNLDTLS12Handshake.ReadHeader(const aData;const aDataSize:TRNLSizeInt;
+                                              out aMessageType:TRNLUInt8;
+                                              out aLength:TRNLSizeInt;
+                                              out aMessageSequence:TRNLUInt16;
+                                              out aFragmentOffset,aFragmentLength:TRNLSizeInt):boolean;
+var Data:PRNLUInt8Array;
+begin
+
+ result:=false;
+ aMessageType:=0;
+ aLength:=0;
+ aMessageSequence:=0;
+ aFragmentOffset:=0;
+ aFragmentLength:=0;
+
+ if aDataSize<HeaderSize then begin
+  exit;
+ end;
+
+ Data:=PRNLUInt8Array(TRNLPointer(@aData));
+ aMessageType:=Data^[0];
+ aLength:=(TRNLSizeInt(Data^[1]) shl 16) or (TRNLSizeInt(Data^[2]) shl 8) or TRNLSizeInt(Data^[3]);
+ aMessageSequence:=TRNLMemoryAccess.LoadBigEndianUInt16(Data^[4]);
+ aFragmentOffset:=(TRNLSizeInt(Data^[6]) shl 16) or (TRNLSizeInt(Data^[7]) shl 8) or TRNLSizeInt(Data^[8]);
+ aFragmentLength:=(TRNLSizeInt(Data^[9]) shl 16) or (TRNLSizeInt(Data^[10]) shl 8) or TRNLSizeInt(Data^[11]);
+
+ // The fragment has to be inside its own message, and inside the buffer it arrived in. Both, and in
+ // that order: a fragment which fits the buffer but claims to end past its message would be written
+ // outside the body being assembled.
+ if (aFragmentOffset+aFragmentLength)>aLength then begin
+  exit;
+ end;
+ if aFragmentLength>(aDataSize-HeaderSize) then begin
+  exit;
+ end;
+
+ result:=true;
+
+end;
+
+class function TRNLDTLS12ClientHello.Write_(out aBody;out aBodySize:TRNLSizeInt;
+                                            const aMaximumBodySize:TRNLSizeInt;
+                                            const aRandom;
+                                            const aCookie;const aCookieSize:TRNLSizeInt;
+                                            const aPublicKey;const aPublicKeySize:TRNLSizeInt;
+                                            const aServerName:TRNLRawByteString):boolean;
+var Writer:TRNLTLSWriter;
+    Extensions,Vector,Inner:TRNLSizeInt;
+begin
+
+ aBodySize:=0;
+ if (aCookieSize<0) or (aCookieSize>MaximumCookieSize) then begin
+  result:=false;
+  exit;
+ end;
+
+ Writer.Initialize(aBody,aMaximumBodySize);
+
+ Writer.WriteUInt8(TRNLDTLS12Record.VersionMajor);
+ Writer.WriteUInt8(TRNLDTLS12Record.VersionMinor);
+ Writer.WriteBytes(aRandom,RandomSize);
+ // No session id: this client does not resume, so offering one would only invite a server to try
+ Writer.WriteUInt8(0);
+ Writer.WriteUInt8(TRNLUInt8(aCookieSize));
+ if aCookieSize>0 then begin
+  Writer.WriteBytes(aCookie,aCookieSize);
+ end;
+ Writer.WriteUInt16(2);
+ Writer.WriteUInt16(CIPHER_SUITE_ECDHE_ECDSA_CHACHA20_POLY1305);
+ // One compression method, and it is none. Compression before encryption is what CRIME was.
+ Writer.WriteUInt8(1);
+ Writer.WriteUInt8(0);
+
+ Extensions:=Writer.BeginVector16;
+
+ if Length(aServerName)>0 then begin
+  Writer.WriteUInt16(EXTENSION_SERVER_NAME);
+  Vector:=Writer.BeginVector16;
+  Inner:=Writer.BeginVector16;
+  Writer.WriteUInt8(0);
+  Writer.WriteUInt16(TRNLUInt16(Length(aServerName)));
+  Writer.WriteBytes(aServerName[1],Length(aServerName));
+  Writer.EndVector16(Inner);
+  Writer.EndVector16(Vector);
+ end;
+
+ Writer.WriteUInt16(EXTENSION_SUPPORTED_GROUPS);
+ Vector:=Writer.BeginVector16;
+ Inner:=Writer.BeginVector16;
+ Writer.WriteUInt16(NAMED_CURVE_SECP256R1);
+ Writer.WriteUInt16(NAMED_CURVE_SECP384R1);
+ Writer.EndVector16(Inner);
+ Writer.EndVector16(Vector);
+
+ Writer.WriteUInt16(EXTENSION_EC_POINT_FORMATS);
+ Vector:=Writer.BeginVector16;
+ Inner:=Writer.BeginVector8;
+ Writer.WriteUInt8(EC_POINT_FORMAT_UNCOMPRESSED);
+ Writer.EndVector8(Inner);
+ Writer.EndVector16(Vector);
+
+ Writer.WriteUInt16(EXTENSION_SIGNATURE_ALGORITHMS);
+ Vector:=Writer.BeginVector16;
+ Inner:=Writer.BeginVector16;
+ Writer.WriteUInt16(SIGNATURE_ECDSA_SECP256R1_SHA256);
+ Writer.WriteUInt16(SIGNATURE_ECDSA_SECP384R1_SHA384);
+ Writer.EndVector16(Inner);
+ Writer.EndVector16(Vector);
+
+ // RFC 7627. It costs four bytes and binds the master secret to the whole handshake instead of to
+ // the two randoms, which is what closes the triple handshake hole. A server which does not echo it
+ // simply does not get it.
+ Writer.WriteUInt16(EXTENSION_EXTENDED_MASTER_SECRET);
+ Writer.WriteUInt16(0);
+
+ Writer.EndVector16(Extensions);
+
+ // The public key is not in the ClientHello - it goes in the ClientKeyExchange later. It is taken
+ // here only so that a caller cannot forget it exists; the parameters say nothing about it.
+ if aPublicKeySize<0 then begin
+  result:=false;
+  exit;
+ end;
+
+ result:=Writer.Valid;
+ if result then begin
+  aBodySize:=Writer.Size;
+ end;
+
+end;
+
+function TRNLDTLS12ServerHello.Parse(const aData;const aDataSize:TRNLSizeInt):boolean;
+var Reader,Extensions:TRNLTLSReader;
+    Data:PRNLUInt8Array;
+    Size:TRNLSizeInt;
+    Major,Minor:TRNLUInt8;
+    ExtensionType:TRNLUInt16;
+begin
+
+ result:=false;
+ FillChar(self,SizeOf(TRNLDTLS12ServerHello),#0);
+
+ Reader.Initialize(aData,aDataSize);
+
+ if not (Reader.ReadUInt8(Major) and Reader.ReadUInt8(Minor)) then begin
+  exit;
+ end;
+ // A version this client did not offer is one it will not speak, and going along with it is how a
+ // downgrade works
+ if (Major<>TRNLDTLS12Record.VersionMajor) or (Minor<>TRNLDTLS12Record.VersionMinor) then begin
+  exit;
+ end;
+
+ if not Reader.ReadBytes(Data,TRNLDTLS12ClientHello.RandomSize) then begin
+  exit;
+ end;
+ Move(Data^[0],Random_[0],TRNLDTLS12ClientHello.RandomSize);
+
+ // The session id is read and thrown away: this client offered none, so whatever comes back is a
+ // server hoping to be resumed against, and it will not be
+ if not Reader.ReadVector8(Data,Size) then begin
+  exit;
+ end;
+
+ if not (Reader.ReadUInt16(CipherSuite) and Reader.ReadUInt8(CompressionMethod)) then begin
+  exit;
+ end;
+ // Only what was offered may come back. A server which picks something else is either broken or
+ // trying something.
+ if CipherSuite<>TRNLDTLS12ClientHello.CIPHER_SUITE_ECDHE_ECDSA_CHACHA20_POLY1305 then begin
+  exit;
+ end;
+ if CompressionMethod<>0 then begin
+  exit;
+ end;
+
+ // Extensions are optional in a ServerHello, so their absence is not an error
+ if not Reader.AtEnd then begin
+  if not Reader.ReadVector16(Data,Size) then begin
+   exit;
+  end;
+  Extensions.Initialize(Data^[0],Size);
+  while not Extensions.AtEnd do begin
+   if not (Extensions.ReadUInt16(ExtensionType) and Extensions.ReadVector16(Data,Size)) then begin
+    exit;
+   end;
+   if ExtensionType=TRNLDTLS12ClientHello.EXTENSION_EXTENDED_MASTER_SECRET then begin
+    if Size<>0 then begin
+     exit;
+    end;
+    ExtendedMasterSecret:=true;
+   end;
+  end;
+ end;
+
+ result:=Reader.AtEnd;
+
+end;
+
+function TRNLDTLS12ServerKeyExchange.Parse(const aData;const aDataSize:TRNLSizeInt):boolean;
+var Reader,Signature:TRNLTLSReader;
+    Data:PRNLUInt8Array;
+    Size,Start:TRNLSizeInt;
+    CurveType:TRNLUInt8;
+begin
+
+ result:=false;
+ FillChar(self,SizeOf(TRNLDTLS12ServerKeyExchange),#0);
+
+ Reader.Initialize(aData,aDataSize);
+ Start:=Reader.Mark;
+
+ if not Reader.ReadUInt8(CurveType) then begin
+  exit;
+ end;
+ // Only a named curve. The explicit forms let a server describe a curve of its own choosing, which
+ // is a curve nobody checked.
+ if CurveType<>3 then begin
+  exit;
+ end;
+ // Which curve it is stays a question for the caller. A curve this client cannot do is not a
+ // malformed message, and folding the two together would leave it unable to say which of them
+ // happened - the reader's business is that the bytes are what they claim to be.
+ if not Reader.ReadUInt16(NamedCurve) then begin
+  exit;
+ end;
+ if not Reader.ReadVector8(Data,Size) then begin
+  exit;
+ end;
+ if (Size<1) or (Size>TRNLSizeInt(SizeOf(Point))) then begin
+  exit;
+ end;
+ Move(Data^[0],Point[0],Size);
+ PointSize:=Size;
+
+ // Everything up to here is what the signature covers, together with the two randoms
+ Reader.Since(Start,Parameters,ParametersSize);
+
+ if not (Reader.ReadUInt8(HashAlgorithm) and Reader.ReadUInt8(SignatureAlgorithm)) then begin
+  exit;
+ end;
+ // ecdsa is 3, and this client verifies nothing else
+ if SignatureAlgorithm<>3 then begin
+  exit;
+ end;
+ if (HashAlgorithm<>4) and (HashAlgorithm<>5) then begin
+  exit;
+ end;
+
+ if not Reader.ReadVector16(Data,Size) then begin
+  exit;
+ end;
+ Signature.Initialize(Data^[0],Size);
+ // The width the two components are read into follows the curve of the certificate's key, which is
+ // not known here - so the wider of the two is used and a narrower pair arrives with leading zeros,
+ // exactly as it does for a certificate signature
+ SignatureElementSize:=TRNLP384.ElementSize;
+ if not TRNLX509.DecodeSignature(Data^[0],Size,SignatureElementSize,SignatureR,SignatureS) then begin
+  exit;
+ end;
+
+ result:=Reader.AtEnd;
+
+end;
+
+function TRNLDTLS12ServerKeyExchange.VerifyWith(const aCertificate:TRNLX509Certificate;
+                                                const aClientRandom,aServerRandom):boolean;
+var Context:TRNLSHA512Context;
+    Sha256:TRNLSHA256Context;
+    Digest:TRNLSHA384Hash;
+    DigestSize,Offset,Index:TRNLSizeInt;
+    IssuerElementSize:TRNLSizeInt;
+begin
+
+ result:=false;
+
+ // The digest is the one the server named, and the curve is the one its certificate carries. Two
+ // different questions, and the pair that would be confused if the algorithm decided both.
+ if HashAlgorithm=4 then begin
+  Sha256.Initialize;
+  Sha256.Update(aClientRandom,TRNLDTLS12ClientHello.RandomSize);
+  Sha256.Update(aServerRandom,TRNLDTLS12ClientHello.RandomSize);
+  Sha256.Update(Parameters^[0],ParametersSize);
+  Sha256.Finalize(Digest);
+  DigestSize:=SizeOf(TRNLSHA256Hash);
+ end else begin
+  Context.Initialize384;
+  Context.Update(aClientRandom,TRNLDTLS12ClientHello.RandomSize);
+  Context.Update(aServerRandom,TRNLDTLS12ClientHello.RandomSize);
+  Context.Update(Parameters^[0],ParametersSize);
+  Context.Finalize384(Digest);
+  DigestSize:=SizeOf(TRNLSHA384Hash);
+ end;
+
+ case aCertificate.PublicKeyCurve of
+  RNL_X509_PUBLIC_KEY_CURVE_P256:begin
+   IssuerElementSize:=TRNLP256.ElementSize;
+  end;
+  RNL_X509_PUBLIC_KEY_CURVE_P384:begin
+   IssuerElementSize:=TRNLP384.ElementSize;
+  end;
+  else begin
+   exit;
+  end;
+ end;
+
+ Offset:=SignatureElementSize-IssuerElementSize;
+ if Offset<0 then begin
+  exit;
+ end;
+ for Index:=0 to Offset-1 do begin
+  if (SignatureR[Index]<>0) or (SignatureS[Index]<>0) then begin
+   exit;
+  end;
+ end;
+
+ if aCertificate.PublicKeyCurve=RNL_X509_PUBLIC_KEY_CURVE_P256 then begin
+  result:=TRNLP256.VerifySignature(aCertificate.PublicKey,aCertificate.PublicKeySize,
+                                   Digest,DigestSize,SignatureR[Offset],SignatureS[Offset]);
+ end else begin
+  result:=TRNLP384.VerifySignature(aCertificate.PublicKey,aCertificate.PublicKeySize,
+                                   Digest,DigestSize,SignatureR[Offset],SignatureS[Offset]);
+ end;
+
+end;
+
+procedure TRNLDTLS12Transcript.Initialize;
+begin
+ fContext.Initialize;
+end;
+
+procedure TRNLDTLS12Transcript.AddMessage(const aMessageType:TRNLUInt8;
+                                          const aMessageSequence:TRNLUInt16;
+                                          const aBody;const aBodySize:TRNLSizeInt);
+var Header:array[0..TRNLDTLS12Handshake.HeaderSize-1] of TRNLUInt8;
+begin
+ // Offset zero and fragment length equal to the whole, whatever really happened on the wire
+ TRNLDTLS12Handshake.WriteHeader(Header[0],aMessageType,aBodySize,aMessageSequence,0,aBodySize);
+ fContext.Update(Header[0],TRNLDTLS12Handshake.HeaderSize);
+ if aBodySize>0 then begin
+  fContext.Update(aBody,aBodySize);
+ end;
+end;
+
+procedure TRNLDTLS12Transcript.Snapshot(out aHash);
+var Context:TRNLSHA256Context;
+begin
+ // On a copy, because the transcript goes on after a Finished is computed over it
+ Context:=fContext;
+ Context.Finalize(aHash);
+end;
+
+function TRNLDTLS12KeySchedule.DeriveMasterSecret(const aPreMasterSecret;
+                                                  const aPreMasterSecretSize:TRNLSizeInt;
+                                                  const aClientRandom,aServerRandom):boolean;
+var Seed:array[0..(TRNLDTLS12ClientHello.RandomSize*2)-1] of TRNLUInt8;
+begin
+ Move(aClientRandom,Seed[0],TRNLDTLS12ClientHello.RandomSize);
+ Move(aServerRandom,Seed[TRNLDTLS12ClientHello.RandomSize],TRNLDTLS12ClientHello.RandomSize);
+ result:=TRNLTLS12PRF.Process(MasterSecret,MasterSecretSize,
+                              aPreMasterSecret,aPreMasterSecretSize,
+                              'master secret',Seed,SizeOf(Seed));
+ FillChar(Seed,SizeOf(Seed),#0);
+ if not result then begin
+  Clear;
+ end;
+end;
+
+function TRNLDTLS12KeySchedule.DeriveExtendedMasterSecret(const aPreMasterSecret;
+                                                          const aPreMasterSecretSize:TRNLSizeInt;
+                                                          const aSessionHash;
+                                                          const aSessionHashSize:TRNLSizeInt):boolean;
+begin
+ result:=TRNLTLS12PRF.Process(MasterSecret,MasterSecretSize,
+                              aPreMasterSecret,aPreMasterSecretSize,
+                              'extended master secret',aSessionHash,aSessionHashSize);
+ if not result then begin
+  Clear;
+ end;
+end;
+
+function TRNLDTLS12KeySchedule.DeriveKeyBlock(out aKeyBlock;const aKeyBlockSize:TRNLSizeInt;
+                                              const aClientRandom,aServerRandom):boolean;
+var Seed:array[0..(TRNLDTLS12ClientHello.RandomSize*2)-1] of TRNLUInt8;
+begin
+ // Server first, then client - the other way round from the master secret. RFC 5246 section 6.3
+ // really does say so, and it is the sort of thing which is copied wrong once and then works for
+ // nobody.
+ Move(aServerRandom,Seed[0],TRNLDTLS12ClientHello.RandomSize);
+ Move(aClientRandom,Seed[TRNLDTLS12ClientHello.RandomSize],TRNLDTLS12ClientHello.RandomSize);
+ result:=TRNLTLS12PRF.Process(aKeyBlock,aKeyBlockSize,
+                              MasterSecret,MasterSecretSize,
+                              'key expansion',Seed,SizeOf(Seed));
+ FillChar(Seed,SizeOf(Seed),#0);
+end;
+
+function TRNLDTLS12KeySchedule.DeriveVerifyData(out aVerifyData;const aFromClient:boolean;
+                                                const aTranscriptHash;
+                                                const aTranscriptHashSize:TRNLSizeInt):boolean;
+begin
+ if aFromClient then begin
+  result:=TRNLTLS12PRF.Process(aVerifyData,VerifyDataSize,MasterSecret,MasterSecretSize,
+                               'client finished',aTranscriptHash,aTranscriptHashSize);
+ end else begin
+  result:=TRNLTLS12PRF.Process(aVerifyData,VerifyDataSize,MasterSecret,MasterSecretSize,
+                               'server finished',aTranscriptHash,aTranscriptHashSize);
+ end;
+end;
+
+procedure TRNLDTLS12KeySchedule.Clear;
+begin
+ FillChar(MasterSecret,SizeOf(MasterSecret),#0);
+end;
+
+procedure TRNLDTLS12Reassembler.Initialize;
+begin
+ fMessageType:=0;
+ fMessageSequence:=0;
+ fLength:=0;
+ fCountReceived:=0;
+ fActive:=false;
+ FillChar(fReceived,SizeOf(fReceived),#0);
+end;
+
+function TRNLDTLS12Reassembler.Add(const aData;const aDataSize:TRNLSizeInt;
+                                   out aConsumedSize:TRNLSizeInt):boolean;
+var MessageType:TRNLUInt8;
+    MessageSequence:TRNLUInt16;
+    Length_,FragmentOffset,FragmentLength,Index,Bit:TRNLSizeInt;
+    Data:PRNLUInt8Array;
+begin
+
+ result:=false;
+ aConsumedSize:=0;
+
+ if not TRNLDTLS12Handshake.ReadHeader(aData,aDataSize,MessageType,Length_,MessageSequence,
+                                       FragmentOffset,FragmentLength) then begin
+  exit;
+ end;
+
+ if Length_>MaximumMessageSize then begin
+  exit;
+ end;
+
+ if fActive then begin
+  // Every fragment of one message has to agree about which message it is. A second one which does
+  // not is either a different message arriving early or somebody rewriting the first.
+  if (MessageType<>fMessageType) or
+     (MessageSequence<>fMessageSequence) or
+     (Length_<>fLength) then begin
+   exit;
+  end;
+ end else begin
+  fMessageType:=MessageType;
+  fMessageSequence:=MessageSequence;
+  fLength:=Length_;
+  fCountReceived:=0;
+  FillChar(fReceived,SizeOf(fReceived),#0);
+  fActive:=true;
+ end;
+
+ Data:=PRNLUInt8Array(TRNLPointer(@aData));
+ if FragmentLength>0 then begin
+  Move(Data^[TRNLDTLS12Handshake.HeaderSize],fBody[FragmentOffset],FragmentLength);
+  // Counted bit by bit and only where it was not set before, so that a fragment which arrives twice
+  // or overlaps another does not make the message look more complete than it is
+  for Index:=FragmentOffset to (FragmentOffset+FragmentLength)-1 do begin
+   Bit:=1 shl (Index and 7);
+   if (fReceived[Index shr 3] and Bit)=0 then begin
+    fReceived[Index shr 3]:=fReceived[Index shr 3] or TRNLUInt8(Bit);
+    inc(fCountReceived);
+   end;
+  end;
+ end;
+
+ aConsumedSize:=TRNLDTLS12Handshake.HeaderSize+FragmentLength;
+ result:=true;
+
+end;
+
+function TRNLDTLS12Reassembler.Complete:boolean;
+begin
+ result:=fActive and (fCountReceived=fLength);
+end;
+
+function TRNLDTLS12Reassembler.MessageType:TRNLUInt8;
+begin
+ result:=fMessageType;
+end;
+
+function TRNLDTLS12Reassembler.MessageSequence:TRNLUInt16;
+begin
+ result:=fMessageSequence;
+end;
+
+function TRNLDTLS12Reassembler.Length_:TRNLSizeInt;
+begin
+ result:=fLength;
+end;
+
+function TRNLDTLS12Reassembler.Body:PRNLUInt8Array;
+begin
+ result:=PRNLUInt8Array(TRNLPointer(@fBody[0]));
+end;
+
+constructor TRNLDTLS12Client.Create(const aRandomGenerator:TRNLRandomGenerator;
+                                    const aServerName:TRNLRawByteString;
+                                    const aTrustedRoots:TRNLX509.TChainEntries;
+                                    const aCountTrustedRoots:TRNLSizeInt;
+                                    const aNowSecondsSinceUnixEpoch:TRNLInt64);
+begin
+
+ inherited Create;
+
+ fRandomGenerator:=aRandomGenerator;
+ fServerName:=aServerName;
+ fTrustedRoots:=aTrustedRoots;
+ fCountTrustedRoots:=aCountTrustedRoots;
+ fNowSecondsSinceUnixEpoch:=aNowSecondsSinceUnixEpoch;
+
+ fState:=RNL_DTLS12_CLIENT_STATE_IDLE;
+ fFailure:=RNL_DTLS12_CLIENT_FAILURE_NONE;
+ fAlertDescription:=0;
+ fCertificateVerdict:=RNL_X509_VERDICT_ACCEPTED;
+
+ FillChar(fClientRandom,SizeOf(fClientRandom),#0);
+ FillChar(fServerRandom,SizeOf(fServerRandom),#0);
+ FillChar(fCookie,SizeOf(fCookie),#0);
+ fCookieSize:=0;
+
+ fCurve:=TRNLP256.Curve;
+ FillChar(fPrivateKey,SizeOf(fPrivateKey),#0);
+ FillChar(fPublicKey,SizeOf(fPublicKey),#0);
+ fPublicKeySize:=0;
+
+ FillChar(fLeafCertificate,SizeOf(TRNLX509Certificate),#0);
+
+ FillChar(fServerPoint,SizeOf(fServerPoint),#0);
+ fServerPointSize:=0;
+
+ fTranscript.Initialize;
+ fKeySchedule.Clear;
+ fClientKeys.Clear;
+ fServerKeys.Clear;
+ fExtendedMasterSecret:=false;
+ fCertificateRequested:=false;
+ fSeenServerHello:=false;
+ fSeenCertificate:=false;
+ fSeenServerKeyExchange:=false;
+ FillChar(fClientVerifyData,SizeOf(fClientVerifyData),#0);
+
+ fSendEpoch:=0;
+ fSendSequenceNumbers[0]:=0;
+ fSendSequenceNumbers[1]:=0;
+ fReceiveEpoch:=0;
+ fReplayWindow.Initialize;
+
+ fNextSendMessageSequence:=0;
+ fExpectedReceiveMessageSequence:=0;
+
+ fFlightSize:=0;
+ fCountFlightEntries:=0;
+ fFlightPending:=false;
+ fRetransmissionTimeout:=InitialRetransmissionTimeout;
+ fRetransmitAt:=0;
+ fCountRetransmissions:=0;
+
+ fOutgoingHead:=0;
+ fCountOutgoing:=0;
+ fApplicationDataHead:=0;
+ fCountApplicationData:=0;
+
+ fReassembler.Initialize;
+ fDeferredSize:=0;
+
+end;
+
+destructor TRNLDTLS12Client.Destroy;
+begin
+ // Every secret and everything derived from one. The flight buffer goes too: the last thing to sit
+ // in it was the client's Finished, which is the transcript under the master secret.
+ FillChar(fPrivateKey,SizeOf(fPrivateKey),#0);
+ FillChar(fClientVerifyData,SizeOf(fClientVerifyData),#0);
+ FillChar(fFlight,SizeOf(fFlight),#0);
+ fKeySchedule.Clear;
+ fClientKeys.Clear;
+ fServerKeys.Clear;
+ inherited Destroy;
+end;
+
+procedure TRNLDTLS12Client.Fail(const aFailure:TRNLDTLS12ClientFailure;
+                                const aAlertDescription:TRNLUInt8);
+var Alert:array[0..1] of TRNLUInt8;
+    Datagram:array[0..((TRNLDTLS12Record.HeaderSize+2)+TRNLDTLS12Record.TagSize)-1] of TRNLUInt8;
+    DatagramSize:TRNLSizeUInt;
+    Sent:boolean;
+begin
+
+ if fState=RNL_DTLS12_CLIENT_STATE_FAILED then begin
+  exit;
+ end;
+
+ // Say so before falling silent. A peer which is told nothing keeps retransmitting its flight for
+ // the better part of a minute; one which gets an alert stops at once. A zero description means
+ // there is nothing to say - either the peer sent the alert in the first place, or nothing was
+ // wrong with the protocol at all. Nothing is done about a failure to send it, because by then
+ // there is nowhere left to report anything to.
+ if aAlertDescription<>0 then begin
+  Alert[0]:=ALERT_LEVEL_FATAL;
+  Alert[1]:=aAlertDescription;
+  if fSendEpoch=0 then begin
+   Sent:=TRNLDTLS12Record.WritePlain(Datagram[0],DatagramSize,SizeOf(Datagram),
+                                     0,fSendSequenceNumbers[0],
+                                     TRNLDTLS12Record.CONTENT_TYPE_ALERT,Alert[0],2);
+   if Sent then begin
+    inc(fSendSequenceNumbers[0]);
+   end;
+  end else begin
+   Sent:=TRNLDTLS12Record.Protect(Datagram[0],DatagramSize,SizeOf(Datagram),fClientKeys,
+                                  1,fSendSequenceNumbers[1],
+                                  TRNLDTLS12Record.CONTENT_TYPE_ALERT,Alert[0],2);
+   if Sent then begin
+    inc(fSendSequenceNumbers[1]);
+   end;
+  end;
+  if Sent then begin
+   QueueOutgoing(Datagram[0],DatagramSize);
+  end;
+ end;
+
+ fFailure:=aFailure;
+ fState:=RNL_DTLS12_CLIENT_STATE_FAILED;
+ fFlightPending:=false;
+
+end;
+
+function TRNLDTLS12Client.QueueOutgoing(const aData;const aDataSize:TRNLSizeInt):boolean;
+var Index:TRNLSizeInt;
+begin
+ result:=false;
+ if (aDataSize<=0) or (aDataSize>MaximumDatagramSize) or
+    (fCountOutgoing>=MaximumQueuedDatagrams) then begin
+  exit;
+ end;
+ Index:=(fOutgoingHead+fCountOutgoing) mod MaximumQueuedDatagrams;
+ Move(aData,fOutgoing[Index].Data[0],aDataSize);
+ fOutgoing[Index].Size:=aDataSize;
+ inc(fCountOutgoing);
+ result:=true;
+end;
+
+procedure TRNLDTLS12Client.BeginFlight;
+begin
+ fFlightSize:=0;
+ fCountFlightEntries:=0;
+ fCountRetransmissions:=0;
+ fRetransmissionTimeout:=InitialRetransmissionTimeout;
+end;
+
+function TRNLDTLS12Client.AppendHandshakeMessage(const aMessageType:TRNLUInt8;
+                                                 const aBody;const aBodySize:TRNLSizeInt;
+                                                 const aEpoch:TRNLUInt16):boolean;
+var Total:TRNLSizeInt;
+begin
+
+ result:=false;
+
+ Total:=TRNLDTLS12Handshake.HeaderSize+aBodySize;
+ if (aBodySize<0) or
+    (fCountFlightEntries>=MaximumFlightEntries) or
+    ((fFlightSize+Total)>MaximumFlightSize) then begin
+  exit;
+ end;
+
+ // Offset zero and a fragment length equal to the whole. Nothing this client sends is large enough
+ // to need cutting up - the one message which would be, a certificate chain of its own, is the one
+ // it never has to send.
+ TRNLDTLS12Handshake.WriteHeader(fFlight[fFlightSize],aMessageType,aBodySize,
+                                 fNextSendMessageSequence,0,aBodySize);
+ if aBodySize>0 then begin
+  Move(aBody,fFlight[fFlightSize+TRNLDTLS12Handshake.HeaderSize],aBodySize);
+ end;
+
+ fTranscript.AddMessage(aMessageType,fNextSendMessageSequence,aBody,aBodySize);
+
+ fFlightEntries[fCountFlightEntries].Offset:=fFlightSize;
+ fFlightEntries[fCountFlightEntries].Size:=Total;
+ fFlightEntries[fCountFlightEntries].ContentType:=TRNLDTLS12Record.CONTENT_TYPE_HANDSHAKE;
+ fFlightEntries[fCountFlightEntries].Epoch:=aEpoch;
+ inc(fCountFlightEntries);
+ inc(fFlightSize,Total);
+ inc(fNextSendMessageSequence);
+
+ result:=true;
+
+end;
+
+function TRNLDTLS12Client.AppendChangeCipherSpec:boolean;
+begin
+
+ result:=false;
+ if (fCountFlightEntries>=MaximumFlightEntries) or ((fFlightSize+1)>MaximumFlightSize) then begin
+  exit;
+ end;
+
+ // Not a handshake message, whatever its place in the flight suggests: no header, no message
+ // sequence, and no part in the transcript. RFC 5246 section 7.1 gives it a content type of its
+ // own, which is exactly what lets it sit between two handshake messages and change the keys of
+ // the one behind it.
+ fFlight[fFlightSize]:=1;
+
+ fFlightEntries[fCountFlightEntries].Offset:=fFlightSize;
+ fFlightEntries[fCountFlightEntries].Size:=1;
+ fFlightEntries[fCountFlightEntries].ContentType:=TRNLDTLS12Record.CONTENT_TYPE_CHANGE_CIPHER_SPEC;
+ fFlightEntries[fCountFlightEntries].Epoch:=0;
+ inc(fCountFlightEntries);
+ inc(fFlightSize);
+
+ result:=true;
+
+end;
+
+function TRNLDTLS12Client.TransmitFlight(const aNow:TRNLTime):boolean;
+var Index,DatagramSize,RecordSize:TRNLSizeInt;
+    Datagram:array[0..MaximumDatagramSize-1] of TRNLUInt8;
+    Written:TRNLSizeUInt;
+begin
+
+ result:=false;
+ DatagramSize:=0;
+
+ for Index:=0 to fCountFlightEntries-1 do begin
+
+  RecordSize:=TRNLDTLS12Record.HeaderSize+fFlightEntries[Index].Size;
+  if fFlightEntries[Index].Epoch<>0 then begin
+   inc(RecordSize,TRNLDTLS12Record.TagSize);
+  end;
+  if RecordSize>MaximumDatagramSize then begin
+   exit;
+  end;
+
+  // As many records to a datagram as fit, which for every flight this client sends means all of
+  // them in one
+  if (DatagramSize+RecordSize)>MaximumDatagramSize then begin
+   if not QueueOutgoing(Datagram[0],DatagramSize) then begin
+    exit;
+   end;
+   DatagramSize:=0;
+  end;
+
+  if fFlightEntries[Index].Epoch=0 then begin
+   if not TRNLDTLS12Record.WritePlain(Datagram[DatagramSize],Written,
+                                      TRNLSizeUInt(MaximumDatagramSize-DatagramSize),
+                                      0,fSendSequenceNumbers[0],
+                                      fFlightEntries[Index].ContentType,
+                                      fFlight[fFlightEntries[Index].Offset],
+                                      fFlightEntries[Index].Size) then begin
+    exit;
+   end;
+   inc(fSendSequenceNumbers[0]);
+  end else begin
+   if not TRNLDTLS12Record.Protect(Datagram[DatagramSize],Written,
+                                   TRNLSizeUInt(MaximumDatagramSize-DatagramSize),
+                                   fClientKeys,
+                                   1,fSendSequenceNumbers[1],
+                                   fFlightEntries[Index].ContentType,
+                                   fFlight[fFlightEntries[Index].Offset],
+                                   fFlightEntries[Index].Size) then begin
+    exit;
+   end;
+   inc(fSendSequenceNumbers[1]);
+  end;
+  inc(DatagramSize,TRNLSizeInt(Written));
+
+ end;
+
+ if DatagramSize>0 then begin
+  if not QueueOutgoing(Datagram[0],DatagramSize) then begin
+   exit;
+  end;
+ end;
+
+ fFlightPending:=true;
+ fRetransmitAt:=TRNLUInt64(aNow)+fRetransmissionTimeout;
+ result:=true;
+
+end;
+
+function TRNLDTLS12Client.BuildClientHello(const aNow:TRNLTime):boolean;
+var Body:array[0..(MaximumFlightSize-TRNLDTLS12Handshake.HeaderSize)-1] of TRNLUInt8;
+    BodySize:TRNLSizeInt;
+begin
+
+ result:=false;
+
+ if not TRNLDTLS12ClientHello.Write_(Body[0],BodySize,SizeOf(Body),
+                                     fClientRandom,
+                                     fCookie[0],fCookieSize,
+                                     fPublicKey[0],fPublicKeySize,
+                                     fServerName) then begin
+  exit;
+ end;
+
+ BeginFlight;
+ if not AppendHandshakeMessage(TRNLDTLS12Handshake.TYPE_CLIENT_HELLO,Body[0],BodySize,0) then begin
+  exit;
+ end;
+
+ result:=TransmitFlight(aNow);
+
+end;
+
+procedure TRNLDTLS12Client.Start(const aNow:TRNLTime);
+begin
+
+ if fState<>RNL_DTLS12_CLIENT_STATE_IDLE then begin
+  exit;
+ end;
+
+ // Thirty two random bytes, and not four of clock followed by twenty eight of randomness. The
+ // gmt_unix_time of RFC 5246 section 7.4.1.2 gives away the sender's clock and buys nothing for it;
+ // TLS 1.3 dropped it outright and current 1.2 stacks fill those four bytes randomly as well.
+ fRandomGenerator.GetRandomBytes(fClientRandom,SizeOf(fClientRandom));
+
+ // P-256 to begin with, because it is what every measured relay picks. A server which names P-384
+ // in its ServerKeyExchange gets a new pair on that curve instead - which is cheap, and cheaper
+ // than carrying two of them around for a case which does not arise.
+ fCurve:=TRNLP256.Curve;
+ TRNLEC.GenerateKeyPair(fRandomGenerator,fPrivateKey,fPublicKey,fCurve);
+ fPublicKeySize:=1+(fCurve.ElementSize*2);
+
+ if not BuildClientHello(aNow) then begin
+  Fail(RNL_DTLS12_CLIENT_FAILURE_INTERNAL,0);
+  exit;
+ end;
+
+ fState:=RNL_DTLS12_CLIENT_STATE_AWAITING_HELLO_VERIFY_REQUEST;
+
+end;
+
+procedure TRNLDTLS12Client.Update(const aNow:TRNLTime);
+begin
+
+ if not fFlightPending then begin
+  exit;
+ end;
+ if (fState=RNL_DTLS12_CLIENT_STATE_FAILED) or
+    (fState=RNL_DTLS12_CLIENT_STATE_ESTABLISHED) then begin
+  exit;
+ end;
+ if aNow<fRetransmitAt then begin
+  exit;
+ end;
+
+ if fCountRetransmissions>=MaximumRetransmissions then begin
+  // Nothing to say to a peer which has not answered six times over, and no alert to send it either
+  Fail(RNL_DTLS12_CLIENT_FAILURE_TIMEOUT,0);
+  exit;
+ end;
+
+ inc(fCountRetransmissions);
+ // Doubled, and capped, so that the last attempts are not minutes apart. RFC 6347 section 4.2.4.1.
+ fRetransmissionTimeout:=fRetransmissionTimeout*2;
+ if fRetransmissionTimeout>MaximumRetransmissionTimeout then begin
+  fRetransmissionTimeout:=MaximumRetransmissionTimeout;
+ end;
+
+ if not TransmitFlight(aNow) then begin
+  Fail(RNL_DTLS12_CLIENT_FAILURE_INTERNAL,ALERT_INTERNAL_ERROR);
+ end;
+
+end;
+
+function TRNLDTLS12Client.PopOutgoingDatagram(out aData;out aDataSize:TRNLSizeInt;
+                                              const aMaximumDataSize:TRNLSizeInt):boolean;
+begin
+
+ result:=false;
+ aDataSize:=0;
+
+ if fCountOutgoing=0 then begin
+  exit;
+ end;
+
+ // Nothing is consumed when the buffer offered is too small, and nothing is truncated into it
+ // either. A caller whose buffer is smaller than MaximumDatagramSize has a buffer which cannot
+ // carry what this class produces, and shortening a record would only make it undecryptable.
+ if fOutgoing[fOutgoingHead].Size>aMaximumDataSize then begin
+  exit;
+ end;
+
+ aDataSize:=fOutgoing[fOutgoingHead].Size;
+ Move(fOutgoing[fOutgoingHead].Data[0],aData,aDataSize);
+ fOutgoingHead:=(fOutgoingHead+1) mod MaximumQueuedDatagrams;
+ dec(fCountOutgoing);
+ result:=true;
+
+end;
+
+function TRNLDTLS12Client.PopApplicationData(out aData;out aDataSize:TRNLSizeInt;
+                                             const aMaximumDataSize:TRNLSizeInt):boolean;
+begin
+
+ result:=false;
+ aDataSize:=0;
+
+ if fCountApplicationData=0 then begin
+  exit;
+ end;
+ if fApplicationData[fApplicationDataHead].Size>aMaximumDataSize then begin
+  exit;
+ end;
+
+ aDataSize:=fApplicationData[fApplicationDataHead].Size;
+ Move(fApplicationData[fApplicationDataHead].Data[0],aData,aDataSize);
+ fApplicationDataHead:=(fApplicationDataHead+1) mod MaximumQueuedDatagrams;
+ dec(fCountApplicationData);
+ result:=true;
+
+end;
+
+function TRNLDTLS12Client.Send(const aData;const aDataSize:TRNLSizeInt):boolean;
+var Datagram:array[0..MaximumDatagramSize-1] of TRNLUInt8;
+    DatagramSize:TRNLSizeUInt;
+begin
+
+ result:=false;
+
+ if (fState<>RNL_DTLS12_CLIENT_STATE_ESTABLISHED) or (aDataSize<=0) then begin
+  exit;
+ end;
+ if ((TRNLDTLS12Record.HeaderSize+aDataSize)+TRNLDTLS12Record.TagSize)>MaximumDatagramSize then begin
+  exit;
+ end;
+
+ if not TRNLDTLS12Record.Protect(Datagram[0],DatagramSize,SizeOf(Datagram),fClientKeys,
+                                 1,fSendSequenceNumbers[1],
+                                 TRNLDTLS12Record.CONTENT_TYPE_APPLICATION_DATA,
+                                 aData,aDataSize) then begin
+  exit;
+ end;
+ inc(fSendSequenceNumbers[1]);
+
+ result:=QueueOutgoing(Datagram[0],DatagramSize);
+
+end;
+
+procedure TRNLDTLS12Client.ProcessDatagram(const aData;const aDataSize:TRNLSizeInt;
+                                           const aNow:TRNLTime);
+var Data:PRNLUInt8Array;
+    Position,RecordSize,FragmentSize:TRNLSizeInt;
+    ContentSize,ConsumedSize:TRNLSizeUInt;
+    ContentType:TRNLUInt8;
+    SequenceNumber:TRNLUInt64;
+    RecordEpoch,PlainEpoch:TRNLUInt16;
+begin
+
+ if (fState=RNL_DTLS12_CLIENT_STATE_IDLE) or (fState=RNL_DTLS12_CLIENT_STATE_FAILED) then begin
+  exit;
+ end;
+
+ Data:=PRNLUInt8Array(TRNLPointer(@aData));
+ Position:=0;
+
+ while (Position+TRNLDTLS12Record.HeaderSize)<=aDataSize do begin
+
+  // The epoch decides whether the record is in the clear, and it has to be read before either of
+  // the two readers is picked: each of them refuses a record of the other kind, and one datagram
+  // routinely carries both - a ChangeCipherSpec in epoch zero with the Finished which follows it
+  // in epoch one.
+  RecordEpoch:=TRNLMemoryAccess.LoadBigEndianUInt16(Data^[Position+3]);
+  FragmentSize:=TRNLMemoryAccess.LoadBigEndianUInt16(Data^[Position+11]);
+  RecordSize:=TRNLDTLS12Record.HeaderSize+FragmentSize;
+  // A length which does not fit is the end of anything worth reading here: it is what says where
+  // the next record begins, and a wrong one puts that anywhere
+  if (Position+RecordSize)>aDataSize then begin
+   break;
+  end;
+
+  if RecordEpoch=fReceiveEpoch then begin
+   if fReceiveEpoch=0 then begin
+    if TRNLDTLS12Record.ReadPlain(fRecordBuffer[0],ContentSize,ContentType,PlainEpoch,
+                                  SequenceNumber,ConsumedSize,
+                                  TRNLSizeUInt(SizeOf(fRecordBuffer)),
+                                  Data^[Position],TRNLSizeUInt(RecordSize)) then begin
+     HandleRecord(ContentType,fRecordBuffer[0],TRNLSizeInt(ContentSize),aNow);
+    end;
+   end else begin
+    if TRNLDTLS12Record.Unprotect(fRecordBuffer[0],ContentSize,ContentType,
+                                  SequenceNumber,ConsumedSize,
+                                  TRNLSizeUInt(SizeOf(fRecordBuffer)),
+                                  fServerKeys,fReceiveEpoch,fReplayWindow,
+                                  Data^[Position],TRNLSizeUInt(RecordSize)) then begin
+     HandleRecord(ContentType,fRecordBuffer[0],TRNLSizeInt(ContentSize),aNow);
+    end;
+   end;
+  end;
+  // A record from another epoch is passed over without a word. It is either a retransmission from
+  // before the last key change or one from after it which overtook the change, and neither is an
+  // error - refusing the connection over one would let a single stray datagram end it.
+
+  inc(Position,RecordSize);
+
+  if fState=RNL_DTLS12_CLIENT_STATE_FAILED then begin
+   break;
+  end;
+
+ end;
+
+end;
+
+procedure TRNLDTLS12Client.HandleRecord(const aContentType:TRNLUInt8;
+                                        const aContent;const aContentSize:TRNLSizeInt;
+                                        const aNow:TRNLTime);
+var Content:PRNLUInt8Array;
+    Index:TRNLSizeInt;
+begin
+
+ Content:=PRNLUInt8Array(TRNLPointer(@aContent));
+
+ if aContentType=TRNLDTLS12Record.CONTENT_TYPE_ALERT then begin
+
+  if aContentSize>=2 then begin
+   fAlertDescription:=Content^[1];
+  end;
+  // A warning is not treated more gently than a fatal one. The only warning which can turn up in
+  // the middle of a handshake is close_notify, and that ends the connection just as thoroughly.
+  Fail(RNL_DTLS12_CLIENT_FAILURE_ALERT,0);
+
+ end else if aContentType=TRNLDTLS12Record.CONTENT_TYPE_CHANGE_CIPHER_SPEC then begin
+
+  if fState<>RNL_DTLS12_CLIENT_STATE_AWAITING_SERVER_FINISHED then begin
+   Fail(RNL_DTLS12_CLIENT_FAILURE_UNEXPECTED_MESSAGE,ALERT_UNEXPECTED_MESSAGE);
+   exit;
+  end;
+  if (aContentSize<>1) or (Content^[0]<>1) then begin
+   Fail(RNL_DTLS12_CLIENT_FAILURE_MALFORMED_MESSAGE,ALERT_DECODE_ERROR);
+   exit;
+  end;
+  // From here the server's records are protected. A fresh replay window with it, because the
+  // sequence numbers begin again at zero in the new epoch and the old window would throw every one
+  // of them away as already seen.
+  fReceiveEpoch:=1;
+  fReplayWindow.Initialize;
+
+ end else if aContentType=TRNLDTLS12Record.CONTENT_TYPE_HANDSHAKE then begin
+
+  HandleHandshakeFragments(aContent,aContentSize,aNow);
+
+ end else if aContentType=TRNLDTLS12Record.CONTENT_TYPE_APPLICATION_DATA then begin
+
+  if fState<>RNL_DTLS12_CLIENT_STATE_ESTABLISHED then begin
+   Fail(RNL_DTLS12_CLIENT_FAILURE_UNEXPECTED_MESSAGE,ALERT_UNEXPECTED_MESSAGE);
+   exit;
+  end;
+  // Dropped when the queue is full or the record is larger than one datagram of this client's own
+  // making. Both are the caller's to avoid: it drains the queue, and it knows what it asked for.
+  if (aContentSize>0) and (aContentSize<=MaximumDatagramSize) and
+     (fCountApplicationData<MaximumQueuedDatagrams) then begin
+   Index:=(fApplicationDataHead+fCountApplicationData) mod MaximumQueuedDatagrams;
+   Move(aContent,fApplicationData[Index].Data[0],aContentSize);
+   fApplicationData[Index].Size:=aContentSize;
+   inc(fCountApplicationData);
+  end;
+
+ end else begin
+
+  Fail(RNL_DTLS12_CLIENT_FAILURE_UNEXPECTED_MESSAGE,ALERT_UNEXPECTED_MESSAGE);
+
+ end;
+
+end;
+
+procedure TRNLDTLS12Client.HandleHandshakeFragments(const aContent;const aContentSize:TRNLSizeInt;
+                                                    const aNow:TRNLTime);
+var Content:PRNLUInt8Array;
+    Position,FragmentSize,ConsumedSize:TRNLSizeInt;
+    MessageType:TRNLUInt8;
+    MessageSequence:TRNLUInt16;
+    Length_,FragmentOffset,FragmentLength:TRNLSizeInt;
+begin
+
+ Content:=PRNLUInt8Array(TRNLPointer(@aContent));
+ Position:=0;
+
+ while Position<aContentSize do begin
+
+  if not TRNLDTLS12Handshake.ReadHeader(Content^[Position],aContentSize-Position,
+                                        MessageType,Length_,MessageSequence,
+                                        FragmentOffset,FragmentLength) then begin
+   break;
+  end;
+  FragmentSize:=TRNLDTLS12Handshake.HeaderSize+FragmentLength;
+
+  if MessageSequence=fExpectedReceiveMessageSequence then begin
+   if fReassembler.Add(Content^[Position],FragmentSize,ConsumedSize) then begin
+    if fReassembler.Complete then begin
+     HandleMessage(aNow);
+     if fState=RNL_DTLS12_CLIENT_STATE_FAILED then begin
+      exit;
+     end;
+     ReplayDeferredFragments(aNow);
+     if fState=RNL_DTLS12_CLIENT_STATE_FAILED then begin
+      exit;
+     end;
+    end;
+   end;
+  end else if MessageSequence>fExpectedReceiveMessageSequence then begin
+   // A message from further along the flight, which is what reordering looks like from here. Kept
+   // rather than dropped: dropping it costs a whole retransmission timeout for a datagram which had
+   // already arrived, and reordering inside one flight is ordinary on a path with more than one
+   // route through it.
+   DeferFragment(Content^[Position],FragmentSize);
+  end;
+  // A sequence number already behind is a retransmission of something already dealt with, and it
+  // goes nowhere at all
+
+  inc(Position,FragmentSize);
+
+ end;
+
+end;
+
+procedure TRNLDTLS12Client.DeferFragment(const aData;const aDataSize:TRNLSizeInt);
+begin
+ // Dropped without a word when there is no room. What that costs is one retransmission timeout,
+ // because the peer sends its flight again; what keeping it at any size would cost is a buffer
+ // whose size the peer decides.
+ if (aDataSize>0) and ((fDeferredSize+aDataSize)<=MaximumDeferredSize) then begin
+  Move(aData,fDeferred[fDeferredSize],aDataSize);
+  inc(fDeferredSize,aDataSize);
+ end;
+end;
+
+procedure TRNLDTLS12Client.ReplayDeferredFragments(const aNow:TRNLTime);
+var Position,Kept,FragmentSize,ConsumedSize:TRNLSizeInt;
+    MessageType:TRNLUInt8;
+    MessageSequence:TRNLUInt16;
+    Length_,FragmentOffset,FragmentLength:TRNLSizeInt;
+    Progress:boolean;
+begin
+
+ // Pass after pass, because one message completing is what lets the next one out: a flight which
+ // arrived backwards leaves this buffer one message per pass, in the order it should have come in.
+ repeat
+
+  Progress:=false;
+  Position:=0;
+  Kept:=0;
+
+  while Position<fDeferredSize do begin
+
+   if not TRNLDTLS12Handshake.ReadHeader(fDeferred[Position],fDeferredSize-Position,
+                                         MessageType,Length_,MessageSequence,
+                                         FragmentOffset,FragmentLength) then begin
+    break;
+   end;
+   FragmentSize:=TRNLDTLS12Handshake.HeaderSize+FragmentLength;
+
+   if MessageSequence=fExpectedReceiveMessageSequence then begin
+    if fReassembler.Add(fDeferred[Position],FragmentSize,ConsumedSize) then begin
+     Progress:=true;
+     if fReassembler.Complete then begin
+      HandleMessage(aNow);
+      if fState=RNL_DTLS12_CLIENT_STATE_FAILED then begin
+       exit;
+      end;
+     end;
+    end;
+   end else if MessageSequence>fExpectedReceiveMessageSequence then begin
+    if Kept<>Position then begin
+     Move(fDeferred[Position],fDeferred[Kept],FragmentSize);
+    end;
+    inc(Kept,FragmentSize);
+   end;
+
+   inc(Position,FragmentSize);
+
+  end;
+
+  fDeferredSize:=Kept;
+
+ until not Progress;
+
+end;
+
+function TRNLDTLS12Client.HandleHelloVerifyRequest(const aBody;const aBodySize:TRNLSizeInt;
+                                                   const aNow:TRNLTime):boolean;
+var Reader:TRNLTLSReader;
+    Data:PRNLUInt8Array;
+    Size:TRNLSizeInt;
+    Major,Minor:TRNLUInt8;
+begin
+
+ result:=false;
+
+ Reader.Initialize(aBody,aBodySize);
+
+ // The version is read and thrown away on purpose. RFC 6347 section 4.2.1 has servers put DTLS 1.0
+ // in here whatever version they are about to speak, so it is the one field in the whole exchange
+ // which says nothing - and a client which checked it would refuse most of the deployed world.
+ if not (Reader.ReadUInt8(Major) and Reader.ReadUInt8(Minor)) then begin
+  Fail(RNL_DTLS12_CLIENT_FAILURE_MALFORMED_MESSAGE,ALERT_DECODE_ERROR);
+  exit;
+ end;
+
+ if (not Reader.ReadVector8(Data,Size)) or
+    (Size>TRNLDTLS12ClientHello.MaximumCookieSize) or
+    (not Reader.AtEnd) then begin
+  Fail(RNL_DTLS12_CLIENT_FAILURE_MALFORMED_MESSAGE,ALERT_DECODE_ERROR);
+  exit;
+ end;
+
+ fCookieSize:=Size;
+ if Size>0 then begin
+  Move(Data^[0],fCookie[0],Size);
+ end;
+
+ // The transcript starts again from nothing. The exchange which just happened is outside it, and so
+ // is the ClientHello which provoked it; what goes in is the one about to be built. RFC 6347
+ // section 4.2.6.
+ fTranscript.Initialize;
+
+ // The second ClientHello carries on counting where the first left off, so it is message one and
+ // not message zero over again. Getting that wrong is invisible: the server simply retransmits.
+ result:=BuildClientHello(aNow);
+ if not result then begin
+  Fail(RNL_DTLS12_CLIENT_FAILURE_INTERNAL,ALERT_INTERNAL_ERROR);
+ end;
+
+end;
+
+function TRNLDTLS12Client.HandleCertificate(const aBody;const aBodySize:TRNLSizeInt):boolean;
+var Reader,List:TRNLTLSReader;
+    Data:PRNLUInt8Array;
+    Size,CountChain:TRNLSizeInt;
+    Chain:TRNLX509.TChainEntries;
+begin
+
+ result:=false;
+ fCertificateVerdict:=RNL_X509_VERDICT_MALFORMED;
+ FillChar(Chain,SizeOf(TRNLX509.TChainEntries),#0);
+
+ Reader.Initialize(aBody,aBodySize);
+ if (not Reader.ReadVector24(Data,Size)) or (not Reader.AtEnd) then begin
+  Fail(RNL_DTLS12_CLIENT_FAILURE_BAD_CERTIFICATE,ALERT_DECODE_ERROR);
+  exit;
+ end;
+
+ List.Initialize(Data^[0],Size);
+ CountChain:=0;
+ while not List.AtEnd do begin
+  if CountChain>=TRNLX509.MaximumChainLength then begin
+   fCertificateVerdict:=RNL_X509_VERDICT_CHAIN_TOO_LONG;
+   Fail(RNL_DTLS12_CLIENT_FAILURE_BAD_CERTIFICATE,ALERT_BAD_CERTIFICATE);
+   exit;
+  end;
+  if not List.ReadVector24(Data,Size) then begin
+   fCertificateVerdict:=RNL_X509_VERDICT_MALFORMED;
+   Fail(RNL_DTLS12_CLIENT_FAILURE_BAD_CERTIFICATE,ALERT_DECODE_ERROR);
+   exit;
+  end;
+  Chain[CountChain].Data:=Data;
+  Chain[CountChain].Size:=Size;
+  inc(CountChain);
+ end;
+
+ // Checked here and not once the flight is complete, because the buffer the chain sits in belongs
+ // to the reassembler and the next message writes over it
+ fCertificateVerdict:=TRNLX509.VerifyChain(Chain,CountChain,
+                                           fTrustedRoots,fCountTrustedRoots,
+                                           fServerName,fNowSecondsSinceUnixEpoch,
+                                           fLeafCertificate);
+ if fCertificateVerdict<>RNL_X509_VERDICT_ACCEPTED then begin
+  Fail(RNL_DTLS12_CLIENT_FAILURE_BAD_CERTIFICATE,ALERT_BAD_CERTIFICATE);
+  exit;
+ end;
+
+ // Only the public key is wanted from here on, and every other field is a window into a buffer
+ // which is about to be reused. Cleared rather than left looking usable: a pointer into a buffer
+ // that has moved on is worse than no pointer at all.
+ fLeafCertificate.TBSCertificate:=nil;
+ fLeafCertificate.TBSCertificateSize:=0;
+ fLeafCertificate.Issuer:=nil;
+ fLeafCertificate.IssuerSize:=0;
+ fLeafCertificate.Subject:=nil;
+ fLeafCertificate.SubjectSize:=0;
+ fLeafCertificate.SubjectAlternativeNames:=nil;
+ fLeafCertificate.SubjectAlternativeNamesSize:=0;
+
+ result:=true;
+
+end;
+
+function TRNLDTLS12Client.HandleServerKeyExchange(const aBody;const aBodySize:TRNLSizeInt):boolean;
+var KeyExchange:TRNLDTLS12ServerKeyExchange;
+    ExpectedPointSize:TRNLSizeInt;
+begin
+
+ result:=false;
+
+ if not KeyExchange.Parse(aBody,aBodySize) then begin
+  Fail(RNL_DTLS12_CLIENT_FAILURE_MALFORMED_MESSAGE,ALERT_DECODE_ERROR);
+  exit;
+ end;
+
+ if KeyExchange.NamedCurve=TRNLDTLS12ClientHello.NAMED_CURVE_SECP256R1 then begin
+  fCurve:=TRNLP256.Curve;
+ end else if KeyExchange.NamedCurve=TRNLDTLS12ClientHello.NAMED_CURVE_SECP384R1 then begin
+  fCurve:=TRNLP384.Curve;
+ end else begin
+  Fail(RNL_DTLS12_CLIENT_FAILURE_UNSUPPORTED_CURVE,ALERT_HANDSHAKE_FAILURE);
+  exit;
+ end;
+
+ // The point has to be the width of the curve which was named. A short one over a wide curve is a
+ // point with the top of it left out, and whatever it decodes to is not what the server signed.
+ ExpectedPointSize:=1+(fCurve.ElementSize*2);
+ if KeyExchange.PointSize<>ExpectedPointSize then begin
+  Fail(RNL_DTLS12_CLIENT_FAILURE_MALFORMED_MESSAGE,ALERT_DECODE_ERROR);
+  exit;
+ end;
+
+ // The one signature which the whole exchange rests on. Without it the parameters above are
+ // whatever the last party on the path felt like, and pinning or a chain above makes no difference
+ // to that at all.
+ if not KeyExchange.VerifyWith(fLeafCertificate,fClientRandom,fServerRandom) then begin
+  Fail(RNL_DTLS12_CLIENT_FAILURE_BAD_KEY_EXCHANGE_SIGNATURE,ALERT_DECRYPT_ERROR);
+  exit;
+ end;
+
+ Move(KeyExchange.Point[0],fServerPoint[0],KeyExchange.PointSize);
+ fServerPointSize:=KeyExchange.PointSize;
+
+ // The pair made at the start was on P-256. A server which named the other curve gets one made on
+ // that one instead.
+ if fPublicKeySize<>ExpectedPointSize then begin
+  TRNLEC.GenerateKeyPair(fRandomGenerator,fPrivateKey,fPublicKey,fCurve);
+  fPublicKeySize:=ExpectedPointSize;
+ end;
+
+ result:=true;
+
+end;
+
+function TRNLDTLS12Client.BuildClientFinishedFlight(const aNow:TRNLTime):boolean;
+var PreMasterSecret:array[0..TRNLP384.ElementSize-1] of TRNLUInt8;
+    Body:array[0..TRNLP384.PointSize] of TRNLUInt8;
+    KeyBlock:array[0..TRNLDTLS12TrafficKeys.KeyBlockSize-1] of TRNLUInt8;
+    EmptyCertificateList:array[0..2] of TRNLUInt8;
+    SessionHash:TRNLSHA256Hash;
+    Derived:boolean;
+begin
+
+ result:=false;
+
+ try
+
+  BeginFlight;
+
+  // An empty certificate list, which is how a client with nothing to present answers a request for
+  // one. Saying nothing at all is a protocol error; saying "none" is not.
+  if fCertificateRequested then begin
+   EmptyCertificateList[0]:=0;
+   EmptyCertificateList[1]:=0;
+   EmptyCertificateList[2]:=0;
+   if not AppendHandshakeMessage(TRNLDTLS12Handshake.TYPE_CERTIFICATE,
+                                 EmptyCertificateList[0],3,0) then begin
+    exit;
+   end;
+  end;
+
+  if not TRNLEC.SharedSecret(PreMasterSecret,fPrivateKey,
+                             fServerPoint[0],TRNLSizeUInt(fServerPointSize),
+                             fCurve) then begin
+   exit;
+  end;
+
+  // ClientECDiffieHellmanPublic, RFC 8422 section 5.7: one length byte and the point behind it
+  Body[0]:=TRNLUInt8(fPublicKeySize);
+  Move(fPublicKey[0],Body[1],fPublicKeySize);
+  if not AppendHandshakeMessage(TRNLDTLS12Handshake.TYPE_CLIENT_KEY_EXCHANGE,
+                                Body[0],1+fPublicKeySize,0) then begin
+   exit;
+  end;
+
+  // The transcript as it stands, which is everything up to and including the ClientKeyExchange.
+  // The same hash serves twice: as the session hash of RFC 7627 and as what this side's verify data
+  // is computed over. They are the same point in the handshake, and computing it twice would be two
+  // chances to pick a different one.
+  fTranscript.Snapshot(SessionHash);
+
+  if fExtendedMasterSecret then begin
+   Derived:=fKeySchedule.DeriveExtendedMasterSecret(PreMasterSecret,fCurve.ElementSize,
+                                                    SessionHash,SizeOf(SessionHash));
+  end else begin
+   // RFC 7627 is offered every time and required of nobody. The measured relay does honour it, so
+   // requiring it would work against that one - but a server which does not is not thereby an
+   // attacker, and what the extension protects against is a triple handshake, which needs
+   // resumption or renegotiation. This client does neither.
+   Derived:=fKeySchedule.DeriveMasterSecret(PreMasterSecret,fCurve.ElementSize,
+                                            fClientRandom,fServerRandom);
+  end;
+  if not Derived then begin
+   exit;
+  end;
+
+  if not fKeySchedule.DeriveKeyBlock(KeyBlock,SizeOf(KeyBlock),fClientRandom,fServerRandom) then begin
+   exit;
+  end;
+  TRNLDTLS12TrafficKeys.SplitKeyBlock(fClientKeys,fServerKeys,KeyBlock);
+
+  if not fKeySchedule.DeriveVerifyData(fClientVerifyData,true,
+                                       SessionHash,SizeOf(SessionHash)) then begin
+   exit;
+  end;
+
+  if not AppendChangeCipherSpec then begin
+   exit;
+  end;
+  // Everything this side sends from here is in the new epoch, including any alert
+  fSendEpoch:=1;
+
+  if not AppendHandshakeMessage(TRNLDTLS12Handshake.TYPE_FINISHED,
+                                fClientVerifyData[0],
+                                TRNLDTLS12KeySchedule.VerifyDataSize,
+                                1) then begin
+   exit;
+  end;
+
+  result:=TransmitFlight(aNow);
+
+ finally
+  FillChar(PreMasterSecret,SizeOf(PreMasterSecret),#0);
+  FillChar(KeyBlock,SizeOf(KeyBlock),#0);
+ end;
+
+end;
+
+function TRNLDTLS12Client.HandleServerFinished(const aBody;const aBodySize:TRNLSizeInt):boolean;
+var TranscriptHash:TRNLSHA256Hash;
+    Expected:array[0..TRNLDTLS12KeySchedule.VerifyDataSize-1] of TRNLUInt8;
+begin
+
+ result:=false;
+
+ if aBodySize<>TRNLDTLS12KeySchedule.VerifyDataSize then begin
+  Fail(RNL_DTLS12_CLIENT_FAILURE_MALFORMED_MESSAGE,ALERT_DECODE_ERROR);
+  exit;
+ end;
+
+ // Over everything up to and including this side's Finished, and not including the one being
+ // checked - which is why the caller has not put it into the transcript
+ fTranscript.Snapshot(TranscriptHash);
+ if not fKeySchedule.DeriveVerifyData(Expected,false,
+                                      TranscriptHash,SizeOf(TranscriptHash)) then begin
+  Fail(RNL_DTLS12_CLIENT_FAILURE_INTERNAL,ALERT_INTERNAL_ERROR);
+  exit;
+ end;
+
+ // Compared without a branch on the data. A comparison which stops at the first byte that differs
+ // says how many of them were right, and that is enough to find the rest one at a time.
+ if not TRNLMemory.SecureIsEqual(Expected[0],aBody,TRNLDTLS12KeySchedule.VerifyDataSize) then begin
+  Fail(RNL_DTLS12_CLIENT_FAILURE_BAD_FINISHED,ALERT_DECRYPT_ERROR);
+  exit;
+ end;
+
+ result:=true;
+
+end;
+
+procedure TRNLDTLS12Client.HandleMessage(const aNow:TRNLTime);
+var MessageType:TRNLUInt8;
+    MessageSequence:TRNLUInt16;
+    Body:PRNLUInt8Array;
+    BodySize:TRNLSizeInt;
+    ServerHello:TRNLDTLS12ServerHello;
+begin
+
+ MessageType:=fReassembler.MessageType;
+ MessageSequence:=fReassembler.MessageSequence;
+ Body:=fReassembler.Body;
+ BodySize:=fReassembler.Length_;
+
+ // RFC 6347 section 4.2.6, and its two exceptions are what make it a rule worth writing down. The
+ // HelloVerifyRequest stays out because the cookie exchange happens before the transcript begins,
+ // and the server's Finished stays out because it is computed over everything up to itself.
+ if (MessageType<>TRNLDTLS12Handshake.TYPE_HELLO_VERIFY_REQUEST) and
+    (MessageType<>TRNLDTLS12Handshake.TYPE_FINISHED) then begin
+  fTranscript.AddMessage(MessageType,MessageSequence,Body^[0],BodySize);
+ end;
+
+ inc(fExpectedReceiveMessageSequence);
+ fReassembler.Initialize;
+
+ if MessageType=TRNLDTLS12Handshake.TYPE_HELLO_VERIFY_REQUEST then begin
+
+  // Once, and only in answer to the first ClientHello. A second one is a server asking this client
+  // to start over indefinitely, and RFC 6347 section 4.2.1 has no place for it.
+  if fState<>RNL_DTLS12_CLIENT_STATE_AWAITING_HELLO_VERIFY_REQUEST then begin
+   Fail(RNL_DTLS12_CLIENT_FAILURE_UNEXPECTED_MESSAGE,ALERT_UNEXPECTED_MESSAGE);
+   exit;
+  end;
+  if not HandleHelloVerifyRequest(Body^[0],BodySize,aNow) then begin
+   exit;
+  end;
+  fState:=RNL_DTLS12_CLIENT_STATE_AWAITING_SERVER_FLIGHT;
+
+ end else if MessageType=TRNLDTLS12Handshake.TYPE_SERVER_HELLO then begin
+
+  // The cookie exchange is the server's to ask for, so a ServerHello may arrive in either of the
+  // two waiting states - but only once
+  if ((fState<>RNL_DTLS12_CLIENT_STATE_AWAITING_HELLO_VERIFY_REQUEST) and
+      (fState<>RNL_DTLS12_CLIENT_STATE_AWAITING_SERVER_FLIGHT)) or fSeenServerHello then begin
+   Fail(RNL_DTLS12_CLIENT_FAILURE_UNEXPECTED_MESSAGE,ALERT_UNEXPECTED_MESSAGE);
+   exit;
+  end;
+  if not ServerHello.Parse(Body^[0],BodySize) then begin
+   Fail(RNL_DTLS12_CLIENT_FAILURE_MALFORMED_MESSAGE,ALERT_HANDSHAKE_FAILURE);
+   exit;
+  end;
+  Move(ServerHello.Random_[0],fServerRandom[0],TRNLDTLS12ClientHello.RandomSize);
+  fExtendedMasterSecret:=ServerHello.ExtendedMasterSecret;
+  fSeenServerHello:=true;
+  fState:=RNL_DTLS12_CLIENT_STATE_AWAITING_SERVER_FLIGHT;
+
+ end else if MessageType=TRNLDTLS12Handshake.TYPE_CERTIFICATE then begin
+
+  if (fState<>RNL_DTLS12_CLIENT_STATE_AWAITING_SERVER_FLIGHT) or
+     (not fSeenServerHello) or fSeenCertificate then begin
+   Fail(RNL_DTLS12_CLIENT_FAILURE_UNEXPECTED_MESSAGE,ALERT_UNEXPECTED_MESSAGE);
+   exit;
+  end;
+  if not HandleCertificate(Body^[0],BodySize) then begin
+   exit;
+  end;
+  fSeenCertificate:=true;
+
+ end else if MessageType=TRNLDTLS12Handshake.TYPE_SERVER_KEY_EXCHANGE then begin
+
+  // After the certificate and not before it: the signature over these parameters is checked with
+  // the key out of that certificate, and a server which sent them the other way round would be
+  // asking for them to be taken on trust and checked afterwards
+  if (fState<>RNL_DTLS12_CLIENT_STATE_AWAITING_SERVER_FLIGHT) or
+     (not fSeenCertificate) or fSeenServerKeyExchange then begin
+   Fail(RNL_DTLS12_CLIENT_FAILURE_UNEXPECTED_MESSAGE,ALERT_UNEXPECTED_MESSAGE);
+   exit;
+  end;
+  if not HandleServerKeyExchange(Body^[0],BodySize) then begin
+   exit;
+  end;
+  fSeenServerKeyExchange:=true;
+
+ end else if MessageType=TRNLDTLS12Handshake.TYPE_CERTIFICATE_REQUEST then begin
+
+  if (fState<>RNL_DTLS12_CLIENT_STATE_AWAITING_SERVER_FLIGHT) or
+     (not fSeenServerKeyExchange) then begin
+   Fail(RNL_DTLS12_CLIENT_FAILURE_UNEXPECTED_MESSAGE,ALERT_UNEXPECTED_MESSAGE);
+   exit;
+  end;
+  // Nothing in it is read. This client has no certificate to offer whatever the server will accept,
+  // so the only thing which follows from the request is that an empty list has to be sent.
+  fCertificateRequested:=true;
+
+ end else if MessageType=TRNLDTLS12Handshake.TYPE_SERVER_HELLO_DONE then begin
+
+  if (fState<>RNL_DTLS12_CLIENT_STATE_AWAITING_SERVER_FLIGHT) or
+     (not fSeenServerKeyExchange) then begin
+   Fail(RNL_DTLS12_CLIENT_FAILURE_UNEXPECTED_MESSAGE,ALERT_UNEXPECTED_MESSAGE);
+   exit;
+  end;
+  if BodySize<>0 then begin
+   Fail(RNL_DTLS12_CLIENT_FAILURE_MALFORMED_MESSAGE,ALERT_DECODE_ERROR);
+   exit;
+  end;
+  if not BuildClientFinishedFlight(aNow) then begin
+   Fail(RNL_DTLS12_CLIENT_FAILURE_INTERNAL,ALERT_INTERNAL_ERROR);
+   exit;
+  end;
+  fState:=RNL_DTLS12_CLIENT_STATE_AWAITING_SERVER_FINISHED;
+
+ end else if MessageType=TRNLDTLS12Handshake.TYPE_FINISHED then begin
+
+  if fState<>RNL_DTLS12_CLIENT_STATE_AWAITING_SERVER_FINISHED then begin
+   Fail(RNL_DTLS12_CLIENT_FAILURE_UNEXPECTED_MESSAGE,ALERT_UNEXPECTED_MESSAGE);
+   exit;
+  end;
+  // In the new epoch, which is to say protected. A Finished which arrives in the clear is a server
+  // proposing that the key change be skipped, and taking it would make the whole exchange
+  // unauthenticated while looking exactly like one that worked.
+  if fReceiveEpoch<>1 then begin
+   Fail(RNL_DTLS12_CLIENT_FAILURE_UNEXPECTED_MESSAGE,ALERT_UNEXPECTED_MESSAGE);
+   exit;
+  end;
+  if not HandleServerFinished(Body^[0],BodySize) then begin
+   exit;
+  end;
+  fFlightPending:=false;
+  fState:=RNL_DTLS12_CLIENT_STATE_ESTABLISHED;
+
+ end else begin
+
+  Fail(RNL_DTLS12_CLIENT_FAILURE_UNEXPECTED_MESSAGE,ALERT_UNEXPECTED_MESSAGE);
+
+ end;
+
+end;
+
+class function TRNLTLS12PRF.Process(out aOutput;const aOutputSize:TRNLSizeUInt;
+                                    const aSecret;const aSecretSize:TRNLSizeUInt;
+                                    const aLabel:TRNLRawByteString;
+                                    const aSeed;const aSeedSize:TRNLSizeUInt):boolean;
+var Context:TRNLHMACContext;
+    A,Block:TRNLSHA256Hash;
+    Position,Chunk:TRNLSizeUInt;
+
+ // The three pieces of every message here, fed one after the other rather than joined first
+ function StartAndFeedSeed(const aWithA:boolean):boolean;
+ begin
+  result:=Context.Initialize(TRNLSHA256.Descriptor,aSecret,aSecretSize);
+  if result then begin
+   if aWithA then begin
+    Context.Update(A,SizeOf(TRNLSHA256Hash));
+   end;
+   if Length(aLabel)>0 then begin
+    Context.Update(aLabel[1],Length(aLabel));
+   end;
+   if aSeedSize>0 then begin
+    Context.Update(aSeed,aSeedSize);
+   end;
+  end;
+ end;
+
+begin
+
+ result:=false;
+
+ if aOutputSize=0 then begin
+  result:=true;
+  exit;
+ end;
+
+ try
+
+  // A(1) = HMAC(secret, label|seed)
+  if not (StartAndFeedSeed(false) and Context.Finalize(A)) then begin
+   exit;
+  end;
+
+  Position:=0;
+  while Position<aOutputSize do begin
+
+   if not (StartAndFeedSeed(true) and Context.Finalize(Block)) then begin
+    exit;
+   end;
+   Chunk:=aOutputSize-Position;
+   if Chunk>TRNLSizeUInt(SizeOf(TRNLSHA256Hash)) then begin
+    Chunk:=SizeOf(TRNLSHA256Hash);
+   end;
+   Move(Block[0],PRNLUInt8Array(TRNLPointer(@aOutput))^[Position],Chunk);
+   inc(Position,Chunk);
+
+   // A(i+1) = HMAC(secret, A(i)), which is the only place A is the whole message
+   if not Context.Initialize(TRNLSHA256.Descriptor,aSecret,aSecretSize) then begin
+    exit;
+   end;
+   Context.Update(A,SizeOf(TRNLSHA256Hash));
+   if not Context.Finalize(A) then begin
+    exit;
+   end;
+
+  end;
+
+  result:=true;
+
+ finally
+  FillChar(A,SizeOf(TRNLSHA256Hash),#0);
+  FillChar(Block,SizeOf(TRNLSHA256Hash),#0);
+  Context.Clear;
+ end;
+
+end;
+
+class procedure TRNLDTLS12TrafficKeys.SplitKeyBlock(out aClientKeys,aServerKeys:TRNLDTLS12TrafficKeys;
+                                                    const aKeyBlock);
+var Block:PRNLUInt8Array;
+begin
+ Block:=PRNLUInt8Array(TRNLPointer(@aKeyBlock));
+ Move(Block^[0],aClientKeys.Key,KeySize);
+ Move(Block^[KeySize],aServerKeys.Key,KeySize);
+ Move(Block^[KeySize*2],aClientKeys.IV,IVSize);
+ Move(Block^[(KeySize*2)+IVSize],aServerKeys.IV,IVSize);
+end;
+
+procedure TRNLDTLS12TrafficKeys.Clear;
+begin
+ FillChar(self,SizeOf(TRNLDTLS12TrafficKeys),#0);
+end;
+
+class procedure TRNLDTLS12Record.BuildNonce(out aNonce;const aIV;
+                                            const aEpoch:TRNLUInt16;const aSequenceNumber:TRNLUInt64);
+var Index:TRNLSizeInt;
+    Number:array[0..7] of TRNLUInt8;
+begin
+ // RFC 7905: the same construction TLS 1.3 uses, the eight byte number left padded with zeros to
+ // the width of the iv and xored over it
+ TRNLMemoryAccess.StoreBigEndianUInt16(Number[0],aEpoch);
+ TRNLMemoryAccess.StoreBigEndianUInt32(Number[2],TRNLUInt32((aSequenceNumber shr 16) and $ffffffff));
+ TRNLMemoryAccess.StoreBigEndianUInt16(Number[6],TRNLUInt16(aSequenceNumber and $ffff));
+ Move(aIV,aNonce,TRNLDTLS12TrafficKeys.IVSize);
+ for Index:=0 to 7 do begin
+  PRNLUInt8Array(TRNLPointer(@aNonce))^[(TRNLDTLS12TrafficKeys.IVSize-8)+Index]:=
+   PRNLUInt8Array(TRNLPointer(@aNonce))^[(TRNLDTLS12TrafficKeys.IVSize-8)+Index] xor Number[Index];
+ end;
+end;
+
+class procedure TRNLDTLS12Record.BuildAssociatedData(out aData;
+                                                     const aEpoch:TRNLUInt16;const aSequenceNumber:TRNLUInt64;
+                                                     const aContentType:TRNLUInt8;
+                                                     const aContentSize:TRNLSizeUInt);
+var Data:PRNLUInt8Array;
+begin
+ Data:=PRNLUInt8Array(TRNLPointer(@aData));
+ TRNLMemoryAccess.StoreBigEndianUInt16(Data^[0],aEpoch);
+ TRNLMemoryAccess.StoreBigEndianUInt32(Data^[2],TRNLUInt32((aSequenceNumber shr 16) and $ffffffff));
+ TRNLMemoryAccess.StoreBigEndianUInt16(Data^[6],TRNLUInt16(aSequenceNumber and $ffff));
+ Data^[8]:=aContentType;
+ Data^[9]:=VersionMajor;
+ Data^[10]:=VersionMinor;
+ TRNLMemoryAccess.StoreBigEndianUInt16(Data^[11],TRNLUInt16(aContentSize));
+end;
+
+class procedure TRNLDTLS12Record.BuildHeader(out aHeader;
+                                             const aEpoch:TRNLUInt16;const aSequenceNumber:TRNLUInt64;
+                                             const aContentType:TRNLUInt8;
+                                             const aFragmentSize:TRNLSizeUInt);
+var Header:PRNLUInt8Array;
+begin
+ Header:=PRNLUInt8Array(TRNLPointer(@aHeader));
+ Header^[0]:=aContentType;
+ Header^[1]:=VersionMajor;
+ Header^[2]:=VersionMinor;
+ TRNLMemoryAccess.StoreBigEndianUInt16(Header^[3],aEpoch);
+ TRNLMemoryAccess.StoreBigEndianUInt32(Header^[5],TRNLUInt32((aSequenceNumber shr 16) and $ffffffff));
+ TRNLMemoryAccess.StoreBigEndianUInt16(Header^[9],TRNLUInt16(aSequenceNumber and $ffff));
+ TRNLMemoryAccess.StoreBigEndianUInt16(Header^[11],TRNLUInt16(aFragmentSize));
+end;
+
+class function TRNLDTLS12Record.WritePlain(out aDatagram;out aDatagramSize:TRNLSizeUInt;
+                                           const aMaximumDatagramSize:TRNLSizeUInt;
+                                           const aEpoch:TRNLUInt16;const aSequenceNumber:TRNLUInt64;
+                                           const aContentType:TRNLUInt8;
+                                           const aContent;const aContentSize:TRNLSizeUInt):boolean;
+var Datagram:PRNLUInt8Array;
+begin
+ result:=false;
+ aDatagramSize:=0;
+ if (aContentSize>TRNLSizeUInt(MaximumContentSize)) or
+    ((TRNLSizeUInt(HeaderSize)+aContentSize)>aMaximumDatagramSize) then begin
+  exit;
+ end;
+ Datagram:=PRNLUInt8Array(TRNLPointer(@aDatagram));
+ BuildHeader(Datagram^[0],aEpoch,aSequenceNumber,aContentType,aContentSize);
+ if aContentSize>0 then begin
+  Move(aContent,Datagram^[HeaderSize],aContentSize);
+ end;
+ aDatagramSize:=TRNLSizeUInt(HeaderSize)+aContentSize;
+ result:=true;
+end;
+
+class function TRNLDTLS12Record.ReadPlain(out aContent;out aContentSize:TRNLSizeUInt;
+                                          out aContentType:TRNLUInt8;
+                                          out aEpoch:TRNLUInt16;out aSequenceNumber:TRNLUInt64;
+                                          out aConsumedSize:TRNLSizeUInt;
+                                          const aMaximumContentSize:TRNLSizeUInt;
+                                          const aDatagram;const aDatagramSize:TRNLSizeUInt):boolean;
+var Datagram:PRNLUInt8Array;
+    Length_:TRNLSizeUInt;
+begin
+
+ result:=false;
+ aContentSize:=0;
+ aContentType:=0;
+ aEpoch:=0;
+ aSequenceNumber:=0;
+ aConsumedSize:=0;
+
+ if aDatagramSize<TRNLSizeUInt(HeaderSize) then begin
+  exit;
+ end;
+
+ Datagram:=PRNLUInt8Array(TRNLPointer(@aDatagram));
+
+ // A version this client does not speak is a record it cannot lay out, not one to guess at
+ if (Datagram^[1]<>VersionMajor) or (Datagram^[2]<>VersionMinor) then begin
+  exit;
+ end;
+
+ Length_:=TRNLMemoryAccess.LoadBigEndianUInt16(Datagram^[11]);
+ // The length field is the one which must not be believed
+ if Length_>(aDatagramSize-TRNLSizeUInt(HeaderSize)) then begin
+  exit;
+ end;
+ if Length_>aMaximumContentSize then begin
+  exit;
+ end;
+
+ aContentType:=Datagram^[0];
+ aEpoch:=TRNLMemoryAccess.LoadBigEndianUInt16(Datagram^[3]);
+ aSequenceNumber:=(TRNLUInt64(TRNLMemoryAccess.LoadBigEndianUInt32(Datagram^[5])) shl 16) or
+                  TRNLUInt64(TRNLMemoryAccess.LoadBigEndianUInt16(Datagram^[9]));
+ if Length_>0 then begin
+  Move(Datagram^[HeaderSize],aContent,Length_);
+ end;
+ aContentSize:=Length_;
+ aConsumedSize:=TRNLSizeUInt(HeaderSize)+Length_;
+ result:=true;
+
+end;
+
+class function TRNLDTLS12Record.Protect(out aDatagram;out aDatagramSize:TRNLSizeUInt;
+                                        const aMaximumDatagramSize:TRNLSizeUInt;
+                                        const aKeys:TRNLDTLS12TrafficKeys;
+                                        const aEpoch:TRNLUInt16;const aSequenceNumber:TRNLUInt64;
+                                        const aContentType:TRNLUInt8;
+                                        const aContent;const aContentSize:TRNLSizeUInt):boolean;
+var Datagram:PRNLUInt8Array;
+    Nonce:array[0..TRNLDTLS12TrafficKeys.IVSize-1] of TRNLUInt8;
+    AssociatedData:array[0..HeaderSize-1] of TRNLUInt8;
+    TotalSize:TRNLSizeUInt;
+begin
+
+ result:=false;
+ aDatagramSize:=0;
+
+ if aContentSize>TRNLSizeUInt(MaximumContentSize) then begin
+  exit;
+ end;
+ TotalSize:=TRNLSizeUInt(HeaderSize)+aContentSize+TRNLSizeUInt(TagSize);
+ if TotalSize>aMaximumDatagramSize then begin
+  exit;
+ end;
+
+ Datagram:=PRNLUInt8Array(TRNLPointer(@aDatagram));
+
+ try
+  BuildHeader(Datagram^[0],aEpoch,aSequenceNumber,aContentType,aContentSize+TRNLSizeUInt(TagSize));
+  BuildNonce(Nonce,aKeys.IV,aEpoch,aSequenceNumber);
+  BuildAssociatedData(AssociatedData,aEpoch,aSequenceNumber,aContentType,aContentSize);
+  if aContentSize>0 then begin
+   Move(aContent,Datagram^[HeaderSize],aContentSize);
+  end;
+  TRNLChaCha20Poly1305.Encrypt(Datagram^[HeaderSize],
+                               Datagram^[TRNLSizeUInt(HeaderSize)+aContentSize],
+                               aKeys.Key,Nonce,
+                               AssociatedData[0],HeaderSize,
+                               Datagram^[HeaderSize],aContentSize);
+  aDatagramSize:=TotalSize;
+  result:=true;
+ finally
+  FillChar(Nonce,SizeOf(Nonce),#0);
+ end;
+
+end;
+
+class function TRNLDTLS12Record.Unprotect(out aContent;out aContentSize:TRNLSizeUInt;
+                                          out aContentType:TRNLUInt8;
+                                          out aSequenceNumber:TRNLUInt64;
+                                          out aConsumedSize:TRNLSizeUInt;
+                                          const aMaximumContentSize:TRNLSizeUInt;
+                                          const aKeys:TRNLDTLS12TrafficKeys;
+                                          const aEpoch:TRNLUInt16;
+                                          var aReplayWindow:TRNLDTLSReplayWindow;
+                                          const aDatagram;const aDatagramSize:TRNLSizeUInt):boolean;
+var Datagram:PRNLUInt8Array;
+    Nonce:array[0..TRNLDTLS12TrafficKeys.IVSize-1] of TRNLUInt8;
+    AssociatedData:array[0..HeaderSize-1] of TRNLUInt8;
+    Fragment,PlainSize:TRNLSizeUInt;
+    Epoch:TRNLUInt16;
+begin
+
+ result:=false;
+ aContentSize:=0;
+ aContentType:=0;
+ aSequenceNumber:=0;
+ aConsumedSize:=0;
+
+ if aDatagramSize<TRNLSizeUInt(HeaderSize) then begin
+  exit;
+ end;
+
+ Datagram:=PRNLUInt8Array(TRNLPointer(@aDatagram));
+
+ if (Datagram^[1]<>VersionMajor) or (Datagram^[2]<>VersionMinor) then begin
+  exit;
+ end;
+
+ // The whole epoch, not two bits of it: DTLS 1.2 carries all sixteen, so a record from another one
+ // can be told apart exactly rather than approximately
+ Epoch:=TRNLMemoryAccess.LoadBigEndianUInt16(Datagram^[3]);
+ if Epoch<>aEpoch then begin
+  exit;
+ end;
+
+ Fragment:=TRNLMemoryAccess.LoadBigEndianUInt16(Datagram^[11]);
+ if Fragment>(aDatagramSize-TRNLSizeUInt(HeaderSize)) then begin
+  exit;
+ end;
+ if Fragment<TRNLSizeUInt(TagSize) then begin
+  exit;
+ end;
+ PlainSize:=Fragment-TRNLSizeUInt(TagSize);
+ if PlainSize>aMaximumContentSize then begin
+  exit;
+ end;
+
+ aSequenceNumber:=(TRNLUInt64(TRNLMemoryAccess.LoadBigEndianUInt32(Datagram^[5])) shl 16) or
+                  TRNLUInt64(TRNLMemoryAccess.LoadBigEndianUInt16(Datagram^[9]));
+
+ // Asked before the AEAD runs, so that a replayed record costs a test rather than a decryption
+ if not aReplayWindow.Permits(aSequenceNumber) then begin
+  exit;
+ end;
+
+ try
+  BuildNonce(Nonce,aKeys.IV,Epoch,aSequenceNumber);
+  BuildAssociatedData(AssociatedData,Epoch,aSequenceNumber,Datagram^[0],PlainSize);
+  if not TRNLChaCha20Poly1305.Decrypt(aContent,
+                                      aKeys.Key,Nonce,
+                                      Datagram^[TRNLSizeUInt(HeaderSize)+PlainSize],
+                                      AssociatedData[0],HeaderSize,
+                                      Datagram^[HeaderSize],PlainSize) then begin
+   exit;
+  end;
+ finally
+  FillChar(Nonce,SizeOf(Nonce),#0);
+ end;
+
+ // Only now, with the AEAD satisfied, does this number count as seen
+ aReplayWindow.Remember(aSequenceNumber);
+
+ aContentType:=Datagram^[0];
+ aContentSize:=PlainSize;
+ aConsumedSize:=TRNLSizeUInt(HeaderSize)+Fragment;
+ result:=true;
+
 end;
 
 function TRNLDTLSTrafficKeys.DeriveFrom(const aTrafficSecret;const aTrafficSecretSize:TRNLSizeUInt):boolean;
@@ -20802,22 +27908,22 @@ const CheckData:array[0..8] of TRNLUInt8=($31,$32,$33,$34,$35,$36,$37,$38,$39); 
 begin
 
 {$if not defined(NEXTGEN)}
- write('[CRC32C] Castagnoli check value of "123456789" ... ');
+ RNLSelfTestBegin('[CRC32C] Castagnoli check value of "123456789" ... ');
 {$ifend}
  if ChecksumCRC32C(CheckData,SizeOf(CheckData))=CRC32CCheckValue then begin
 {$if not defined(NEXTGEN)}
-  writeln('OK!');
+  RNLSelfTestSucceeded;
 {$ifend}
  end else begin
   RNLSelfTestFailure;
  end;
 
 {$if not defined(NEXTGEN)}
- write('[CRC32] IEEE check value of "123456789" ... ');
+ RNLSelfTestBegin('[CRC32] IEEE check value of "123456789" ... ');
 {$ifend}
  if ChecksumCRC32(CheckData,SizeOf(CheckData))=CRC32CheckValue then begin
 {$if not defined(NEXTGEN)}
-  writeln('OK!');
+  RNLSelfTestSucceeded;
 {$ifend}
  end else begin
   RNLSelfTestFailure;
@@ -20878,31 +27984,95 @@ begin
  inherited Destroy;
 end;
 
-class function TRNLInstance.SelfTestCryptography:boolean;
+class function TRNLInstance.SelfTestCryptography(const aReport:TRNLSelfTestReportProcedure=nil):boolean;
+var CountChecks,CountFailures:TRNLSizeInt;
+begin
+ result:=SelfTestCryptography(CountChecks,CountFailures,aReport);
+end;
+
+class function TRNLInstance.SelfTestCryptographyGroup(const aGroup:TRNLCryptographySelfTestGroup;
+                                                      out aCountChecks,aCountFailures:TRNLSizeInt;
+                                                      const aReport:TRNLSelfTestReportProcedure=nil):boolean;
 begin
  RNLCountSelfTestFailures:=0;
- RNLSelfTestChecksums;
- TRNLValue25519.SelfTest;
- TRNLCurve25519.SelfTest;
- TRNLX25519.SelfTest;
- TRNLED25519.SelfTest;
- TRNLChaCha20.SelfTest;
- TRNLPoly1305.SelfTest;
- TRNLChaCha20Poly1305.SelfTest;
- TRNLSHA512.SelfTest;
- TRNLSHA256.SelfTest;
- TRNLHMACSHA256.SelfTest;
- TRNLHMACSHA512.SelfTest;
- TRNLHKDF.SelfTest;
- TRNLTLS13KeySchedule.SelfTest;
- TRNLDTLSRecord.SelfTest;
+ RNLCountSelfTestChecks:=0;
+ RNLSelfTestReport:=aReport;
+ try
+  case aGroup of
+   RNL_CRYPTOGRAPHY_SELF_TEST_GROUP_CHECKSUMS:begin
+    RNLSelfTestChecksums;
+   end;
+   RNL_CRYPTOGRAPHY_SELF_TEST_GROUP_CURVE25519:begin
+    TRNLValue25519.SelfTest;
+    TRNLCurve25519.SelfTest;
+    TRNLX25519.SelfTest;
+    TRNLED25519.SelfTest;
+   end;
+   RNL_CRYPTOGRAPHY_SELF_TEST_GROUP_NIST_CURVES:begin
+    TRNLP256.SelfTest;
+    TRNLP384.SelfTest;
+   end;
+   RNL_CRYPTOGRAPHY_SELF_TEST_GROUP_CERTIFICATES:begin
+    TRNLASN1Reader.SelfTest;
+    TRNLX509Certificate.SelfTest;
+    TRNLX509.SelfTest;
+   end;
+   RNL_CRYPTOGRAPHY_SELF_TEST_GROUP_CIPHERS:begin
+    TRNLChaCha20.SelfTest;
+    TRNLPoly1305.SelfTest;
+    TRNLChaCha20Poly1305.SelfTest;
+   end;
+   RNL_CRYPTOGRAPHY_SELF_TEST_GROUP_HASHES:begin
+    TRNLSHA512.SelfTest;
+    TRNLSHA384.SelfTest;
+    TRNLSHA256.SelfTest;
+    TRNLHMACSHA256.SelfTest;
+    TRNLHMACSHA512.SelfTest;
 {$if defined(RNL_TURN_RFC5389_COMPAT)}
- TRNLSHA1.SelfTest;
- TRNLHMACSHA1.SelfTest;
- TRNLMD5.SelfTest;
+    TRNLSHA1.SelfTest;
+    TRNLHMACSHA1.SelfTest;
+    TRNLMD5.SelfTest;
 {$ifend}
- TRNLBLAKE2B.SelfTest;
+    TRNLBLAKE2B.SelfTest;
+   end;
+   RNL_CRYPTOGRAPHY_SELF_TEST_GROUP_KEY_DERIVATION:begin
+    TRNLHKDF.SelfTest;
+    TRNLTLS13KeySchedule.SelfTest;
+    TRNLTLS12PRF.SelfTest;
+   end;
+   else {RNL_CRYPTOGRAPHY_SELF_TEST_GROUP_RECORD_LAYERS:}begin
+    TRNLDTLSRecord.SelfTest;
+    TRNLDTLS12Record.SelfTest;
+    TRNLDTLS12Reassembler.SelfTest;
+    TRNLDTLS12ServerKeyExchange.SelfTest;
+    TRNLDTLS12KeySchedule.SelfTest;
+   end;
+  end;
+ finally
+  RNLSelfTestReport:=nil;
+ end;
+ aCountChecks:=RNLCountSelfTestChecks;
+ aCountFailures:=RNLCountSelfTestFailures;
  result:=RNLCountSelfTestFailures=0;
+end;
+
+class function TRNLInstance.SelfTestCryptography(out aCountChecks,aCountFailures:TRNLSizeInt;
+                                                 const aReport:TRNLSelfTestReportProcedure=nil):boolean;
+var Group:TRNLCryptographySelfTestGroup;
+    Checks,Failures:TRNLSizeInt;
+begin
+ aCountChecks:=0;
+ aCountFailures:=0;
+ result:=true;
+ // Every group, in the order they are declared in, so that running the lot is the same thing as
+ // running each of them and nothing can be left out of one list but not the other
+ for Group:=Low(TRNLCryptographySelfTestGroup) to High(TRNLCryptographySelfTestGroup) do begin
+  if not SelfTestCryptographyGroup(Group,Checks,Failures,aReport) then begin
+   result:=false;
+  end;
+  inc(aCountChecks,Checks);
+  inc(aCountFailures,Failures);
+ end;
 end;
 
 constructor TRNLNetworkEvent.Create;
@@ -22136,12 +29306,16 @@ function TRNLRealNetwork.AddressGetHost(const aAddress:TRNLAddress;out aName;con
 var SIN:TSockaddrStorage;
 begin
  aAddress.SetSIN(@SIN,RNL_IPV6);
+ // Zero is success, the same way round as getaddrinfo. This read <>0 in all three branches, so the
+ // result was the exact opposite of the truth. It went unnoticed because the buffer is filled either
+ // way and nothing inside RNL reads the result - only the decorators, which pass it on unexamined.
+ // An application which believed it got nothing back.
 {$if defined(Windows)}
- result:=GetNameInfo(TRNLPointer(@SIN),TRNLAddressFamily(RNL_IPV6).GetSockAddrSize,@aName,aNameLength,nil,0,aFlags)<>0;
+ result:=GetNameInfo(TRNLPointer(@SIN),TRNLAddressFamily(RNL_IPV6).GetSockAddrSize,@aName,aNameLength,nil,0,aFlags)=0;
 {$elseif defined(fpc)}
- result:=getnameinfo(TRNLPointer(@SIN),TRNLAddressFamily(RNL_IPV6).GetSockAddrSize,@aName,aNameLength,nil,0,aFlags)<>0;
+ result:=getnameinfo(TRNLPointer(@SIN),TRNLAddressFamily(RNL_IPV6).GetSockAddrSize,@aName,aNameLength,nil,0,aFlags)=0;
 {$else}
- result:=getnameinfo(sockaddr(TRNLPointer(@SIN)^),TRNLAddressFamily(RNL_IPV6).GetSockAddrSize,@aName,aNameLength,nil,0,aFlags)<>0;
+ result:=getnameinfo(sockaddr(TRNLPointer(@SIN)^),TRNLAddressFamily(RNL_IPV6).GetSockAddrSize,@aName,aNameLength,nil,0,aFlags)=0;
 {$ifend}
 end;
 
@@ -24714,9 +31888,11 @@ var Request,Response:TRNLSTUNMessage;
     ErrorCode:TRNLUInt32;
     Reason:TRNLRawByteString;
     Lifetime:TRNLUInt32;
+    Signed:boolean;
 begin
 
  result:=false;
+ ErrorCode:=0;
 
  // The first attempt goes out bare and is expected to come back as 401 with the realm and the
  // nonce; the second one is signed. That second one can legitimately be rejected once more, with
@@ -24729,6 +31905,11 @@ begin
   for Index:=0 to SizeOf(TRNLSTUNTransactionID)-1 do begin
    TransactionID[Index]:=TRNLUInt8(fTURNNetwork.fRandomGenerator.GetUInt32 and $ff);
   end;
+
+  // Whether this one goes out carrying credentials, which is what tells a 401 meaning "you did not
+  // say who you are" apart from one meaning "who you say you are is wrong". Taken before the request
+  // is built, because building it is what signs it.
+  Signed:=fCredentials.HasRealm;
 
   BuildRequest(Request,RNL_TURN_METHOD_ALLOCATE,TransactionID,fServerAddress,0,RNL_TURN_DEFAULT_LIFETIME);
 
@@ -24786,6 +31967,17 @@ begin
    exit;
   end;
 
+  // A 401 answering a request which already carried credentials says the credentials are wrong, not
+  // that they were missing, and RFC 8489 section 9.2.4 says it must not be retried with the same
+  // ones. Without this the loop below asks three more times with the same wrong password, gets the
+  // same answer, and runs out - and a wrong password is the commonest way for an allocation to fail.
+  // A nonce which went stale is the other case and looks different: that is a 438 and carries a new
+  // nonce which is worth another attempt.
+  if (ErrorCode=RNL_STUN_ERROR_UNAUTHORIZED) and Signed then begin
+   fLastErrorCode:=ErrorCode;
+   exit;
+  end;
+
   // Counted here as well as in the asynchronous path, so that the counter means what it says no
   // matter which of the two dealt with it
   if ErrorCode=RNL_STUN_ERROR_STALE_NONCE then begin
@@ -24797,6 +31989,11 @@ begin
   end;
 
  end;
+
+ // Running out of attempts is still a rejection, and it has a code. Leaving it unset would make
+ // giving up look exactly like never having been answered at all, which is the one thing this
+ // property exists to tell apart.
+ fLastErrorCode:=ErrorCode;
 
 end;
 

@@ -1,24 +1,24 @@
-(******************************************************************************
- *                        RNL TEST NETWORK BOTTLENECK                         *
- ******************************************************************************
- *                        Version 2026-07-28-00-00-0000                       *
- ******************************************************************************
- *                                                                            *
- * The existing simulators PRESCRIBE delay and loss: TRNLNetworkInterference-  *
+(********************************************************************************
+ *                        RNL TEST NETWORK BOTTLENECK                           *
+ ********************************************************************************
+ *                        Version 2026-07-28-00-00-0000                         *
+ ********************************************************************************
+ *                                                                              *
+ * The existing simulators PRESCRIBE delay and loss: TRNLNetworkInterference-   *
  * Simulator is told a latency and adds it to every datagram, and it is told a  *
  * loss probability and rolls a die. Neither of the two numbers has anything to *
- * do with how much is being sent.                                            *
- *                                                                            *
+ * do with how much is being sent.                                              *
+ *                                                                              *
  * A congestion controller reacts to the exact opposite: to a queue which       *
  * ARISES from its own sending rate, and to loss which happens because that     *
  * queue ran full. Against a prescribed latency there is nothing to control,    *
  * and a prescribed loss probability punishes every rate equally, so no         *
  * controller can be told apart from any other one. That is the gap this        *
  * decorator closes, and until it exists, no statement about a controller is    *
- * verifiable.                                                                 *
- *                                                                            *
+ * verifiable.                                                                  *
+ *                                                                              *
  * The model is a link with a drain rate and a queue of finite depth:           *
- *                                                                            *
+ *                                                                              *
  *   - Each datagram occupies the link for size / drain rate seconds.           *
  *   - A datagram which arrives while the link is still busy waits, and its     *
  *     waiting time is the queueing delay a controller can measure as a rise    *
@@ -27,35 +27,35 @@
  *     The SENDER still sees a successful send, because a datagram which is     *
  *     discarded somewhere downstream is indistinguishable from one which was   *
  *     handed over to the network - which is precisely the situation a real     *
- *     bottleneck creates.                                                     *
- *                                                                            *
+ *     bottleneck creates.                                                      *
+ *                                                                              *
  * The depth is expressible in bytes and in milliseconds, and both matter: a    *
  * home router with a deep buffer is the bufferbloat case, where delay grows    *
  * for a long time before anything is lost, and a router with a shallow one is  *
  * the modern case, where loss arrives early and delay stays low. A controller  *
  * which only works against one of the two is not a controller.                 *
- *                                                                            *
+ *                                                                              *
  * Cross traffic is modelled as a share of the drain rate which is not          *
  * available to us. That is the rate effect of a competing flow and nothing     *
  * else: a real competitor would also occupy part of the queue, and therefore   *
  * raise the standing delay, which this deliberately does not do. Stated here   *
- * rather than left to be discovered.                                          *
- *                                                                            *
+ * rather than left to be discovered.                                           *
+ *                                                                              *
  * Which datagrams a link applies to is decided by their DESTINATION address,   *
  * so the two directions of a connection are two separate links and are         *
  * configured separately - asymmetric access is the normal case, not the        *
  * exception. Everything which matches no link passes through untouched, which  *
  * keeps STUN, TURN and discovery traffic out of the measurement.               *
- *                                                                            *
+ *                                                                              *
  * Accounting is done in microseconds, not in the milliseconds TRNLTime counts  *
  * in: at a drain rate of a megabyte per second a datagram occupies the link    *
  * for well under a millisecond, and rounded to milliseconds every such link    *
- * would come out as infinitely fast.                                          *
- *                                                                            *
+ * would come out as infinitely fast.                                           *
+ *                                                                              *
  * Kept in the tests directory, like the fault injector: this is test tooling   *
- * and not library functionality.                                              *
- *                                                                            *
- ******************************************************************************)
+ * and not library functionality.                                               *
+ *                                                                              *
+ ********************************************************************************)
 unit RNLTestNetworkBottleneck;
 {$ifdef fpc}
  {$mode delphi}

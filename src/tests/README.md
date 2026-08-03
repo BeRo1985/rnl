@@ -43,7 +43,7 @@ timing dependent number of times, which is a defect in the test, not a platform 
 | `RNLTestNATNetwork.pas` | A `TRNLNetwork` decorator which behaves like a NAT, in four kinds |
 | `RNLTestTURNServer.pas` | A TURN server complete enough to carry a connection over it |
 | `RNLTestRegressions.pas` | The actual test cases |
-| `checkalignment.py` | Checks that continuation lines line up under what they continue |
+| `checkalignment.c` | Checks that continuation lines line up under what they continue |
 
 ## Why there is a fault injector
 
@@ -172,14 +172,15 @@ worth knowing that this is the one place where the suite is not hermetic.
 
 ## Keeping the line alignment
 
-`checkalignment.py` checks one thing: that a continuation line lines up under whatever it continues, so
+`checkalignment.c` checks one thing: that a continuation line lines up under whatever it continues, so
 that a parameter list wrapped over four lines stays readable. It is separate from the compiler because
 no compiler cares, and it is worth having because a patch which inserts a line into a wrapped call is
 the most common way for that alignment to rot.
 
 ```sh
 cd src/tests
-python3 checkalignment.py
+clang -o checkalignment checkalignment.c
+./checkalignment
 ```
 
 It has to report no deviations before a change is done. A misalignment it finds is never a matter of

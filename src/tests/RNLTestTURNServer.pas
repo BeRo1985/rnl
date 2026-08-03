@@ -4,27 +4,27 @@
  *                        Version 2026-07-27-00-00-0000                       *
  ******************************************************************************
  *                                                                            *
- * A TURN server complete enough to carry an RNL connection over it, so that   *
- * TRNLTURNNetwork can be tested against something deterministic instead of    *
- * against whatever a public relay happens to do today.                        *
+ * A TURN server complete enough to carry an RNL connection over it, so that  *
+ * TRNLTURNNetwork can be tested against something deterministic instead of   *
+ * against whatever a public relay happens to do today.                       *
  *                                                                            *
- * It speaks the part of RFC 8656 a client actually needs: Allocate with long  *
- * term credentials, Refresh, CreatePermission, ChannelBind, Send indications  *
- * and Data indications, plus ChannelData frames in both directions.           *
+ * It speaks the part of RFC 8656 a client actually needs: Allocate with long *
+ * term credentials, Refresh, CreatePermission, ChannelBind, Send indications *
+ * and Data indications, plus ChannelData frames in both directions.          *
  *                                                                            *
- * Each allocation gets a socket of its own, because that is what a relayed    *
- * address is: an address a peer can send to which forwards to exactly one     *
- * client. Without that second socket there would be nothing for a peer to     *
+ * Each allocation gets a socket of its own, because that is what a relayed   *
+ * address is: an address a peer can send to which forwards to exactly one    *
+ * client. Without that second socket there would be nothing for a peer to    *
  * aim at and the whole exercise would be a loopback.                         *
  *                                                                            *
- * It runs in a thread of its own, which it has to: the allocation exchange in *
- * TRNLTURNNetwork.SocketBind is blocking, so nobody could answer it from the  *
- * same thread. That is safe here because TRNLVirtualNetwork locks around      *
- * Send, Receive and SocketWait, and releases the lock before it waits.        *
+ * It runs in a thread of its own, which it has to: the allocation exchange   *
+ * in TRNLTURNNetwork.SocketBind is blocking, so nobody could answer it from  *
+ * the same thread. That is safe here because TRNLVirtualNetwork locks around *
+ * Send, Receive and SocketWait, and releases the lock before it waits.       *
  *                                                                            *
- * The behaviours below are the ones worth being able to produce on demand: a  *
- * nonce which goes stale, a server which wants the newer integrity method,    *
- * and one which refuses to allocate at all. Each of them is a path through    *
+ * The behaviours below are the ones worth being able to produce on demand: a *
+ * nonce which goes stale, a server which wants the newer integrity method,   *
+ * and one which refuses to allocate at all. Each of them is a path through   *
  * the client that no correct server would ever exercise.                     *
  *                                                                            *
  ******************************************************************************)

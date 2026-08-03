@@ -4,13 +4,13 @@
  *                        Version 2026-07-27-00-00-0000                       *
  ******************************************************************************
  *                                                                            *
- * Regression tests around the robustness of the host service loop.            *
+ * Regression tests around the robustness of the host service loop.           *
  *                                                                            *
- * They all share one theme: none of the situations tested here can occur at    *
- * all on TRNLVirtualNetwork, which has neither a MTU nor a send buffer which   *
- * could ever fill up, and whose Send basically always succeeds. On a real      *
- * network they happen routinely instead, which is why they need a dedicated    *
- * fault injecting network to be testable in the first place.                   *
+ * They all share one theme: none of the situations tested here can occur at  *
+ * all on TRNLVirtualNetwork, which has neither a MTU nor a send buffer which *
+ * could ever fill up, and whose Send basically always succeeds. On a real    *
+ * network they happen routinely instead, which is why they need a dedicated  *
+ * fault injecting network to be testable in the first place.                 *
  *                                                                            *
  ******************************************************************************)
 unit RNLTestRegressions;
@@ -31,7 +31,9 @@ uses SysUtils,
      RNLTestSTUNServer,
      RNLTestNATNetwork,
      RNLTestTURNServer,
-     RNLTestNetworkBottleneck;
+     RNLTestNetworkBottleneck,
+     RNLTestCertificates,
+     RNLTestDTLSServer;
 
 procedure RunRegressionTests;
 
@@ -513,6 +515,30 @@ var Instance:TRNLInstance;
     Socket:TRNLSocket;
     Address,BoundAddress:TRNLAddress;
     Watchdog:TRNLTestWatchdog;
+
+ // A known address has to come back as text, and the call has to say so
+ procedure CheckAddressRendersAsText;
+ var Loopback:TRNLAddress;
+     Text_:array[0..63] of AnsiChar;
+     Rendered:TRNLRawByteString;
+     Said:boolean;
+ begin
+  FillChar(Loopback,SizeOf(TRNLAddress),#0);
+  if not Check(Network.AddressSetHost(Loopback,'127.0.0.1'),'the loopback address resolves') then begin
+   exit;
+  end;
+  FillChar(Text_,SizeOf(Text_),#0);
+  Said:=Network.AddressGetHostIP(Loopback,Text_,SizeOf(Text_));
+  Rendered:=TRNLRawByteString(Text_);
+  Info('rendered as "'+Rendered+'"');
+  // The buffer is checked as well as the verdict, so that the two cannot be confused: the whole
+  // defect was a right answer reported as a failure
+  Check(Pos(TRNLRawByteString('127.0.0.1'),Rendered)>0,
+        'the address has to be written into the buffer');
+  Check(Said,'and the call has to report that it succeeded, since getnameinfo returns zero for '+
+             'success and not for failure');
+ end;
+
 begin
 
  TestBegin('a real socket reports the address it was bound to');
@@ -555,6 +581,13 @@ begin
 
      CheckAtLeastInt64(BoundAddress.Port,1,
                        'and it has to report the port the system really handed out, not zero');
+
+     // The same defect once more, in the neighbouring function, and found the same way: by an
+     // application believing the answer. AddressGetHost read getnameinfo(..)<>0, and getnameinfo
+     // returns zero on success like getaddrinfo does, so the result was the exact opposite of the
+     // truth in all three branches. Nothing inside RNL noticed, because the buffer is filled either
+     // way and the only callers are decorators which pass the result on without looking at it.
+     CheckAddressRendersAsText;
 
     finally
      Network.SocketDestroy(Socket);
@@ -4019,6 +4052,451 @@ begin
 end;
 
 // ---------------------------------------------------------------------------------------
+// The certificate chain, on the cases a real one cannot give
+// ---------------------------------------------------------------------------------------
+
+// TRNLX509.SelfTest pins the real chain of nc-workhorse.rosseaux.com, which says the arithmetic and
+// the encoding agree with what a certificate authority actually issues. What it cannot say is
+// anything about the paths a verifier is really judged on, because no authority will issue a
+// certificate with a missing CA bit or a signature by the wrong key.
+//
+// Those come from src/tools/makechainvectors.c, which builds them offline with another library and
+// writes RNLTestCertificates.pas. Built elsewhere for the same reason the real certificate is used
+// elsewhere: a chain this code produced and then accepted would agree with itself.
+procedure TestCertificateChainRejectsEveryBrokenPath;
+var Watchdog:TRNLTestWatchdog;
+    Roots:TRNLX509.TChainEntries;
+    Leaf:TRNLX509Certificate;
+
+ procedure Entry(out aEntry:TRNLX509ChainEntry;const aData;const aSize:TRNLSizeInt);
+ begin
+  aEntry.Data:=PRNLUInt8Array(TRNLPointer(@aData));
+  aEntry.Size:=aSize;
+ end;
+
+ function VerdictName(const aVerdict:TRNLX509Verdict):TRNLRawByteString;
+ begin
+  case aVerdict of
+   RNL_X509_VERDICT_ACCEPTED:begin result:='accepted'; end;
+   RNL_X509_VERDICT_MALFORMED:begin result:='malformed'; end;
+   RNL_X509_VERDICT_EMPTY_CHAIN:begin result:='empty chain'; end;
+   RNL_X509_VERDICT_CHAIN_TOO_LONG:begin result:='chain too long'; end;
+   RNL_X509_VERDICT_BAD_SIGNATURE:begin result:='bad signature'; end;
+   RNL_X509_VERDICT_ISSUER_MISMATCH:begin result:='issuer mismatch'; end;
+   RNL_X509_VERDICT_NOT_A_CERTIFICATE_AUTHORITY:begin result:='not a certificate authority'; end;
+   RNL_X509_VERDICT_PATH_TOO_LONG:begin result:='path too long'; end;
+   RNL_X509_VERDICT_MISSING_KEY_CERT_SIGN:begin result:='missing keyCertSign'; end;
+   RNL_X509_VERDICT_EXPIRED:begin result:='expired'; end;
+   RNL_X509_VERDICT_NOT_YET_VALID:begin result:='not yet valid'; end;
+   RNL_X509_VERDICT_NO_CLOCK:begin result:='no clock'; end;
+   RNL_X509_VERDICT_UNTRUSTED_ROOT:begin result:='untrusted root'; end;
+   RNL_X509_VERDICT_WRONG_HOST_NAME:begin result:='wrong host name'; end;
+   else begin result:='not a server certificate'; end;
+  end;
+ end;
+
+ // One path, one expected verdict. The verdict and not merely acceptance, because "expired" and
+ // "signed by somebody else" are a clock which needs setting and an attack, and a verifier which
+ // says the same thing for both is telling the caller nothing.
+ procedure Expect(const aWhat:TRNLRawByteString;
+                  const aChain:TRNLX509.TChainEntries;const aChainLength:TRNLSizeInt;
+                  const aCountRoots:TRNLSizeInt;
+                  const aHostName:TRNLRawByteString;
+                  const aNow:TRNLInt64;
+                  const aWanted:TRNLX509Verdict);
+ var Verdict:TRNLX509Verdict;
+ begin
+  Verdict:=TRNLX509.VerifyChain(aChain,aChainLength,Roots,aCountRoots,aHostName,aNow,Leaf);
+  Check(Verdict=aWanted,
+        aWhat+' has to come back as "'+VerdictName(aWanted)+'" and came back as "'+
+        VerdictName(Verdict)+'"');
+ end;
+
+ procedure RunTheCases;
+ var Chain:TRNLX509.TChainEntries;
+ begin
+
+  Entry(Roots[0],TRNLTestCertificates.Root,SizeOf(TRNLTestCertificates.Root));
+
+  Entry(Chain[0],TRNLTestCertificates.Leaf,SizeOf(TRNLTestCertificates.Leaf));
+  Entry(Chain[1],TRNLTestCertificates.Intermediate,SizeOf(TRNLTestCertificates.Intermediate));
+  Expect('a path which is right in every way',Chain,2,1,
+         RNL_TEST_CERTIFICATE_HOST_NAME,RNL_TEST_CERTIFICATE_NOW,RNL_X509_VERDICT_ACCEPTED);
+
+  // The same path with the root sent along, which is what a server does when it includes its own
+  Entry(Chain[2],TRNLTestCertificates.Root,SizeOf(TRNLTestCertificates.Root));
+  Expect('the same path with the root included',Chain,3,1,
+         RNL_TEST_CERTIFICATE_HOST_NAME,RNL_TEST_CERTIFICATE_NOW,RNL_X509_VERDICT_ACCEPTED);
+
+  // And with nothing trusted, which is the whole point of a trust store
+  Expect('a path to a root nobody trusts',Chain,2,0,
+         RNL_TEST_CERTIFICATE_HOST_NAME,RNL_TEST_CERTIFICATE_NOW,RNL_X509_VERDICT_UNTRUSTED_ROOT);
+
+  Expect('a path for another host',Chain,2,1,
+         'other.test',RNL_TEST_CERTIFICATE_NOW,RNL_X509_VERDICT_WRONG_HOST_NAME);
+
+  // Zero is no clock, and a validity period which cannot be checked is not one which is honoured
+  Expect('a path checked without a clock',Chain,2,1,
+         RNL_TEST_CERTIFICATE_HOST_NAME,0,RNL_X509_VERDICT_NO_CLOCK);
+
+  Expect('an empty path',Chain,0,1,
+         RNL_TEST_CERTIFICATE_HOST_NAME,RNL_TEST_CERTIFICATE_NOW,RNL_X509_VERDICT_EMPTY_CHAIN);
+
+  Entry(Chain[0],TRNLTestCertificates.LeafExpired,SizeOf(TRNLTestCertificates.LeafExpired));
+  Expect('a leaf whose window has closed',Chain,2,1,
+         RNL_TEST_CERTIFICATE_HOST_NAME,RNL_TEST_CERTIFICATE_NOW,RNL_X509_VERDICT_EXPIRED);
+
+  Entry(Chain[0],TRNLTestCertificates.LeafNotYetValid,SizeOf(TRNLTestCertificates.LeafNotYetValid));
+  Expect('a leaf whose window has not opened',Chain,2,1,
+         RNL_TEST_CERTIFICATE_HOST_NAME,RNL_TEST_CERTIFICATE_NOW,RNL_X509_VERDICT_NOT_YET_VALID);
+
+  // The one that matters most: everything about it is in order except who signed it
+  Entry(Chain[0],TRNLTestCertificates.LeafSignedByAStranger,
+        SizeOf(TRNLTestCertificates.LeafSignedByAStranger));
+  Expect('a leaf signed by somebody else entirely',Chain,2,1,
+         RNL_TEST_CERTIFICATE_HOST_NAME,RNL_TEST_CERTIFICATE_NOW,RNL_X509_VERDICT_BAD_SIGNATURE);
+
+  Entry(Chain[0],TRNLTestCertificates.LeafWithAnotherIssuerName,
+        SizeOf(TRNLTestCertificates.LeafWithAnotherIssuerName));
+  Expect('a leaf naming an issuer which is not the one above it',Chain,2,1,
+         RNL_TEST_CERTIFICATE_HOST_NAME,RNL_TEST_CERTIFICATE_NOW,RNL_X509_VERDICT_ISSUER_MISMATCH);
+
+  Entry(Chain[0],TRNLTestCertificates.LeafForClientAuthentication,
+        SizeOf(TRNLTestCertificates.LeafForClientAuthentication));
+  Expect('a leaf issued for authenticating a client',Chain,2,1,
+         RNL_TEST_CERTIFICATE_HOST_NAME,RNL_TEST_CERTIFICATE_NOW,
+         RNL_X509_VERDICT_NOT_A_SERVER_CERTIFICATE);
+
+  // Without the CA bit it is a leaf, and a leaf may not have signed anything
+  Entry(Chain[0],TRNLTestCertificates.Leaf,SizeOf(TRNLTestCertificates.Leaf));
+  Entry(Chain[1],TRNLTestCertificates.IntermediateNotACA,
+        SizeOf(TRNLTestCertificates.IntermediateNotACA));
+  Expect('an authority without the CA bit',Chain,2,1,
+         RNL_TEST_CERTIFICATE_HOST_NAME,RNL_TEST_CERTIFICATE_NOW,
+         RNL_X509_VERDICT_NOT_A_CERTIFICATE_AUTHORITY);
+
+  Entry(Chain[1],TRNLTestCertificates.IntermediateWithoutKeyCertSign,
+        SizeOf(TRNLTestCertificates.IntermediateWithoutKeyCertSign));
+  Expect('an authority whose key usage forbids signing certificates',Chain,2,1,
+         RNL_TEST_CERTIFICATE_HOST_NAME,RNL_TEST_CERTIFICATE_NOW,
+         RNL_X509_VERDICT_MISSING_KEY_CERT_SIGN);
+
+  // A path length of zero allows no intermediate under it, and here there is one
+  Entry(Chain[0],TRNLTestCertificates.LeafUnderSubIntermediate,
+        SizeOf(TRNLTestCertificates.LeafUnderSubIntermediate));
+  Entry(Chain[1],TRNLTestCertificates.SubIntermediate,
+        SizeOf(TRNLTestCertificates.SubIntermediate));
+  Entry(Chain[2],TRNLTestCertificates.Intermediate,SizeOf(TRNLTestCertificates.Intermediate));
+  Expect('a path one longer than its length constraint allows',Chain,3,1,
+         RNL_TEST_CERTIFICATE_HOST_NAME,RNL_TEST_CERTIFICATE_NOW,RNL_X509_VERDICT_PATH_TOO_LONG);
+
+  // And the very same path under an authority which allows one more, which is what says the check
+  // is a constraint and not simply a ban on depth
+  Entry(Chain[2],TRNLTestCertificates.IntermediateAllowingOneMore,
+        SizeOf(TRNLTestCertificates.IntermediateAllowingOneMore));
+  Expect('the same path under a constraint which allows it',Chain,3,1,
+         RNL_TEST_CERTIFICATE_HOST_NAME,RNL_TEST_CERTIFICATE_NOW,RNL_X509_VERDICT_ACCEPTED);
+
+  // Something above the path which cannot be read at all. A real server sends exactly this: the
+  // chain of nc-workhorse.rosseaux.com ends with ISRG Root X2 cross signed by ISRG Root X1, and
+  // that signature is RSA, which this code has no way to check and no reason to - the root above
+  // it is trusted on its own account. Refusing the whole path over it, which is what happened
+  // before this case existed, means never connecting to that relay at all.
+  //
+  // A truncated root stands in for it here: what matters is only that it does not parse.
+  Entry(Chain[0],TRNLTestCertificates.Leaf,SizeOf(TRNLTestCertificates.Leaf));
+  Entry(Chain[1],TRNLTestCertificates.Intermediate,SizeOf(TRNLTestCertificates.Intermediate));
+  Entry(Chain[2],TRNLTestCertificates.Root,SizeOf(TRNLTestCertificates.Root)-16);
+  Expect('a path with something unreadable above it',Chain,3,1,
+         RNL_TEST_CERTIFICATE_HOST_NAME,RNL_TEST_CERTIFICATE_NOW,RNL_X509_VERDICT_ACCEPTED);
+
+  // And the same rubbish one place lower, where the path really does need it. Ignoring what cannot
+  // be read must only ever shorten the path, never bridge a gap in it.
+  Entry(Chain[1],TRNLTestCertificates.Root,SizeOf(TRNLTestCertificates.Root)-16);
+  Entry(Chain[2],TRNLTestCertificates.Intermediate,SizeOf(TRNLTestCertificates.Intermediate));
+  Expect('a path with something unreadable in the middle of it',Chain,3,1,
+         RNL_TEST_CERTIFICATE_HOST_NAME,RNL_TEST_CERTIFICATE_NOW,
+         RNL_X509_VERDICT_UNTRUSTED_ROOT);
+
+  // The leaf itself is never surplus
+  Entry(Chain[0],TRNLTestCertificates.Leaf,SizeOf(TRNLTestCertificates.Leaf)-16);
+  Entry(Chain[1],TRNLTestCertificates.Intermediate,SizeOf(TRNLTestCertificates.Intermediate));
+  Expect('a leaf which cannot be read',Chain,2,1,
+         RNL_TEST_CERTIFICATE_HOST_NAME,RNL_TEST_CERTIFICATE_NOW,RNL_X509_VERDICT_MALFORMED);
+
+ end;
+
+begin
+
+ TestBegin('the certificate chain rejects every broken path');
+ Watchdog:=TRNLTestWatchdog.Create('certificate chain',60000);
+ try
+  FillChar(Roots,SizeOf(TRNLX509.TChainEntries),#0);
+  RunTheCases;
+ finally
+  FreeAndNil(Watchdog);
+  TestEnd;
+ end;
+
+end;
+
+// ---------------------------------------------------------------------------------------
+// P-256, past the one vector
+// ---------------------------------------------------------------------------------------
+
+// TRNLP256.SelfTest pins one NIST CAVP vector, which says the arithmetic agrees with the standard
+// for one private key and one counter side point. Three things it cannot say:
+//
+// Whether agreement is symmetric. The vector fixes one side of the exchange; an error which treated
+// the two sides differently would still reproduce it.
+//
+// Whether a generated key is any good. The vector brings its own private key, so key generation is
+// never exercised by it at all - and a generator which returned zero, or something at or above the
+// group order, would pass it.
+//
+// What happens to the scalars at the edges. Zero and the group order itself are the two which have
+// to be refused, and no vector contains them because no vector is allowed to.
+procedure TestP256AgreementIsSymmetricAndRefusesTheEdges;
+const COUNT_ROUNDS=4;
+var Watchdog:TRNLTestWatchdog;
+    RandomGenerator:TRNLRandomGenerator;
+
+ // Both sides of a fresh exchange have to arrive at the same secret
+ procedure CheckAgreementIsSymmetric;
+ var Round_:TRNLSizeInt;
+     PrivateA,PrivateB:array[0..TRNLP256.ElementSize-1] of TRNLUInt8;
+     PublicA,PublicB:array[0..TRNLP256.PointSize-1] of TRNLUInt8;
+     SecretA,SecretB:array[0..TRNLP256.ElementSize-1] of TRNLUInt8;
+     Point_:TRNLECPoint;
+     AllAgreed,AllValid,AllDiffered:boolean;
+     Previous:array[0..TRNLP256.ElementSize-1] of TRNLUInt8;
+ begin
+
+  AllAgreed:=true;
+  AllValid:=true;
+  AllDiffered:=true;
+  FillChar(Previous,SizeOf(Previous),#0);
+
+  for Round_:=1 to COUNT_ROUNDS do begin
+
+   TRNLP256.GenerateKeyPair(RandomGenerator,PrivateA,PublicA);
+   TRNLP256.GenerateKeyPair(RandomGenerator,PrivateB,PublicB);
+
+   // A generated public key has to be a point this very code would accept from a stranger
+   if not (TRNLP256.DecodePoint(Point_,PublicA,SizeOf(PublicA)) and
+           TRNLP256.DecodePoint(Point_,PublicB,SizeOf(PublicB))) then begin
+    AllValid:=false;
+   end;
+
+   if not (TRNLP256.SharedSecret(SecretA,PrivateA,PublicB,SizeOf(PublicB)) and
+           TRNLP256.SharedSecret(SecretB,PrivateB,PublicA,SizeOf(PublicA)) and
+           TRNLMemory.SecureIsEqual(SecretA,SecretB,SizeOf(SecretA))) then begin
+    AllAgreed:=false;
+   end;
+
+   // And a fresh pair every round, so that a generator which had got stuck would show
+   if (Round_>1) and TRNLMemory.SecureIsEqual(SecretA,Previous,SizeOf(SecretA)) then begin
+    AllDiffered:=false;
+   end;
+   Move(SecretA,Previous,SizeOf(Previous));
+
+  end;
+
+  Check(AllValid,'a generated public key has to be a point which decodes and sits on the curve');
+  Check(AllAgreed,'and both sides of a fresh exchange have to arrive at the same secret, which the '+
+                  'one published vector cannot say because it only fixes one side of one exchange');
+  Check(AllDiffered,'and a new exchange has to give a new secret, so that a generator which stopped '+
+                    'producing anything would not go unnoticed');
+
+ end;
+
+ // The two scalars which are not private keys
+ procedure CheckTheScalarEdgesAreRefused;
+ const ZERO_KEY:array[0..31] of TRNLUInt8=
+        (
+         $00,$00,$00,$00,$00,$00,$00,$00,$00,$00,$00,$00,
+         $00,$00,$00,$00,$00,$00,$00,$00,$00,$00,$00,$00,
+         $00,$00,$00,$00,$00,$00,$00,$00
+        );
+       // n itself, which is congruent to zero and would multiply any point to infinity
+       ORDER_KEY:array[0..31] of TRNLUInt8=
+        (
+         $ff,$ff,$ff,$ff,$00,$00,$00,$00,$ff,$ff,$ff,$ff,
+         $ff,$ff,$ff,$ff,$bc,$e6,$fa,$ad,$a7,$17,$9e,$84,
+         $f3,$b9,$ca,$c2,$fc,$63,$25,$51
+        );
+ var PrivateKey:array[0..TRNLP256.ElementSize-1] of TRNLUInt8;
+     PublicKey:array[0..TRNLP256.PointSize-1] of TRNLUInt8;
+     Secret:array[0..TRNLP256.ElementSize-1] of TRNLUInt8;
+     Damaged:array[0..TRNLP256.PointSize-1] of TRNLUInt8;
+ begin
+
+  TRNLP256.GenerateKeyPair(RandomGenerator,PrivateKey,PublicKey);
+
+  Check(not TRNLP256.SharedSecret(Secret,ZERO_KEY,PublicKey,SizeOf(PublicKey)),
+        'a private key of zero has to be refused, since it would agree on the point at infinity '+
+        'with anybody at all');
+
+  Check(not TRNLP256.SharedSecret(Secret,ORDER_KEY,PublicKey,SizeOf(PublicKey)),
+        'and so does the group order itself, which is congruent to zero and would do the same');
+
+  // The encoding around the point, which is the other thing a stranger writes
+  Move(PublicKey,Damaged,SizeOf(PublicKey));
+  Damaged[0]:=$02;
+  Check(not TRNLP256.SharedSecret(Secret,PrivateKey,Damaged,SizeOf(Damaged)),
+        'a compressed point is refused rather than half read, since unpacking one needs a square '+
+        'root this code does not have');
+
+  Check(not TRNLP256.SharedSecret(Secret,PrivateKey,PublicKey,SizeOf(PublicKey)-1),
+        'and so is a point one byte short of the length its own format fixes');
+
+ end;
+
+begin
+
+ TestBegin('p-256 agreement is symmetric and refuses the scalars at its edges');
+ Watchdog:=TRNLTestWatchdog.Create('p-256',60000);
+ try
+
+  RandomGenerator:=TRNLRandomGenerator.Create;
+  try
+   CheckAgreementIsSymmetric;
+   CheckTheScalarEdgesAreRefused;
+  finally
+   FreeAndNil(RandomGenerator);
+  end;
+
+ finally
+  FreeAndNil(Watchdog);
+  TestEnd;
+ end;
+
+end;
+
+// ---------------------------------------------------------------------------------------
+// A wrong password has to say so
+// ---------------------------------------------------------------------------------------
+
+// Found by the first contact with a real coturn, which is what iceplan.md said was still missing
+// from the chain. Pointed at nc-workhorse.rosseaux.com with credentials that were nonsense on
+// purpose, the allocation failed and LastFailedAllocationErrorCode read zero - which is what it
+// reads when nothing was ever answered at all.
+//
+// What happened: Establish sends bare, is told 401 with realm and nonce, signs, is told 401 again
+// because the password is wrong, takes the fresh nonce, signs again, and so on until its four
+// attempts run out - and then falls out of the loop without ever setting the code. So the one
+// property whose whole job is to say why an allocation failed said nothing, in the commonest way
+// for one to fail.
+//
+// Two things were wrong and both are fixed. A 401 answering a request which already carried
+// credentials is final, per RFC 8489 section 9.2.4, rather than something to try again with the
+// same password. And running out of attempts sets the code of the last rejection, so that giving
+// up cannot be mistaken for silence.
+procedure TestTURNAllocationSaysWhyItWasRefused;
+const TURN_HOST='203.0.113.9';
+      TURN_PORT=3482;
+      RELAYED_HOST='198.51.100.30';
+      TURN_USERNAME='rnl-test-user';
+      TURN_PASSWORD='rnl-test-password';
+var Watchdog:TRNLTestWatchdog;
+    Instance:TRNLInstance;
+    VirtualNetwork:TRNLVirtualNetwork;
+    TURNServer:TRNLTestTURNServer;
+    TURNNetwork:TRNLTURNNetwork;
+    TURNAddress:TRNLAddress;
+    RelayedHost:TRNLHostAddress;
+    Socket:TRNLSocket;
+    Established:boolean;
+
+ function AddressOf(const aHost:TRNLRawByteString;const aPort:TRNLUInt16):TRNLAddress;
+ begin
+  FillChar(result,SizeOf(TRNLAddress),#0);
+  VirtualNetwork.AddressSetHost(result,aHost);
+  result.Port:=aPort;
+ end;
+
+begin
+
+ TestBegin('a refused turn allocation says which rejection it was');
+ Watchdog:=TRNLTestWatchdog.Create('turn allocation error code',60000);
+ try
+
+  Instance:=TRNLInstance.Create;
+  try
+   VirtualNetwork:=TRNLVirtualNetwork.Create(Instance);
+   try
+
+    TURNAddress:=AddressOf(TURN_HOST,TURN_PORT);
+    RelayedHost:=AddressOf(RELAYED_HOST,0).Host;
+
+    TURNServer:=TRNLTestTURNServer.Create(Instance,VirtualNetwork,TURN_PORT,
+                                          RNL_TEST_TURN_SERVER_CORRECT,
+                                          TURNAddress.Host,RelayedHost,
+                                          TURN_USERNAME,TURN_PASSWORD);
+    try
+
+     // The right user, the wrong password, which is the shape of the mistake a deployment actually
+     // makes. The server is the correct one: what is under test is the client's reaction, not any
+     // misbehaviour of the server.
+     TURNNetwork:=TRNLTURNNetwork.Create(Instance,VirtualNetwork,TURNAddress,
+                                         TURN_USERNAME,'not-the-password');
+     try
+      Socket:=TURNNetwork.SocketCreate(RNL_SOCKET_TYPE_DATAGRAM,RNL_IPV4);
+      if not Check(Socket<>RNL_SOCKET_NULL,'a socket has to come up') then begin
+       exit;
+      end;
+      try
+
+       Established:=TURNNetwork.SocketBind(Socket,nil,RNL_IPV4);
+
+       Check(TURNNetwork.TotalAllocations=0,
+             'a wrong password must not get an allocation');
+
+       CheckEqualsInt64(TRNLInt64(TURNNetwork.LastFailedAllocationErrorCode),401,
+                        'and the refusal has to be reported as the 401 it was, rather than as the '+
+                        'zero which means nothing ever answered');
+
+       // The client of a relay which will not have it still has to come out with a working socket,
+       // the same as when an allocation is refused outright
+       Check(Established,'the socket stays usable without the relay, as it does for any other '+
+                         'refused allocation');
+
+       Info('the server said 401 '+TRNLRawByteString(IntToStr(TURNServer.Count(RNL_TEST_TURN_COUNT_UNAUTHORIZED)))+
+            ' time(s)');
+
+       // Twice and no more: once for the bare request, which is how the realm and the nonce are
+       // asked for, and once for the signed one. A third would mean the client kept trying with a
+       // password it had already been told was wrong.
+       CheckEqualsInt64(TRNLInt64(TURNServer.Count(RNL_TEST_TURN_COUNT_UNAUTHORIZED)),2,
+                        'and the client has to stop after being told once that the credentials it '+
+                        'sent are wrong, instead of asking again with the same ones');
+
+      finally
+       TURNNetwork.SocketDestroy(Socket);
+      end;
+     finally
+      FreeAndNil(TURNNetwork);
+     end;
+
+    finally
+     FreeAndNil(TURNServer);
+    end;
+
+   finally
+    FreeAndNil(VirtualNetwork);
+   end;
+  finally
+   FreeAndNil(Instance);
+  end;
+
+ finally
+  FreeAndNil(Watchdog);
+  TestEnd;
+ end;
+
+end;
+
+// ---------------------------------------------------------------------------------------
 // The DTLS record layer, where a parser meets a datagram from a stranger
 // ---------------------------------------------------------------------------------------
 
@@ -4324,6 +4802,470 @@ begin
   FreeAndNil(Watchdog);
   TestEnd;
  end;
+
+end;
+
+// ---------------------------------------------------------------------------------------
+// The DTLS 1.2 handshake
+// ---------------------------------------------------------------------------------------
+
+// The name of a failure, for a message which says what came back rather than only that something
+// did. "Timeout" and "bad certificate" are a server which is not there and a server which is
+// somebody else, and a test which prints neither is a test nobody can act on.
+function DTLSFailureName(const aFailure:TRNLDTLS12ClientFailure):TRNLRawByteString;
+begin
+ case aFailure of
+  RNL_DTLS12_CLIENT_FAILURE_NONE:begin result:='none'; end;
+  RNL_DTLS12_CLIENT_FAILURE_TIMEOUT:begin result:='timeout'; end;
+  RNL_DTLS12_CLIENT_FAILURE_ALERT:begin result:='alert'; end;
+  RNL_DTLS12_CLIENT_FAILURE_MALFORMED_MESSAGE:begin result:='malformed message'; end;
+  RNL_DTLS12_CLIENT_FAILURE_UNEXPECTED_MESSAGE:begin result:='unexpected message'; end;
+  RNL_DTLS12_CLIENT_FAILURE_UNSUPPORTED_CURVE:begin result:='unsupported curve'; end;
+  RNL_DTLS12_CLIENT_FAILURE_BAD_CERTIFICATE:begin result:='bad certificate'; end;
+  RNL_DTLS12_CLIENT_FAILURE_BAD_KEY_EXCHANGE_SIGNATURE:begin result:='bad key exchange signature'; end;
+  RNL_DTLS12_CLIENT_FAILURE_BAD_FINISHED:begin result:='bad finished'; end;
+  else begin result:='internal'; end;
+ end;
+end;
+
+// The whole DTLS 1.2 handshake, driven against a server stub over a virtual clock.
+//
+// No socket and no thread on either side: the test moves every datagram by hand and moves the clock
+// only when there is nothing left to deliver. That is what makes "the client retransmits its flight
+// one second later" a thing which can be asserted at the millisecond rather than waited for, and it
+// is why the stub next door is not a TThread like the STUN and TURN ones.
+//
+// What this does not prove, and must not be read as proving: that any of it is right on the wire.
+// Both halves run RNL's own key schedule, record layer and transcript, so a handshake completing
+// here says the two agree with each other and nothing more. What says they agree with anybody else
+// is the captured vectors in RNL.pas, which came out of a handshake a real coturn accepted.
+procedure TestDTLSHandshakeCompletesAgainstEveryHonestServer;
+var Watchdog:TRNLTestWatchdog;
+    RandomGenerator:TRNLRandomGenerator;
+    Roots:TRNLX509.TChainEntries;
+
+ procedure Entry(out aEntry:TRNLX509ChainEntry;const aData;const aSize:TRNLSizeInt);
+ begin
+  aEntry.Data:=PRNLUInt8Array(TRNLPointer(@aData));
+  aEntry.Size:=aSize;
+ end;
+
+ // The signer the stub runs on, held to RFC 6979 appendix A.2.5 - the same published pair the
+ // verifier in RNL.pas is pinned against. Without this every handshake below could rest on a signer
+ // which is wrong in exactly the same direction as the verifier, and all of them would still pass.
+ procedure CheckTheStubsSignerAgainstItsVector;
+ const PrivateKey:array[0..31] of TRNLUInt8=
+        (
+         $c9,$af,$a9,$d8,$45,$ba,$75,$16,$6b,$5c,$21,$57,
+         $67,$b1,$d6,$93,$4e,$50,$c3,$db,$36,$e8,$9b,$12,
+         $7b,$8a,$62,$2b,$12,$0f,$67,$21
+        );
+       // The per signature secret RFC 6979 derives for this key and message
+       K:array[0..31] of TRNLUInt8=
+        (
+         $a6,$e3,$c5,$7d,$d0,$1a,$be,$90,$08,$65,$38,$39,
+         $83,$55,$dd,$4c,$3b,$17,$aa,$87,$33,$82,$b0,$f2,
+         $4d,$61,$29,$49,$3d,$8a,$ad,$60
+        );
+       // SHA-256 of "sample"
+       Hash:array[0..31] of TRNLUInt8=
+        (
+         $af,$2b,$db,$e1,$aa,$9b,$6e,$c1,$e2,$ad,$e1,$d6,
+         $94,$f4,$1f,$c7,$1a,$83,$1d,$02,$68,$e9,$89,$15,
+         $62,$11,$3d,$8a,$62,$ad,$d1,$bf
+        );
+       ExpectedR:array[0..31] of TRNLUInt8=
+        (
+         $ef,$d4,$8b,$2a,$ac,$b6,$a8,$fd,$11,$40,$dd,$9c,
+         $d4,$5e,$81,$d6,$9d,$2c,$87,$7b,$56,$aa,$f9,$91,
+         $c3,$4d,$0e,$a8,$4e,$af,$37,$16
+        );
+       ExpectedS:array[0..31] of TRNLUInt8=
+        (
+         $f7,$cb,$1c,$94,$2d,$65,$7c,$41,$d4,$36,$c7,$a1,
+         $b6,$e2,$9f,$65,$f3,$e9,$00,$db,$b9,$af,$f4,$06,
+         $4d,$c4,$ab,$2f,$84,$3a,$cd,$a8
+        );
+ var R_,S:array[0..31] of TRNLUInt8;
+ begin
+  if Check(TRNLTestECDSA.Sign(R_,S,PrivateKey,K,Hash,SizeOf(Hash)),
+           'the stub has to be able to sign at all') then begin
+   Check(TRNLMemory.SecureIsEqual(R_,ExpectedR,SizeOf(R_)) and
+         TRNLMemory.SecureIsEqual(S,ExpectedS,SizeOf(S)),
+         'the stub''s signer has to reproduce the RFC 6979 pair for that key and message exactly');
+  end;
+ end;
+
+ // And that the key it signs with really is the one inside the leaf certificate it presents. If it
+ // were not, the client would refuse every handshake here for a reason which has nothing to do with
+ // what is under test.
+ procedure CheckTheStubsKeyBelongsToItsCertificate;
+ const K:array[0..31] of TRNLUInt8=
+        (
+         $11,$22,$33,$44,$55,$66,$77,$88,$99,$00,$11,$22,
+         $33,$44,$55,$66,$77,$88,$99,$00,$11,$22,$33,$44,
+         $55,$66,$77,$88,$99,$00,$11,$22
+        );
+       Message_:array[0..3] of TRNLUInt8=($01,$02,$03,$04);
+ var Certificate:TRNLX509Certificate;
+     Context:TRNLSHA256Context;
+     Digest:TRNLSHA256Hash;
+     R_,S:array[0..31] of TRNLUInt8;
+ begin
+  Context.Initialize;
+  Context.Update(Message_,SizeOf(Message_));
+  Context.Finalize(Digest);
+  if Check(Certificate.Parse(TRNLTestCertificates.Leaf,SizeOf(TRNLTestCertificates.Leaf)),
+           'the leaf certificate the stub presents has to parse') and
+     Check(TRNLTestECDSA.Sign(R_,S,RNL_TEST_LEAF_PRIVATE_KEY,K,Digest,SizeOf(Digest)),
+           'and the stub has to be able to sign with the key it claims to hold') then begin
+   Check(TRNLP256.VerifySignature(Certificate.PublicKey,Certificate.PublicKeySize,
+                                  Digest,SizeOf(Digest),R_,S),
+         'the private key the stub signs with has to be the one in that certificate');
+  end;
+ end;
+
+ // One handshake, start to finish. The clock only moves when nothing is left to deliver, so the
+ // elapsed time at the end is exactly the retransmission wait and nothing else.
+ function Drive(const aClient:TRNLDTLS12Client;const aServer:TRNLTestDTLSServer;
+                out aElapsed:TRNLUInt64):boolean;
+ const START_TIME=1000;
+       STEP=1000;
+       GUARD=1024;
+ var Datagram:array[0..2047] of TRNLUInt8;
+     DatagramSize:TRNLSizeInt;
+     Now_:TRNLUInt64;
+     Rounds:TRNLSizeInt;
+     Moved:boolean;
+ begin
+
+  Now_:=START_TIME;
+  aClient.Start(Now_);
+  Rounds:=0;
+
+  repeat
+   Moved:=false;
+   while aClient.PopOutgoingDatagram(Datagram,DatagramSize,SizeOf(Datagram)) do begin
+    aServer.ProcessDatagram(Datagram,DatagramSize);
+    Moved:=true;
+   end;
+   while aServer.PopOutgoingDatagram(Datagram,DatagramSize,SizeOf(Datagram)) do begin
+    aClient.ProcessDatagram(Datagram,DatagramSize,Now_);
+    Moved:=true;
+   end;
+   if not Moved then begin
+    // Nothing in flight either way, so the only thing which can happen next is a timer
+    inc(Now_,STEP);
+    aClient.Update(Now_);
+   end;
+   inc(Rounds);
+  until (aClient.State=RNL_DTLS12_CLIENT_STATE_ESTABLISHED) or
+        (aClient.State=RNL_DTLS12_CLIENT_STATE_FAILED) or
+        (Rounds>=GUARD);
+
+  // Whatever the client had left to say, which after a failure is the alert it owes its peer
+  while aClient.PopOutgoingDatagram(Datagram,DatagramSize,SizeOf(Datagram)) do begin
+   aServer.ProcessDatagram(Datagram,DatagramSize);
+  end;
+
+  aElapsed:=Now_-START_TIME;
+  result:=aClient.State=RNL_DTLS12_CLIENT_STATE_ESTABLISHED;
+
+ end;
+
+ procedure CheckApplicationDataFlowsBothWays(const aWhat:TRNLRawByteString;
+                                             const aClient:TRNLDTLS12Client;
+                                             const aServer:TRNLTestDTLSServer);
+ const PAYLOAD:array[0..7] of TRNLUInt8=($de,$ad,$be,$ef,$01,$02,$03,$04);
+ var Datagram:array[0..2047] of TRNLUInt8;
+     DatagramSize:TRNLSizeInt;
+     Received:array[0..2047] of TRNLUInt8;
+     ReceivedSize:TRNLSizeInt;
+ begin
+
+  Check(aClient.Send(PAYLOAD,SizeOf(PAYLOAD)),aWhat+': the client has to be able to send');
+  while aClient.PopOutgoingDatagram(Datagram,DatagramSize,SizeOf(Datagram)) do begin
+   aServer.ProcessDatagram(Datagram,DatagramSize);
+  end;
+  Check(aServer.LastApplicationDataMatches(PAYLOAD,SizeOf(PAYLOAD)),
+        aWhat+': what the client sent has to arrive as what it sent');
+
+  Check(aServer.Send(PAYLOAD,SizeOf(PAYLOAD)),aWhat+': and the server has to be able to answer');
+  while aServer.PopOutgoingDatagram(Datagram,DatagramSize,SizeOf(Datagram)) do begin
+   aClient.ProcessDatagram(Datagram,DatagramSize,1000);
+  end;
+  ReceivedSize:=0;
+  Check(aClient.PopApplicationData(Received,ReceivedSize,SizeOf(Received)) and
+        (ReceivedSize=SizeOf(PAYLOAD)) and
+        TRNLMemory.SecureIsEqual(Received,PAYLOAD,SizeOf(PAYLOAD)),
+        aWhat+': and the answer has to come back out of the client the same way');
+
+ end;
+
+ // aExpectedElapsed is the retransmission wait, and zero for every server which answers straight
+ // away. Asserted exactly rather than as an upper bound, because a handshake which quietly needed a
+ // retransmission it should not have needed still completes.
+ procedure Expect(const aWhat:TRNLRawByteString;
+                  const aBehaviour:TRNLTestDTLSServerBehaviour;
+                  const aExtendedMasterSecret:boolean;
+                  const aExpectedElapsed:TRNLUInt64);
+ var Client:TRNLDTLS12Client;
+     Server:TRNLTestDTLSServer;
+     Elapsed:TRNLUInt64;
+ begin
+  Server:=TRNLTestDTLSServer.Create(aBehaviour,aExtendedMasterSecret);
+  try
+   Client:=TRNLDTLS12Client.Create(RandomGenerator,RNL_TEST_CERTIFICATE_HOST_NAME,
+                                   Roots,1,RNL_TEST_CERTIFICATE_NOW);
+   try
+    if Check(Drive(Client,Server,Elapsed),
+             aWhat+' has to end in a finished handshake, and ended as "'+
+             DTLSFailureName(Client.Failure)+'"') then begin
+     Check(Server.ClientFinishedVerified,
+           aWhat+': the server has to have accepted the client''s own Finished');
+     Check(Server.UseExtendedMasterSecret=aExtendedMasterSecret,
+           aWhat+': the master secret has to have been derived the way the test asked for');
+     CheckEqualsInt64(TRNLInt64(Elapsed),TRNLInt64(aExpectedElapsed),
+                      aWhat+': the milliseconds spent waiting for a retransmission');
+     CheckApplicationDataFlowsBothWays(aWhat,Client,Server);
+    end;
+   finally
+    FreeAndNil(Client);
+   end;
+  finally
+   FreeAndNil(Server);
+  end;
+ end;
+
+begin
+
+ TestBegin('the DTLS 1.2 handshake completes against every server which plays fair');
+ Watchdog:=TRNLTestWatchdog.Create('DTLS handshake',60000);
+ try
+
+  RandomGenerator:=TRNLRandomGenerator.Create;
+  try
+
+   FillChar(Roots,SizeOf(TRNLX509.TChainEntries),#0);
+   Entry(Roots[0],TRNLTestCertificates.Root,SizeOf(TRNLTestCertificates.Root));
+
+   CheckTheStubsSignerAgainstItsVector;
+   CheckTheStubsKeyBelongsToItsCertificate;
+
+   Expect('a server which does everything right',
+          RNL_TEST_DTLS_SERVER_CORRECT,false,0);
+
+   // RFC 7627. The client offers it every time; whether it happens is the server's answer, and both
+   // outcomes have to work. The measured relay does echo it, and the derivation that follows is
+   // pinned against that handshake in TRNLDTLS12KeySchedule.SelfTest.
+   Expect('a server which echoes the extended master secret extension',
+          RNL_TEST_DTLS_SERVER_CORRECT,true,0);
+
+   // The cookie exchange is the server's to ask for. A client which only works when it is asked has
+   // a state machine with one path through it, and this is the other one.
+   Expect('a server which asks for no cookie at all',
+          RNL_TEST_DTLS_SERVER_WITHOUT_COOKIE_EXCHANGE,false,0);
+
+   // Every message of the flight cut into sixty four byte pieces and sent last one first, which is
+   // both the fragment reassembly and the holding of messages whose turn has not come
+   Expect('a server whose flight arrives backwards, in pieces',
+          RNL_TEST_DTLS_SERVER_REVERSED_FRAGMENTS,false,0);
+
+   // The same flight twice, cut at different boundaries the second time. A reassembler which counts
+   // bytes instead of tracking which ones it has calls the message complete too early here.
+   Expect('a server which sends every message twice, cut differently',
+          RNL_TEST_DTLS_SERVER_OVERLAPPING_FRAGMENTS,false,0);
+
+   // One whole flight lost. The client has to notice on its own and ask again, and the second
+   // answer has to carry the same message sequence numbers as the first - a server which renumbered
+   // them would leave the client waiting for messages which will never come.
+   Expect('a server whose first flight goes missing',
+          RNL_TEST_DTLS_SERVER_LOSES_ITS_FIRST_FLIGHT,false,1000);
+
+   // And the last one, which is the harder of the two: what has to go out again there is already
+   // protected, and the peer keeps a replay window over exactly those records. A client which sent
+   // the same flight verbatim rather than rebuilding it would hand that window a record number it
+   // has already seen, and the retransmission would be thrown away as a replay.
+   Expect('a server whose last flight goes missing',
+          RNL_TEST_DTLS_SERVER_LOSES_ITS_LAST_FLIGHT,false,1000);
+
+  finally
+   FreeAndNil(RandomGenerator);
+  end;
+
+ finally
+  FreeAndNil(Watchdog);
+ end;
+ TestEnd;
+
+end;
+
+// The other half of the same bench: fifteen ways for a server to be broken or hostile, and the
+// failure each of them has to produce. The failure and not merely a refusal, because "the server
+// timed out" and "the server's certificate belongs to somebody else" are a relay which is down and
+// an attack, and a client which says the same thing for both tells its caller nothing.
+procedure TestDTLSHandshakeRefusesEveryBrokenServer;
+var Watchdog:TRNLTestWatchdog;
+    RandomGenerator:TRNLRandomGenerator;
+    Roots:TRNLX509.TChainEntries;
+
+ procedure Entry(out aEntry:TRNLX509ChainEntry;const aData;const aSize:TRNLSizeInt);
+ begin
+  aEntry.Data:=PRNLUInt8Array(TRNLPointer(@aData));
+  aEntry.Size:=aSize;
+ end;
+
+ function Drive(const aClient:TRNLDTLS12Client;const aServer:TRNLTestDTLSServer):TRNLUInt64;
+ const START_TIME=1000;
+       STEP=1000;
+       GUARD=1024;
+ var Datagram:array[0..2047] of TRNLUInt8;
+     DatagramSize:TRNLSizeInt;
+     Now_:TRNLUInt64;
+     Rounds:TRNLSizeInt;
+     Moved:boolean;
+ begin
+  Now_:=START_TIME;
+  aClient.Start(Now_);
+  Rounds:=0;
+  repeat
+   Moved:=false;
+   while aClient.PopOutgoingDatagram(Datagram,DatagramSize,SizeOf(Datagram)) do begin
+    aServer.ProcessDatagram(Datagram,DatagramSize);
+    Moved:=true;
+   end;
+   while aServer.PopOutgoingDatagram(Datagram,DatagramSize,SizeOf(Datagram)) do begin
+    aClient.ProcessDatagram(Datagram,DatagramSize,Now_);
+    Moved:=true;
+   end;
+   if not Moved then begin
+    inc(Now_,STEP);
+    aClient.Update(Now_);
+   end;
+   inc(Rounds);
+  until (aClient.State=RNL_DTLS12_CLIENT_STATE_ESTABLISHED) or
+        (aClient.State=RNL_DTLS12_CLIENT_STATE_FAILED) or
+        (Rounds>=GUARD);
+  while aClient.PopOutgoingDatagram(Datagram,DatagramSize,SizeOf(Datagram)) do begin
+   aServer.ProcessDatagram(Datagram,DatagramSize);
+  end;
+  result:=Now_-START_TIME;
+ end;
+
+ // aWantedAlert is what the client has to have sent back before falling silent, or zero when it has
+ // nothing to say - a peer which is told nothing keeps retransmitting for the better part of a
+ // minute, and a peer which sent the alert itself must not be answered with another one.
+ procedure Expect(const aWhat:TRNLRawByteString;
+                  const aBehaviour:TRNLTestDTLSServerBehaviour;
+                  const aWanted:TRNLDTLS12ClientFailure;
+                  const aWantedAlert:TRNLUInt8;
+                  const aExpectedElapsed:TRNLUInt64=0);
+ var Client:TRNLDTLS12Client;
+     Server:TRNLTestDTLSServer;
+     Elapsed:TRNLUInt64;
+ begin
+  Server:=TRNLTestDTLSServer.Create(aBehaviour,false);
+  try
+   Client:=TRNLDTLS12Client.Create(RandomGenerator,RNL_TEST_CERTIFICATE_HOST_NAME,
+                                   Roots,1,RNL_TEST_CERTIFICATE_NOW);
+   try
+    Elapsed:=Drive(Client,Server);
+    CheckEqualsInt64(TRNLInt64(Elapsed),TRNLInt64(aExpectedElapsed),
+                     aWhat+': the milliseconds it took to give up');
+    Check(Client.State=RNL_DTLS12_CLIENT_STATE_FAILED,
+          aWhat+' must not end in a finished handshake');
+    Check(Client.Failure=aWanted,
+          aWhat+' has to fail as "'+DTLSFailureName(aWanted)+'" and failed as "'+
+          DTLSFailureName(Client.Failure)+'"');
+    if aWantedAlert<>0 then begin
+     Check((Server.CountAlertsReceived=1) and (Server.LastAlertDescription=aWantedAlert),
+           aWhat+': the client owes its peer one alert, and that one only');
+    end else begin
+     Check(Server.CountAlertsReceived=0,
+           aWhat+': the client has nothing to say back and must not say it');
+    end;
+   finally
+    FreeAndNil(Client);
+   end;
+  finally
+   FreeAndNil(Server);
+  end;
+ end;
+
+begin
+
+ TestBegin('the DTLS 1.2 handshake refuses every server which does not');
+ Watchdog:=TRNLTestWatchdog.Create('DTLS handshake failures',60000);
+ try
+
+  RandomGenerator:=TRNLRandomGenerator.Create;
+  try
+
+   FillChar(Roots,SizeOf(TRNLX509.TChainEntries),#0);
+   Entry(Roots[0],TRNLTestCertificates.Root,SizeOf(TRNLTestCertificates.Root));
+
+   // Six transmissions and no answer to any of them. No alert: there is nobody to send one to.
+   //
+   // The forty seven seconds are the whole backoff schedule of RFC 6347 section 4.2.4.1 written out
+   // - one second, then two, four, eight, sixteen, and sixteen again because that is the cap. A
+   // client which forgot to double, or forgot the cap, gives up after six or after sixty three, and
+   // nothing but this number would notice either.
+   Expect('a server which never answers',
+          RNL_TEST_DTLS_SERVER_SILENT,RNL_DTLS12_CLIENT_FAILURE_TIMEOUT,0,47000);
+
+   // A second cookie request is a server asking the client to start over indefinitely
+   Expect('a server which asks for a cookie twice',
+          RNL_TEST_DTLS_SERVER_SECOND_HELLO_VERIFY_REQUEST,
+          RNL_DTLS12_CLIENT_FAILURE_UNEXPECTED_MESSAGE,10);
+
+   // Lands on "malformed" and not on a name of its own: the ServerHello parser refuses a suite
+   // which was never offered in the same breath as it refuses garbage, and the client cannot tell
+   // the two apart. Saying so is better than a name which suggests it can.
+   Expect('a server which picks a cipher suite nobody offered',
+          RNL_TEST_DTLS_SERVER_UNOFFERED_CIPHER_SUITE,
+          RNL_DTLS12_CLIENT_FAILURE_MALFORMED_MESSAGE,40);
+
+   Expect('a server which names a curve this client cannot do',
+          RNL_TEST_DTLS_SERVER_UNOFFERED_CURVE,
+          RNL_DTLS12_CLIENT_FAILURE_UNSUPPORTED_CURVE,40);
+
+   // A perfectly good signature over something other than what was sent, which is the shape of the
+   // attack the check exists for - not a corrupted one, which any bit of noise would produce
+   Expect('a server which signs something other than what it sends',
+          RNL_TEST_DTLS_SERVER_BAD_KEY_EXCHANGE_SIGNATURE,
+          RNL_DTLS12_CLIENT_FAILURE_BAD_KEY_EXCHANGE_SIGNATURE,51);
+
+   Expect('a server whose leaf was signed by a stranger',
+          RNL_TEST_DTLS_SERVER_UNTRUSTED_CERTIFICATE,
+          RNL_DTLS12_CLIENT_FAILURE_BAD_CERTIFICATE,42);
+
+   Expect('a server whose certificate has expired',
+          RNL_TEST_DTLS_SERVER_EXPIRED_CERTIFICATE,
+          RNL_DTLS12_CLIENT_FAILURE_BAD_CERTIFICATE,42);
+
+   Expect('a server whose Finished does not match the transcript',
+          RNL_TEST_DTLS_SERVER_WRONG_VERIFY_DATA,
+          RNL_DTLS12_CLIENT_FAILURE_BAD_FINISHED,51);
+
+   // The one which would make the whole exchange unauthenticated while looking exactly like a
+   // handshake that worked: a Finished in the clear, with no key change in front of it
+   Expect('a server which sends its Finished without changing the cipher spec',
+          RNL_TEST_DTLS_SERVER_FINISHED_WITHOUT_CHANGE_CIPHER_SPEC,
+          RNL_DTLS12_CLIENT_FAILURE_UNEXPECTED_MESSAGE,10);
+
+   // And an alert must not be answered with an alert, or two implementations doing the polite thing
+   // would send them back and forth
+   Expect('a server which answers with a fatal alert',
+          RNL_TEST_DTLS_SERVER_FATAL_ALERT,RNL_DTLS12_CLIENT_FAILURE_ALERT,0);
+
+  finally
+   FreeAndNil(RandomGenerator);
+  end;
+
+ finally
+  FreeAndNil(Watchdog);
+ end;
+ TestEnd;
 
 end;
 
@@ -7588,24 +8530,66 @@ begin
 
 end;
 
+// Reports one vector as one check of this suite. Without it the whole of the cryptography counted as
+// a single check, and the summary line at the end said the same number for five stages running while
+// the number of vectors behind it nearly doubled - which made the one figure a human actually reads
+// say nothing about what had grown.
+procedure ReportCryptographySelfTest(const aName:TRNLRawByteString;const aSucceeded:boolean);
+begin
+ Check(aSucceeded,'cryptographic self test: '+aName);
+end;
+
+// One test per group rather than one for the whole of the cryptography. With 383 vectors behind a
+// single name, that one test carried eight times the checks of the next largest and the summary
+// line said more about it than about everything else together.
+//
+// The group list lives in RNL and not here, and SelfTestCryptography is defined as running every
+// group in order - so a primitive added to one list cannot be missing from the other.
 procedure TestCryptographySelfTestsPass;
-var Succeeded:boolean;
+const NAMES:array[TRNLCryptographySelfTestGroup] of TRNLRawByteString=
+       (
+        'the checksum vectors pass',
+        'the curve25519 vectors pass',
+        'the nist curve vectors pass',
+        'the certificate parsing and chain vectors pass',
+        'the cipher vectors pass',
+        'the hash and mac vectors pass',
+        'the key derivation vectors pass',
+        'the record layer vectors pass'
+       );
+      // Every group has to carry something. A group which quietly stopped running anything would
+      // otherwise look exactly like one which passed: no failure reported, and every check simply
+      // absent.
+      MINIMUM_PER_GROUP=2;
+var Group:TRNLCryptographySelfTestGroup;
+    Succeeded:boolean;
+    CountChecks,CountFailures:TRNLSizeInt;
 begin
 
- TestBegin('the cryptographic self tests pass');
- try
+ // The whole report goes to standard output on the way, which is a lot of lines. These run first
+ // for that reason, so the noise stays in one place, and they are worth having: until this call
+ // existed nothing in RNL ever ran these vectors, so the primitives everything else here relies on
+ // were entirely unverified.
+ for Group:=Low(TRNLCryptographySelfTestGroup) to High(TRNLCryptographySelfTestGroup) do begin
 
-  // Writes its whole report to standard output on the way, which is a lot of lines. It runs first
-  // for that reason, so the noise stays in one place, and it is worth having: until this call
-  // existed nothing in RNL ever ran these vectors, so the primitives everything else here relies
-  // on were entirely unverified.
-  Succeeded:=TRNLInstance.SelfTestCryptography;
+  TestBegin(NAMES[Group]);
+  try
 
-  Check(Succeeded,'every cryptographic self test and checksum check vector in the library has to '+
-                  'come out right');
+   Succeeded:=TRNLInstance.SelfTestCryptographyGroup(Group,CountChecks,CountFailures,
+                                                     ReportCryptographySelfTest);
 
- finally
-  TestEnd;
+   Info(TRNLRawByteString(IntToStr(CountChecks))+' published vector(s) checked, '+
+        TRNLRawByteString(IntToStr(CountFailures))+' failed');
+
+   CheckAtLeastInt64(CountChecks,MINIMUM_PER_GROUP,
+                     'the group has to have actually run its vectors, not merely not failed any');
+
+   Check(Succeeded,'every vector in the group has to come out right');
+
+  finally
+   TestEnd;
+  end;
+
  end;
 
 end;
@@ -9670,7 +10654,11 @@ begin
  TestCryptographySelfTestsPass;
  TestHashesStreamInChunksAndHMACHandlesKeyLengths;
  TestHKDFStretchesAndRefusesPastTheVectors;
+ TestP256AgreementIsSymmetricAndRefusesTheEdges;
+ TestCertificateChainRejectsEveryBrokenPath;
  TestDTLSRecordLayerRejectsWhatDoesNotAddUp;
+ TestDTLSHandshakeCompletesAgainstEveryHonestServer;
+ TestDTLSHandshakeRefusesEveryBrokenServer;
 
  // Pure configuration invariants first, they are instant and their failure explains a lot of
  // what the behavioural tests below would otherwise report in a much noisier way
@@ -9686,6 +10674,7 @@ begin
  TestRelayAddressGetsItsOwnFloodingBudget;
  TestRelayClientsGetABucketEachUnderACeiling;
  TestTURNChannelNumbersAreReleasedAndReused;
+ TestTURNAllocationSaysWhyItWasRefused;
 
  // The NAT simulator, which every later punching test will rest on
  TestNATNetworkSimulatesTheFourNATKinds;

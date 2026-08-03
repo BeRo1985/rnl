@@ -1,18 +1,18 @@
-(******************************************************************************
- *                            RNL TEST FRAMEWORK                              *
- ******************************************************************************
- *                        Version 2026-07-27-00-00-0000                       *
- ******************************************************************************
- *                                                                            *
+(*******************************************************************************
+ *                            RNL TEST FRAMEWORK                               *
+ *******************************************************************************
+ *                        Version 2026-07-27-00-00-0000                        *
+ *******************************************************************************
+ *                                                                             *
  * A deliberately minimal self-contained test harness for RNL, in the same     *
  * spirit as the RNL contribution rules: no third-party units, compatible with *
  * both FreePascal >= 3.0.4 and newer modern Delphi versions.                  *
- *                                                                            *
+ *                                                                             *
  * The watchdog thread is the important part here, because a whole class of    *
  * RNL defects manifests as an endless loop inside the host service loop, and  *
  * a hanging test process reports nothing at all. With the watchdog such a     *
  * defect turns into an ordinary, loud test failure instead.                   *
- *                                                                            *
+ *                                                                             *
  ******************************************************************************)
 unit RNLTestFramework;
 {$ifdef fpc}

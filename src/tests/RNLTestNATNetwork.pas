@@ -1,39 +1,39 @@
-(******************************************************************************
- *                         RNL TEST NAT NETWORK                               *
- ******************************************************************************
- *                        Version 2026-07-27-00-00-0000                       *
- ******************************************************************************
- *                                                                            *
+(********************************************************************************
+ *                         RNL TEST NAT NETWORK                                 *
+ ********************************************************************************
+ *                        Version 2026-07-27-00-00-0000                         *
+ ********************************************************************************
+ *                                                                              *
  * A NAT, simulated well enough that hole punching can be tested against it.    *
  * Punching against real NATs is not reproducible: the outcome depends on the   *
  * router in the room, and a test which passes today for reasons nobody can     *
- * name is worse than no test.                                                 *
- *                                                                            *
+ * name is worse than no test.                                                  *
+ *                                                                              *
  * Two things decide whether punching works, and they are independent:          *
- *                                                                            *
+ *                                                                              *
  *   the mapping   which external port an inside socket is given, and whether   *
- *                 that depends on where it is sending to                      *
+ *                 that depends on where it is sending to                       *
  *   the filter    which senders are allowed back in through that mapping       *
- *                                                                            *
- *   type                mapping                     filter                    *
+ *                                                                              *
+ *   type                mapping                     filter                     *
  *   ------------------  --------------------------  ----------------------     *
  *   full cone           per inside socket           none                       *
  *   address restricted  per inside socket           addresses sent to          *
- *   port restricted     per inside socket           address and port sent to    *
- *   symmetric           per inside socket and per   address and port sent to    *
- *                       destination                                           *
- *                                                                            *
- * Symmetric is the case punching cannot beat, because the external port a peer  *
+ *   port restricted     per inside socket           address and port sent to   *
+ *   symmetric           per inside socket and per   address and port sent to   *
+ *                       destination                                            *
+ *                                                                              *
+ * Symmetric is the case punching cannot beat, because the external port a peer *
  * was told about is not the one its own datagrams will arrive on.              *
- *                                                                            *
- * Mappings expire, which is what makes rebinding testable at all: a connection  *
+ *                                                                              *
+ * Mappings expire, which is what makes rebinding testable at all: a connection *
  * which has gone quiet for long enough loses its way back in.                  *
- *                                                                            *
- * On the virtual network every socket lives on 127.0.0.1 and only the port      *
- * tells them apart, so "inside" is expressed as a set of ports. That is a       *
- * simplification of a real topology and a faithful model of what matters here.  *
- *                                                                            *
- ******************************************************************************)
+ *                                                                              *
+ * On the virtual network every socket lives on 127.0.0.1 and only the port     *
+ * tells them apart, so "inside" is expressed as a set of ports. That is a      *
+ * simplification of a real topology and a faithful model of what matters here. *
+ *                                                                              *
+ *******************************************************************************)
 unit RNLTestNATNetwork;
 {$ifdef fpc}
  {$mode delphi}

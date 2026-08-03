@@ -1,25 +1,25 @@
-(******************************************************************************
- *                         RNL TEST STUN SERVER                               *
- ******************************************************************************
- *                        Version 2026-07-27-00-00-0000                       *
- ******************************************************************************
- *                                                                            *
+(*******************************************************************************
+ *                         RNL TEST STUN SERVER                                *
+ *******************************************************************************
+ *                        Version 2026-07-27-00-00-0000                        *
+ *******************************************************************************
+ *                                                                             *
  * A STUN server just complete enough to answer a binding request, so that     *
  * TRNLSTUNClient can be tested against something deterministic instead of     *
  * against whatever a public server on the internet happens to do today.       *
- *                                                                            *
+ *                                                                             *
  * It runs in a thread of its own, which it has to: TRNLSTUNClient.Query is    *
  * blocking, so nobody could answer it from the same thread. That is safe here *
- * because TRNLVirtualNetwork locks around Send, Receive and SocketWait, and    *
+ * because TRNLVirtualNetwork locks around Send, Receive and SocketWait, and   *
  * releases the lock before it waits.                                          *
- *                                                                            *
- * The interesting part is not the correct answer but the wrong ones. A parser  *
- * for datagrams from a stranger is exactly where length fields must not be     *
- * believed, and the only way to show that they are not is to send lengths      *
- * which lie. Every variant of TRNLTestSTUNServerBehaviour below is one such    *
- * lie, plus the two shapes a well behaved but old or chatty server produces.   *
- *                                                                            *
- ******************************************************************************)
+ *                                                                             *
+ * The interesting part is not the correct answer but the wrong ones. A parser *
+ * for datagrams from a stranger is exactly where length fields must not be    *
+ * believed, and the only way to show that they are not is to send lengths     *
+ * which lie. Every variant of TRNLTestSTUNServerBehaviour below is one such   *
+ * lie, plus the two shapes a well behaved but old or chatty server produces.  *
+ *                                                                             *
+ *******************************************************************************)
 unit RNLTestSTUNServer;
 {$ifdef fpc}
  {$mode delphi}
