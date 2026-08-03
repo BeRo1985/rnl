@@ -2455,11 +2455,27 @@ type PRNLVersion=^TRNLVersion;
        KeyUsage:TRNLUInt16;
        HasExtendedKeyUsage:boolean;
        AllowsServerAuthentication:boolean;
+      private
+       // The shape of a SubjectPublicKeyInfo, whether it stands alone or sits in a certificate.
+       // aPublicKey has to be able to take TRNLP384.PointSize bytes.
+       class function ReadPublicKeyInfo(const aData;const aDataSize:TRNLSizeInt;
+                                        out aCurve:TRNLX509PublicKeyCurve;
+                                        out aPublicKey;
+                                        out aPublicKeySize:TRNLSizeInt):boolean; static;
       public
        // False for anything at all which does not add up, including an extension marked critical
        // which this code does not know. RFC 5280 section 4.2 is explicit about that one, and it is
        // the difference between ignoring a constraint and refusing to pretend it was honoured.
        function Parse(const aData;const aDataSize:TRNLSizeUInt):boolean;
+       // A SubjectPublicKeyInfo on its own, which is what RFC 7250 sends instead of a certificate.
+       // Everything but the key is left zero, and that is the whole of it: there is no issuer, no
+       // validity and no name to fill in, which is exactly why a raw key can only ever be judged by
+       // being recognised rather than by being vouched for.
+       //
+       // The same reader as the one inside Parse, deliberately shared rather than written twice. A
+       // raw key which was read differently from an embedded one would be a way to have two keys
+       // that look alike to different parts of this unit.
+       function ParsePublicKeyInfo(const aData;const aDataSize:TRNLSizeInt):boolean;
        class procedure SelfTest; static;
      end;
 
@@ -2487,7 +2503,12 @@ type PRNLVersion=^TRNLVersion;
        // Not a chain failure at all: the peer presented something whose fingerprint is not one of
        // the pinned ones. It sits here because a caller wants one answer to "may I talk to this
        // peer", whichever way that was decided.
-       RNL_X509_VERDICT_FINGERPRINT_MISMATCH
+       RNL_X509_VERDICT_FINGERPRINT_MISMATCH,
+       // The peer sent a bare public key where none was offered to it. A server may only pick a
+       // certificate type from the list it was given, so this is a server answering a question
+       // nobody asked - and it has to be told apart from a key which was offered and then not
+       // recognised, which is the verdict above.
+       RNL_X509_VERDICT_RAW_PUBLIC_KEY_NOT_OFFERED
       );
 
      PRNLX509ChainEntry=^TRNLX509ChainEntry;
@@ -2585,6 +2606,15 @@ type PRNLVersion=^TRNLVersion;
        CountTrustedRoots:TRNLSizeInt;
        Fingerprints:array[0..MaximumFingerprints-1] of TFingerprint;
        CountFingerprints:TRNLSizeInt;
+       // Whether a bare public key of RFC 7250 may stand in for the certificate, which is only ever
+       // asked in fingerprint mode: without a certificate there is no chain, no issuer, no validity
+       // and no name, so there is nothing for chain mode to do with one.
+       //
+       // Off by default, and that is not timidity. Offering the extension changes the ClientHello
+       // of every handshake, including the ones against relays which have never heard of it, and a
+       // relay which refuses what it does not understand is a relay this would break for no gain.
+       // It belongs on where both ends are known, which is exactly the deployment pinning is for.
+       AllowRawPublicKey:boolean;
       public
        procedure InitializeChain(const aHostName:TRNLRawByteString;
                                  const aTrustedRoots:TRNLX509.TChainEntries;
@@ -2603,6 +2633,12 @@ type PRNLVersion=^TRNLVersion;
        // way, because that is what the signature check above needs.
        function VerifyLeaf(const aChain:TRNLX509.TChainEntries;const aChainLength:TRNLSizeInt;
                            out aLeaf:TRNLX509Certificate):TRNLX509Verdict;
+       // The same question for a bare SubjectPublicKeyInfo. The fingerprint is taken over the key's
+       // own bytes, which is what an operator reads off their server the same way they would read a
+       // certificate's - and it is the only thing there is to go on, since a key vouches for
+       // nothing, not even for itself.
+       function VerifyRawPublicKey(const aData;const aDataSize:TRNLSizeInt;
+                                   out aLeaf:TRNLX509Certificate):TRNLX509Verdict;
        class procedure SelfTest; static;
      end;
 
@@ -2857,6 +2893,13 @@ type PRNLVersion=^TRNLVersion;
              EXTENSION_EC_POINT_FORMATS=TRNLUInt16(11);
              EXTENSION_SIGNATURE_ALGORITHMS=TRNLUInt16(13);
              EXTENSION_EXTENDED_MASTER_SECRET=TRNLUInt16(23);
+             // RFC 7250. Only the server side of it is ever offered: the other extension says what
+             // this end could present, and this end presents nothing - it has no certificate and no
+             // key of its own in this handshake, so claiming a type it could provide would be a
+             // claim it cannot make good on.
+             EXTENSION_SERVER_CERTIFICATE_TYPE=TRNLUInt16(20);
+             CERTIFICATE_TYPE_X509=TRNLUInt8(0);
+             CERTIFICATE_TYPE_RAW_PUBLIC_KEY=TRNLUInt8(2);
       public
        // False when the buffer will not hold it. aCookie is empty on the first attempt and carries
        // what the HelloVerifyRequest said on the second - that exchange is what keeps a forged
@@ -2866,7 +2909,8 @@ type PRNLVersion=^TRNLVersion;
                              const aRandom;
                              const aCookie;const aCookieSize:TRNLSizeInt;
                              const aPublicKey;const aPublicKeySize:TRNLSizeInt;
-                             const aServerName:TRNLRawByteString):boolean; static;
+                             const aServerName:TRNLRawByteString;
+                             const aOfferRawPublicKey:boolean):boolean; static;
      end;
 
      PRNLDTLS12ServerHello=^TRNLDTLS12ServerHello;
@@ -2876,6 +2920,11 @@ type PRNLVersion=^TRNLVersion;
        CipherSuite:TRNLUInt16;
        CompressionMethod:TRNLUInt8;
        ExtendedMasterSecret:boolean;
+       // What the server picked for its own certificate. X.509 unless it says otherwise, which is
+       // also what a server that never heard of RFC 7250 leaves behind - and those two are not the
+       // same thing, which is why the flag is separate from the value.
+       HasServerCertificateType:boolean;
+       ServerCertificateType:TRNLUInt8;
        function Parse(const aData;const aDataSize:TRNLSizeInt):boolean;
      end;
 
@@ -3077,9 +3126,13 @@ type PRNLVersion=^TRNLVersion;
              ALERT_BAD_RECORD_MAC=TRNLUInt8(20);
              ALERT_HANDSHAKE_FAILURE=TRNLUInt8(40);
              ALERT_BAD_CERTIFICATE=TRNLUInt8(42);
+             ALERT_ILLEGAL_PARAMETER=TRNLUInt8(47);
              ALERT_DECODE_ERROR=TRNLUInt8(50);
              ALERT_DECRYPT_ERROR=TRNLUInt8(51);
              ALERT_INTERNAL_ERROR=TRNLUInt8(80);
+             // RFC 5246 section 7.4.1.4: what a client says when a server sends back an extension
+             // which was never in the ClientHello
+             ALERT_UNSUPPORTED_EXTENSION=TRNLUInt8(110);
       private
        type TRNLDTLS12ClientDatagram=record
              Data:array[0..MaximumDatagramSize-1] of TRNLUInt8;
@@ -3135,6 +3188,9 @@ type PRNLVersion=^TRNLVersion;
        fClientKeys:TRNLDTLS12TrafficKeys;
        fServerKeys:TRNLDTLS12TrafficKeys;
        fExtendedMasterSecret:boolean;
+       // What the server said it would present. RFC 7250 leaves it at X.509 when nobody says
+       // otherwise, which is also what every server that never heard of the extension leaves.
+       fServerCertificateType:TRNLUInt8;
        fCertificateRequested:boolean;
        fSeenServerHello:boolean;
        fSeenCertificate:boolean;
@@ -3201,6 +3257,9 @@ type PRNLVersion=^TRNLVersion;
 
        function HandleHelloVerifyRequest(const aBody;const aBodySize:TRNLSizeInt;
                                          const aNow:TRNLTime):boolean;
+       // Whether the ClientHello carried the extension at all. Asked in two places - when it is
+       // written and when the answer is judged - and therefore decided in one.
+       function OffersRawPublicKey:boolean;
        function HandleCertificate(const aBody;const aBodySize:TRNLSizeInt):boolean;
        function HandleServerKeyExchange(const aBody;const aBodySize:TRNLSizeInt):boolean;
        function HandleServerFinished(const aBody;const aBodySize:TRNLSizeInt):boolean;
@@ -3489,6 +3548,12 @@ type PRNLVersion=^TRNLVersion;
              EXTENSION_SUPPORTED_VERSIONS=TRNLUInt16(43);
              EXTENSION_COOKIE=TRNLUInt16(44);
              EXTENSION_KEY_SHARE=TRNLUInt16(51);
+             // RFC 7250, and in 1.3 the answer to it travels in the EncryptedExtensions rather
+             // than in the ServerHello - which is the better place for it, since by then it is
+             // already protected
+             EXTENSION_SERVER_CERTIFICATE_TYPE=TRNLUInt16(20);
+             CERTIFICATE_TYPE_X509=TRNLUInt8(0);
+             CERTIFICATE_TYPE_RAW_PUBLIC_KEY=TRNLUInt8(2);
       public
        // Both shares go out together: x25519 because it is what TLS 1.3 deployments prefer, and
        // secp256r1 because it is what the relays measured so far insist on. Offering one and being
@@ -3499,7 +3564,8 @@ type PRNLVersion=^TRNLVersion;
                              const aX25519PublicKey;
                              const aSecp256r1PublicKey;const aSecp256r1PublicKeySize:TRNLSizeInt;
                              const aCookie;const aCookieSize:TRNLSizeInt;
-                             const aServerName:TRNLRawByteString):boolean; static;
+                             const aServerName:TRNLRawByteString;
+                             const aOfferRawPublicKey:boolean):boolean; static;
      end;
 
      // What a ServerHello says, taken apart without judging it. Which version, which suite and
@@ -3596,10 +3662,10 @@ type PRNLVersion=^TRNLVersion;
                                          const aContext:TRNLRawByteString;
                                          const aTranscriptHash;
                                          const aTranscriptHashSize:TRNLSizeInt):boolean; static;
-       // ecdsa_secp256r1_sha256 and ed25519, which are the two this client offers. The key comes
-       // out of the certificate the peer presented, and the curve of that key has to agree with
-       // the algorithm the peer named - a P-384 key with ecdsa_secp256r1_sha256 is a mismatch and
-       // not a detail.
+       // ecdsa_secp256r1_sha256 and ecdsa_secp384r1_sha384, which are the two this client offers.
+       // The key comes out of the certificate the peer presented, and the curve of that key has to
+       // agree with the algorithm the peer named - a P-384 key with ecdsa_secp256r1_sha256 is a
+       // mismatch and not a detail.
        function VerifyWith(const aCertificate:TRNLX509Certificate;
                            const aTranscriptHash;
                            const aTranscriptHashSize:TRNLSizeInt):boolean;
@@ -3702,6 +3768,9 @@ type PRNLVersion=^TRNLVersion;
              ALERT_DECRYPT_ERROR=TRNLUInt8(51);
              ALERT_ILLEGAL_PARAMETER=TRNLUInt8(47);
              ALERT_INTERNAL_ERROR=TRNLUInt8(80);
+             // RFC 8446 section 4.2: what a client says when a server sends back an extension
+             // which was never in the ClientHello
+             ALERT_UNSUPPORTED_EXTENSION=TRNLUInt8(110);
              TYPE_CLIENT_HELLO=TRNLUInt8(1);
              TYPE_SERVER_HELLO=TRNLUInt8(2);
              TYPE_ENCRYPTED_EXTENSIONS=TRNLUInt8(8);
@@ -3730,6 +3799,8 @@ type PRNLVersion=^TRNLVersion;
        fFailure:TRNLDTLS12ClientFailure;
        fAlertDescription:TRNLUInt8;
        fCertificateVerdict:TRNLX509Verdict;
+       // What the EncryptedExtensions said the server would present, X.509 where it said nothing
+       fServerCertificateType:TRNLUInt8;
 
        fClientRandom:array[0..TRNLDTLS13ClientHello.RandomSize-1] of TRNLUInt8;
 
@@ -3806,6 +3877,8 @@ type PRNLVersion=^TRNLVersion;
        procedure ReplayDeferredFragments(const aNow:TRNLTime);
        function HandleServerHello(const aBody;const aBodySize:TRNLSizeInt;
                                   const aNow:TRNLTime):boolean;
+       function OffersRawPublicKey:boolean;
+       function HandleEncryptedExtensions(const aBody;const aBodySize:TRNLSizeInt):boolean;
        function HandleCertificate(const aBody;const aBodySize:TRNLSizeInt):boolean;
        function HandleCertificateVerify(const aBody;const aBodySize:TRNLSizeInt):boolean;
        function HandleServerFinished(const aBody;const aBodySize:TRNLSizeInt;
@@ -15259,7 +15332,7 @@ begin
  Found:=false;
  if TRNLDTLS12ClientHello.Write_(Body,BodySize,SizeOf(Body),CapturedClientRandom,
                                  CapturedClientRandom,20,
-                                 CapturedClientRandom,0,'relay.test') then begin
+                                 CapturedClientRandom,0,'relay.test',false) then begin
   Reader.Initialize(Body,BodySize);
   if Reader.ReadUInt16(Value) and (Value=$fefd) and
      Reader.ReadBytes(Data,TRNLDTLS12ClientHello.RandomSize) and
@@ -22480,8 +22553,87 @@ const RNLX509OIDECPublicKey:array[0..6] of TRNLUInt8=
       RNLX509OIDServerAuthentication:array[0..7] of TRNLUInt8=
        ($2b,$06,$01,$05,$05,$07,$03,$01);                 // 1.3.6.1.5.5.7.3.1
 
+class function TRNLX509Certificate.ReadPublicKeyInfo(const aData;const aDataSize:TRNLSizeInt;
+                                                     out aCurve:TRNLX509PublicKeyCurve;
+                                                     out aPublicKey;
+                                                     out aPublicKeySize:TRNLSizeInt):boolean;
+var Reader,Contents,Algorithm:TRNLASN1Reader;
+    Data:PRNLUInt8Array;
+    Size:TRNLSizeInt;
+begin
+
+ result:=false;
+ aCurve:=RNL_X509_PUBLIC_KEY_CURVE_UNSUPPORTED;
+ aPublicKeySize:=0;
+
+ if aDataSize<=0 then begin
+  exit;
+ end;
+
+ Reader.Initialize(aData,aDataSize);
+ if not Reader.Read(TRNLASN1Reader.TAG_SEQUENCE,Contents) then begin
+  exit;
+ end;
+ // Nothing may follow it. A raw key with something appended is a second thing travelling under the
+ // name of the first, and inside a certificate the caller hands in exactly one element anyway.
+ if not Reader.AtEnd then begin
+  exit;
+ end;
+
+ if not Contents.Read(TRNLASN1Reader.TAG_SEQUENCE,Algorithm) then begin
+  exit;
+ end;
+ if not Algorithm.ObjectIdentifierIs(RNLX509OIDECPublicKey,SizeOf(RNLX509OIDECPublicKey)) then begin
+  exit;
+ end;
+ // The named curve travels as the parameters of the algorithm, and an EC key without one is a key
+ // whose curve this code would have to guess at
+ if not Algorithm.ReadObjectIdentifier(Data,Size) then begin
+  exit;
+ end;
+ if (Size=TRNLSizeInt(SizeOf(RNLX509OIDPrime256v1))) and
+    TRNLMemory.SecureIsEqual(Data^[0],RNLX509OIDPrime256v1,Size) then begin
+  aCurve:=RNL_X509_PUBLIC_KEY_CURVE_P256;
+  aPublicKeySize:=TRNLP256.PointSize;
+ end else if (Size=TRNLSizeInt(SizeOf(RNLX509OIDSecp384r1))) and
+             TRNLMemory.SecureIsEqual(Data^[0],RNLX509OIDSecp384r1,Size) then begin
+  aCurve:=RNL_X509_PUBLIC_KEY_CURVE_P384;
+  aPublicKeySize:=TRNLP384.PointSize;
+ end else begin
+  exit;
+ end;
+ if not Algorithm.AtEnd then begin
+  exit;
+ end;
+
+ if not Contents.ReadBitString(Data,Size) then begin
+  exit;
+ end;
+ if Size<>aPublicKeySize then begin
+  aPublicKeySize:=0;
+  aCurve:=RNL_X509_PUBLIC_KEY_CURVE_UNSUPPORTED;
+  exit;
+ end;
+ Move(Data^[0],aPublicKey,Size);
+ if not Contents.AtEnd then begin
+  exit;
+ end;
+
+ result:=true;
+
+end;
+
+function TRNLX509Certificate.ParsePublicKeyInfo(const aData;const aDataSize:TRNLSizeInt):boolean;
+begin
+ FillChar(self,SizeOf(TRNLX509Certificate),#0);
+ result:=ReadPublicKeyInfo(aData,aDataSize,PublicKeyCurve,PublicKey[0],PublicKeySize);
+ if not result then begin
+  FillChar(self,SizeOf(TRNLX509Certificate),#0);
+ end;
+end;
+
 function TRNLX509Certificate.Parse(const aData;const aDataSize:TRNLSizeUInt):boolean;
-var Outer,Certificate,TBS,Contents,Inner,Algorithm,Extensions,Extension:TRNLASN1Reader;
+var Outer,Certificate,TBS,Contents,Inner,Extensions,Extension:TRNLASN1Reader;
     OID:PRNLUInt8Array;
     OIDSize:TRNLSizeInt;
     Tag:TRNLUInt8;
@@ -22740,43 +22892,14 @@ begin
   exit;
  end;
 
- // subjectPublicKeyInfo
+ // subjectPublicKeyInfo, read by the same code which reads a raw one
  if not TBS.Read(TRNLASN1Reader.TAG_SEQUENCE,Contents) then begin
   exit;
  end;
- if not Contents.Read(TRNLASN1Reader.TAG_SEQUENCE,Algorithm) then begin
+ if not TBS.LastElement(Data,Size) then begin
   exit;
  end;
- if not Algorithm.ObjectIdentifierIs(RNLX509OIDECPublicKey,SizeOf(RNLX509OIDECPublicKey)) then begin
-  exit;
- end;
- // The named curve travels as the parameters of the algorithm, and an EC key without one is a key
- // whose curve this code would have to guess at
- if not Algorithm.ReadObjectIdentifier(Data,Size) then begin
-  exit;
- end;
- if (Size=TRNLSizeInt(SizeOf(RNLX509OIDPrime256v1))) and
-    TRNLMemory.SecureIsEqual(Data^[0],RNLX509OIDPrime256v1,Size) then begin
-  PublicKeyCurve:=RNL_X509_PUBLIC_KEY_CURVE_P256;
-  PublicKeySize:=TRNLP256.PointSize;
- end else if (Size=TRNLSizeInt(SizeOf(RNLX509OIDSecp384r1))) and
-             TRNLMemory.SecureIsEqual(Data^[0],RNLX509OIDSecp384r1,Size) then begin
-  PublicKeyCurve:=RNL_X509_PUBLIC_KEY_CURVE_P384;
-  PublicKeySize:=TRNLP384.PointSize;
- end else begin
-  exit;
- end;
- if not Algorithm.AtEnd then begin
-  exit;
- end;
- if not Contents.ReadBitString(Data,Size) then begin
-  exit;
- end;
- if Size<>PublicKeySize then begin
-  exit;
- end;
- Move(Data^[0],PublicKey[0],Size);
- if not Contents.AtEnd then begin
+ if not ReadPublicKeyInfo(Data^[0],Size,PublicKeyCurve,PublicKey[0],PublicKeySize) then begin
   exit;
  end;
 
@@ -23152,6 +23275,51 @@ begin
   Context.Update(aCertificate,aCertificateSize);
  end;
  Context.Finalize(aFingerprint);
+end;
+
+function TRNLDTLSVerification.VerifyRawPublicKey(const aData;const aDataSize:TRNLSizeInt;
+                                                 out aLeaf:TRNLX509Certificate):TRNLX509Verdict;
+var Fingerprint:TFingerprint;
+    Index:TRNLSizeInt;
+    Matched:boolean;
+begin
+
+ FillChar(aLeaf,SizeOf(TRNLX509Certificate),#0);
+
+ // A bare key is only ever offered in fingerprint mode, so one arriving in chain mode is a server
+ // which picked a type it was not given
+ if (Mode<>RNL_DTLS_VERIFICATION_FINGERPRINT) or not AllowRawPublicKey then begin
+  result:=RNL_X509_VERDICT_RAW_PUBLIC_KEY_NOT_OFFERED;
+  exit;
+ end;
+
+ if aDataSize<1 then begin
+  result:=RNL_X509_VERDICT_EMPTY_CHAIN;
+  exit;
+ end;
+
+ ComputeFingerprint(Fingerprint,aData,aDataSize);
+
+ Matched:=false;
+ for Index:=0 to CountFingerprints-1 do begin
+  if TRNLMemory.SecureIsEqual(Fingerprint,Fingerprints[Index,0],FingerprintSize) then begin
+   Matched:=true;
+  end;
+ end;
+ if not Matched then begin
+  result:=RNL_X509_VERDICT_FINGERPRINT_MISMATCH;
+  exit;
+ end;
+
+ // Recognised, and now it still has to be readable. The whole point of the key is to check the
+ // signature with it, and a pin says which bytes were expected, not that they are a key.
+ if not aLeaf.ParsePublicKeyInfo(aData,aDataSize) then begin
+  result:=RNL_X509_VERDICT_MALFORMED;
+  exit;
+ end;
+
+ result:=RNL_X509_VERDICT_ACCEPTED;
+
 end;
 
 function TRNLDTLSVerification.VerifyLeaf(const aChain:TRNLX509.TChainEntries;
@@ -23651,7 +23819,8 @@ class function TRNLDTLS12ClientHello.Write_(out aBody;out aBodySize:TRNLSizeInt;
                                             const aRandom;
                                             const aCookie;const aCookieSize:TRNLSizeInt;
                                             const aPublicKey;const aPublicKeySize:TRNLSizeInt;
-                                            const aServerName:TRNLRawByteString):boolean;
+                                            const aServerName:TRNLRawByteString;
+                                            const aOfferRawPublicKey:boolean):boolean;
 var Writer:TRNLTLSWriter;
     Extensions,Vector,Inner:TRNLSizeInt;
 begin
@@ -23720,6 +23889,18 @@ begin
  // simply does not get it.
  Writer.WriteUInt16(EXTENSION_EXTENDED_MASTER_SECRET);
  Writer.WriteUInt16(0);
+
+ // RFC 7250. X.509 is named first and named at all, so that a server which understands the
+ // extension but has only a certificate says so instead of failing the handshake over it.
+ if aOfferRawPublicKey then begin
+  Writer.WriteUInt16(EXTENSION_SERVER_CERTIFICATE_TYPE);
+  Vector:=Writer.BeginVector16;
+  Inner:=Writer.BeginVector8;
+  Writer.WriteUInt8(CERTIFICATE_TYPE_X509);
+  Writer.WriteUInt8(CERTIFICATE_TYPE_RAW_PUBLIC_KEY);
+  Writer.EndVector8(Inner);
+  Writer.EndVector16(Vector);
+ end;
 
  Writer.EndVector16(Extensions);
 
@@ -23797,6 +23978,15 @@ begin
      exit;
     end;
     ExtendedMasterSecret:=true;
+   end else if ExtensionType=TRNLDTLS12ClientHello.EXTENSION_SERVER_CERTIFICATE_TYPE then begin
+    // RFC 7250 section 4.1: the answer is one type, not a list. Whether it is one of the two which
+    // were offered is not decided here - the ServerHello does not know what was offered, and the
+    // client which does refuses it a moment later.
+    if Size<>1 then begin
+     exit;
+    end;
+    HasServerCertificateType:=true;
+    ServerCertificateType:=Data^[0];
    end;
   end;
  end;
@@ -23985,7 +24175,8 @@ class function TRNLDTLS13ClientHello.Write_(out aBody;out aBodySize:TRNLSizeInt;
                                             const aSecp256r1PublicKey;
                                             const aSecp256r1PublicKeySize:TRNLSizeInt;
                                             const aCookie;const aCookieSize:TRNLSizeInt;
-                                            const aServerName:TRNLRawByteString):boolean;
+                                            const aServerName:TRNLRawByteString;
+                                            const aOfferRawPublicKey:boolean):boolean;
 var Writer:TRNLTLSWriter;
     Extensions,Vector,Inner,Shares:TRNLSizeInt;
 begin
@@ -24076,6 +24267,18 @@ begin
   Inner:=Writer.BeginVector16;
   Writer.WriteBytes(aCookie,aCookieSize);
   Writer.EndVector16(Inner);
+  Writer.EndVector16(Vector);
+ end;
+
+ // RFC 7250, and X.509 named first so that a server which knows the extension but has only a
+ // certificate has something in the list it can pick
+ if aOfferRawPublicKey then begin
+  Writer.WriteUInt16(EXTENSION_SERVER_CERTIFICATE_TYPE);
+  Vector:=Writer.BeginVector16;
+  Inner:=Writer.BeginVector8;
+  Writer.WriteUInt8(CERTIFICATE_TYPE_X509);
+  Writer.WriteUInt8(CERTIFICATE_TYPE_RAW_PUBLIC_KEY);
+  Writer.EndVector8(Inner);
   Writer.EndVector16(Vector);
  end;
 
@@ -24715,7 +24918,8 @@ begin
                                      fX25519PublicKey,
                                      fSecp256r1PublicKey[0],TRNLP256.PointSize,
                                      Nothing,0,
-                                     fServerName) then begin
+                                     fServerName,
+                                     OffersRawPublicKey) then begin
   exit;
  end;
 
@@ -24976,6 +25180,64 @@ begin
 
 end;
 
+function TRNLDTLS13Client.OffersRawPublicKey:boolean;
+begin
+ // Same rule as in the 1.2 client, and for the same reason: a bare key can only be recognised,
+ // never vouched for, so it belongs where pinning already decides who the peer is.
+ result:=fVerification.AllowRawPublicKey and
+         (fVerification.Mode=RNL_DTLS_VERIFICATION_FINGERPRINT);
+end;
+
+function TRNLDTLS13Client.HandleEncryptedExtensions(const aBody;
+                                                    const aBodySize:TRNLSizeInt):boolean;
+var Reader,Extensions:TRNLTLSReader;
+    Data:PRNLUInt8Array;
+    Size:TRNLSizeInt;
+    ExtensionType:TRNLUInt16;
+begin
+
+ result:=false;
+ fServerCertificateType:=TRNLDTLS13ClientHello.CERTIFICATE_TYPE_X509;
+
+ Reader.Initialize(aBody,aBodySize);
+ if (not Reader.ReadVector16(Data,Size)) or (not Reader.AtEnd) then begin
+  Fail(RNL_DTLS12_CLIENT_FAILURE_MALFORMED_MESSAGE,ALERT_DECODE_ERROR);
+  exit;
+ end;
+
+ Extensions.Initialize(Data^[0],Size);
+ while not Extensions.AtEnd do begin
+  if not (Extensions.ReadUInt16(ExtensionType) and Extensions.ReadVector16(Data,Size)) then begin
+   Fail(RNL_DTLS12_CLIENT_FAILURE_MALFORMED_MESSAGE,ALERT_DECODE_ERROR);
+   exit;
+  end;
+  // Only the one which changes what the next message means is read. The others are stepped over
+  // rather than judged, which is what this client did with the whole message before RFC 7250 gave
+  // it a reason to look inside.
+  if ExtensionType=TRNLDTLS13ClientHello.EXTENSION_SERVER_CERTIFICATE_TYPE then begin
+   if not OffersRawPublicKey then begin
+    fCertificateVerdict:=RNL_X509_VERDICT_RAW_PUBLIC_KEY_NOT_OFFERED;
+    Fail(RNL_DTLS12_CLIENT_FAILURE_BAD_CERTIFICATE,ALERT_UNSUPPORTED_EXTENSION);
+    exit;
+   end;
+   if Size<>1 then begin
+    Fail(RNL_DTLS12_CLIENT_FAILURE_MALFORMED_MESSAGE,ALERT_DECODE_ERROR);
+    exit;
+   end;
+   if (Data^[0]<>TRNLDTLS13ClientHello.CERTIFICATE_TYPE_X509) and
+      (Data^[0]<>TRNLDTLS13ClientHello.CERTIFICATE_TYPE_RAW_PUBLIC_KEY) then begin
+    fCertificateVerdict:=RNL_X509_VERDICT_RAW_PUBLIC_KEY_NOT_OFFERED;
+    Fail(RNL_DTLS12_CLIENT_FAILURE_BAD_CERTIFICATE,ALERT_ILLEGAL_PARAMETER);
+    exit;
+   end;
+   fServerCertificateType:=Data^[0];
+  end;
+ end;
+
+ result:=true;
+
+end;
+
 function TRNLDTLS13Client.HandleCertificate(const aBody;const aBodySize:TRNLSizeInt):boolean;
 var Certificate:TRNLDTLS13Certificate;
 begin
@@ -24985,6 +25247,24 @@ begin
 
  if not Certificate.Parse(aBody,aBodySize) then begin
   Fail(RNL_DTLS12_CLIENT_FAILURE_BAD_CERTIFICATE,ALERT_DECODE_ERROR);
+  exit;
+ end;
+
+ // RFC 8446 section 4.4.2 keeps the CertificateEntry framing for a raw key and allows exactly one
+ // entry in it, which is the whole difference: a list of keys would be a list of peers.
+ if fServerCertificateType=TRNLDTLS13ClientHello.CERTIFICATE_TYPE_RAW_PUBLIC_KEY then begin
+  if Certificate.ChainLength<>1 then begin
+   Fail(RNL_DTLS12_CLIENT_FAILURE_BAD_CERTIFICATE,ALERT_DECODE_ERROR);
+   exit;
+  end;
+  fCertificateVerdict:=fVerification.VerifyRawPublicKey(Certificate.Chain[0].Data^[0],
+                                                        Certificate.Chain[0].Size,
+                                                        fLeafCertificate);
+  if fCertificateVerdict<>RNL_X509_VERDICT_ACCEPTED then begin
+   Fail(RNL_DTLS12_CLIENT_FAILURE_BAD_CERTIFICATE,ALERT_BAD_CERTIFICATE);
+   exit;
+  end;
+  result:=true;
   exit;
  end;
 
@@ -25124,10 +25404,13 @@ begin
    Fail(RNL_DTLS12_CLIENT_FAILURE_UNEXPECTED_MESSAGE,ALERT_UNEXPECTED_MESSAGE);
    exit;
   end;
-  // Nothing in it is read. Everything this client asked for is either answered in the ServerHello
-  // or refused by the handshake not completing, and an extension it did not ask for is one a
-  // server may not send.
+  // Only one thing in it is read, and only because it changes what the Certificate after it means.
+  // Everything else this client asked for is either answered in the ServerHello or refused by the
+  // handshake not completing.
   fTranscript.AddMessage(MessageType,Body^[0],BodySize);
+  if not HandleEncryptedExtensions(Body^[0],BodySize) then begin
+   exit;
+  end;
   fState:=RNL_DTLS13_CLIENT_STATE_AWAITING_CERTIFICATE;
 
  end else if MessageType=TYPE_CERTIFICATE then begin
@@ -25888,7 +26171,8 @@ begin
                                      fClientRandom,
                                      fCookie[0],fCookieSize,
                                      fPublicKey[0],fPublicKeySize,
-                                     fServerName) then begin
+                                     fServerName,
+                                     OffersRawPublicKey) then begin
   exit;
  end;
 
@@ -26321,6 +26605,14 @@ begin
 
 end;
 
+function TRNLDTLS12Client.OffersRawPublicKey:boolean;
+begin
+ // Only where pinning is what recognises the peer. A bare key carries no issuer, no validity and
+ // no name, so there is nothing chain mode could do with one even if a server offered it.
+ result:=fVerification.AllowRawPublicKey and
+         (fVerification.Mode=RNL_DTLS_VERIFICATION_FINGERPRINT);
+end;
+
 function TRNLDTLS12Client.HandleCertificate(const aBody;const aBodySize:TRNLSizeInt):boolean;
 var Reader,List:TRNLTLSReader;
     Data:PRNLUInt8Array;
@@ -26335,6 +26627,18 @@ begin
  Reader.Initialize(aBody,aBodySize);
  if (not Reader.ReadVector24(Data,Size)) or (not Reader.AtEnd) then begin
   Fail(RNL_DTLS12_CLIENT_FAILURE_BAD_CERTIFICATE,ALERT_DECODE_ERROR);
+  exit;
+ end;
+
+ // RFC 7250 section 3 replaces the whole certificate_list with one SubjectPublicKeyInfo, so what
+ // the uint24 encloses here is the key itself rather than a list of anything
+ if fServerCertificateType=TRNLDTLS12ClientHello.CERTIFICATE_TYPE_RAW_PUBLIC_KEY then begin
+  fCertificateVerdict:=fVerification.VerifyRawPublicKey(Data^[0],Size,fLeafCertificate);
+  if fCertificateVerdict<>RNL_X509_VERDICT_ACCEPTED then begin
+   Fail(RNL_DTLS12_CLIENT_FAILURE_BAD_CERTIFICATE,ALERT_BAD_CERTIFICATE);
+   exit;
+  end;
+  result:=true;
   exit;
  end;
 
@@ -26609,6 +26913,27 @@ begin
   end;
   Move(ServerHello.Random_[0],fServerRandom[0],TRNLDTLS12ClientHello.RandomSize);
   fExtendedMasterSecret:=ServerHello.ExtendedMasterSecret;
+  // Refused here rather than at the Certificate, because at that point it would look like a
+  // message which does not parse instead of like a server answering something it was not asked.
+  // The two ways of getting it wrong are told apart: an extension which was never offered is a
+  // different mistake from a value outside the list which was.
+  if ServerHello.HasServerCertificateType then begin
+   if not OffersRawPublicKey then begin
+    fCertificateVerdict:=RNL_X509_VERDICT_RAW_PUBLIC_KEY_NOT_OFFERED;
+    Fail(RNL_DTLS12_CLIENT_FAILURE_BAD_CERTIFICATE,ALERT_UNSUPPORTED_EXTENSION);
+    exit;
+   end;
+   if (ServerHello.ServerCertificateType<>TRNLDTLS12ClientHello.CERTIFICATE_TYPE_X509) and
+      (ServerHello.ServerCertificateType<>
+       TRNLDTLS12ClientHello.CERTIFICATE_TYPE_RAW_PUBLIC_KEY) then begin
+    fCertificateVerdict:=RNL_X509_VERDICT_RAW_PUBLIC_KEY_NOT_OFFERED;
+    Fail(RNL_DTLS12_CLIENT_FAILURE_BAD_CERTIFICATE,ALERT_ILLEGAL_PARAMETER);
+    exit;
+   end;
+   fServerCertificateType:=ServerHello.ServerCertificateType;
+  end else begin
+   fServerCertificateType:=TRNLDTLS12ClientHello.CERTIFICATE_TYPE_X509;
+  end;
   fSeenServerHello:=true;
   fState:=RNL_DTLS12_CLIENT_STATE_AWAITING_SERVER_FLIGHT;
 

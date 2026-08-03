@@ -417,6 +417,32 @@ type TRNLTestCertificates=record
          $97,$f0,$90,$c1,$63,$36,$4f,$8d,$91,$55,$c3,$00,
          $65,$da,$07,$2f
         );
+       // RFC 7250 sends one of these instead of a certificate. The first is the very key
+       // which sits inside Leaf above - cross checked against that file with OpenSSL, not
+       // assumed from the seed it was derived from - and the second is a key which is a key
+       // and is not that one.
+       LeafPublicKeyInfo:array[0..90] of TRNLUInt8=
+        (
+         $30,$59,$30,$13,$06,$07,$2a,$86,$48,$ce,$3d,$02,
+         $01,$06,$08,$2a,$86,$48,$ce,$3d,$03,$01,$07,$03,
+         $42,$00,$04,$fd,$54,$a1,$a1,$89,$f6,$a3,$0f,$1b,
+         $4a,$58,$5d,$42,$57,$df,$4d,$18,$c3,$6a,$71,$87,
+         $4e,$c1,$9b,$62,$55,$2d,$7e,$cd,$e9,$73,$e5,$22,
+         $5e,$7c,$04,$bb,$4d,$7f,$54,$21,$fd,$73,$cf,$fd,
+         $76,$9e,$c0,$19,$52,$0c,$d2,$f9,$60,$a3,$c4,$cb,
+         $98,$ec,$67,$22,$cb,$b2,$c0
+        );
+       StrangerPublicKeyInfo:array[0..90] of TRNLUInt8=
+        (
+         $30,$59,$30,$13,$06,$07,$2a,$86,$48,$ce,$3d,$02,
+         $01,$06,$08,$2a,$86,$48,$ce,$3d,$03,$01,$07,$03,
+         $42,$00,$04,$85,$7f,$5e,$57,$8d,$37,$1d,$b3,$42,
+         $18,$31,$b8,$6b,$82,$24,$54,$33,$e8,$17,$c3,$e2,
+         $d7,$d9,$90,$e0,$b8,$82,$2e,$d3,$ad,$b8,$b9,$d8,
+         $98,$b8,$1b,$44,$3a,$d6,$92,$24,$ee,$50,$29,$e5,
+         $16,$d3,$15,$8e,$0c,$c7,$be,$65,$83,$47,$12,$7d,
+         $40,$e5,$3a,$12,$28,$0b,$81
+        );
      end;
 
 implementation

@@ -179,6 +179,14 @@ are the typical case for egoshooters, racing games, and so forth. Or in other wo
          are accepted at once so that replacing a certificate is not a flag day. What pinning does
          not replace is the reader - the key that checks the handshake signature sits inside the
          certificate either way
+       - Raw public keys (RFC 7250), which is what pinning was reaching for anyway: a certificate
+         that exists only to carry a key, signed by nobody in particular, is a wrapper around the
+         one thing a pin was ever going to look at. Off by default and only offered where a
+         fingerprint is what recognises the peer, since without a certificate there is no chain, no
+         issuer, no validity and no name for anything else to judge - and because the extension
+         changes the ClientHello of every handshake, including those against relays which have
+         never heard of it. Only the server side of it is offered: the other half says what this
+         end could present, and this end presents nothing
    - Hash primitives
        - SHA-512 and BLAKE2B for the handshake, plus SHA-256, SHA-1 and MD5 for what STUN and TURN
          need of them. SHA-1 and MD5 are only ever used for the credentials of a relay which speaks
@@ -220,10 +228,6 @@ are the typical case for egoshooters, racing games, and so forth. Or in other wo
      A server would have to choose suites rather than offer one, hold a certificate and a private
      key, and answer a cookie exchange - and RNL has no use for it until something wants to be
      talked to over DTLS rather than to talk over it
-   - Raw public keys (RFC 7250) instead of certificates, which is the natural pairing with pinning:
-     a fingerprint of a bare key rather than of a certificate that exists only to carry one. It
-     needs the client_certificate_type and server_certificate_type extensions on both sides, and no
-     relay measured so far offers them, so today it would only ever be RNL talking to RNL
    - TODO
 
 # General guidelines for code contributors 

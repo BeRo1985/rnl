@@ -5705,6 +5705,305 @@ end;
 
 
 // ---------------------------------------------------------------------------------------
+// A bare key instead of a certificate
+// ---------------------------------------------------------------------------------------
+
+// RFC 7250 lets a peer send its SubjectPublicKeyInfo where a certificate would go. That is the
+// natural other half of pinning: a certificate which exists only to carry a key, signed by nobody
+// in particular, is a wrapper around the one thing a pin was ever going to look at anyway.
+//
+// It is off by default and only offered where pinning is what recognises the peer, so the first
+// thing worth showing is that both halves of that rule hold - a client which did not offer the
+// extension has to refuse a bare key even when the key is the right one, because a server may only
+// pick from the list it was given. That case is the whole reason the switch is a switch.
+//
+// The rest is the same discipline as everywhere else here: a key which is recognised, one which is
+// a key but somebody else's, one which is named but is not a key at all, a certificate type nobody
+// offered, and - in 1.3, where the framing allows a list - two keys where one is allowed, since two
+// keys are two peers and picking one of them would be the client deciding who it is talking to.
+procedure TestDTLSRawPublicKeyStandsInForACertificate;
+var Watchdog:TRNLTestWatchdog;
+    RandomGenerator:TRNLRandomGenerator;
+    Pinned,Stranger:TRNLDTLSVerification;
+
+ function Drive12(const aClient:TRNLDTLS12Client;const aServer:TRNLTestDTLSServer):boolean;
+ const START_TIME=1000;
+       STEP=1000;
+       GUARD=1024;
+ var Datagram:array[0..2047] of TRNLUInt8;
+     DatagramSize:TRNLSizeInt;
+     Now_:TRNLUInt64;
+     Rounds:TRNLSizeInt;
+     Moved:boolean;
+ begin
+  Now_:=START_TIME;
+  aClient.Start(Now_);
+  Rounds:=0;
+  repeat
+   Moved:=false;
+   while aClient.PopOutgoingDatagram(Datagram,DatagramSize,SizeOf(Datagram)) do begin
+    aServer.ProcessDatagram(Datagram,DatagramSize);
+    Moved:=true;
+   end;
+   while aServer.PopOutgoingDatagram(Datagram,DatagramSize,SizeOf(Datagram)) do begin
+    aClient.ProcessDatagram(Datagram,DatagramSize,Now_);
+    Moved:=true;
+   end;
+   if not Moved then begin
+    inc(Now_,STEP);
+    aClient.Update(Now_);
+   end;
+   inc(Rounds);
+  until (aClient.State=RNL_DTLS12_CLIENT_STATE_ESTABLISHED) or
+        (aClient.State=RNL_DTLS12_CLIENT_STATE_FAILED) or
+        (Rounds>=GUARD);
+  // What the client had left to say when it stopped, which is where the alert is. Without this
+  // the last datagram of the exchange - the only one which says why - never arrives.
+  while aClient.PopOutgoingDatagram(Datagram,DatagramSize,SizeOf(Datagram)) do begin
+   aServer.ProcessDatagram(Datagram,DatagramSize);
+  end;
+  result:=aClient.State=RNL_DTLS12_CLIENT_STATE_ESTABLISHED;
+ end;
+
+ function Drive13(const aClient:TRNLDTLS13Client;const aServer:TRNLTestDTLS13Server):boolean;
+ const START_TIME=1000;
+       STEP=1000;
+       GUARD=1024;
+ var Datagram:array[0..2047] of TRNLUInt8;
+     DatagramSize:TRNLSizeInt;
+     Now_:TRNLUInt64;
+     Rounds:TRNLSizeInt;
+     Moved:boolean;
+ begin
+  Now_:=START_TIME;
+  aClient.Start(Now_);
+  Rounds:=0;
+  repeat
+   Moved:=false;
+   while aClient.PopOutgoingDatagram(Datagram,DatagramSize,SizeOf(Datagram)) do begin
+    aServer.ProcessDatagram(Datagram,DatagramSize);
+    Moved:=true;
+   end;
+   while aServer.PopOutgoingDatagram(Datagram,DatagramSize,SizeOf(Datagram)) do begin
+    aClient.ProcessDatagram(Datagram,DatagramSize,Now_);
+    Moved:=true;
+   end;
+   if not Moved then begin
+    inc(Now_,STEP);
+    aClient.Update(Now_);
+   end;
+   inc(Rounds);
+  until (aClient.State=RNL_DTLS13_CLIENT_STATE_ESTABLISHED) or
+        (aClient.State=RNL_DTLS13_CLIENT_STATE_FAILED) or
+        (Rounds>=GUARD);
+  while aClient.PopOutgoingDatagram(Datagram,DatagramSize,SizeOf(Datagram)) do begin
+   aServer.ProcessDatagram(Datagram,DatagramSize);
+  end;
+  result:=aClient.State=RNL_DTLS13_CLIENT_STATE_ESTABLISHED;
+ end;
+
+ procedure Expect12(const aWhat:TRNLRawByteString;
+                    const aBehaviour:TRNLTestDTLSServerBehaviour;
+                    const aVerification:TRNLDTLSVerification;
+                    const aWanted:boolean;
+                    const aWantedVerdict:TRNLX509Verdict;
+                    const aWantedAlert:TRNLUInt8=0);
+ var Client:TRNLDTLS12Client;
+     Server:TRNLTestDTLSServer;
+ begin
+  Server:=TRNLTestDTLSServer.Create(aBehaviour,false);
+  try
+   Client:=TRNLDTLS12Client.Create(RandomGenerator,'whatever.example',aVerification);
+   try
+    if aWanted then begin
+     Check(Drive12(Client,Server),'DTLS 1.2, '+aWhat+' has to end in a finished handshake');
+    end else begin
+     Check(not Drive12(Client,Server),'DTLS 1.2, '+aWhat+' must not end in a finished handshake');
+     Check(Client.CertificateVerdict=aWantedVerdict,
+           'DTLS 1.2, '+aWhat+': and the verdict has to say which way it failed');
+     if aWantedAlert<>0 then begin
+      // Read off the server rather than off the client: what matters is the alert which actually
+      // went out, and it is the only thing that separates refusing at the ServerHello from
+      // refusing four messages later - two different mistakes on the server's part
+      CheckEqualsInt64(Server.LastAlertDescription,aWantedAlert,
+                       'DTLS 1.2, '+aWhat+': and the alert which went out has to name the right one');
+     end;
+    end;
+   finally
+    FreeAndNil(Client);
+   end;
+  finally
+   FreeAndNil(Server);
+  end;
+ end;
+
+ procedure Expect13(const aWhat:TRNLRawByteString;
+                    const aBehaviour:TRNLTestDTLS13ServerBehaviour;
+                    const aVerification:TRNLDTLSVerification;
+                    const aWanted:boolean;
+                    const aWantedVerdict:TRNLX509Verdict;
+                    const aWantedAlert:TRNLUInt8=0);
+ var Client:TRNLDTLS13Client;
+     Server:TRNLTestDTLS13Server;
+ begin
+  Server:=TRNLTestDTLS13Server.Create(aBehaviour);
+  try
+   Client:=TRNLDTLS13Client.Create(RandomGenerator,'whatever.example',aVerification);
+   try
+    if aWanted then begin
+     Check(Drive13(Client,Server),'DTLS 1.3, '+aWhat+' has to end in a finished handshake');
+    end else begin
+     Check(not Drive13(Client,Server),'DTLS 1.3, '+aWhat+' must not end in a finished handshake');
+     Check(Client.CertificateVerdict=aWantedVerdict,
+           'DTLS 1.3, '+aWhat+': and the verdict has to say which way it failed');
+     if aWantedAlert<>0 then begin
+      CheckEqualsInt64(Server.LastAlertDescription,aWantedAlert,
+                       'DTLS 1.3, '+aWhat+': and the alert which went out has to name the right one');
+     end;
+    end;
+   finally
+    FreeAndNil(Client);
+   end;
+  finally
+   FreeAndNil(Server);
+  end;
+ end;
+
+const // What both stubs send for the malformed case: a SEQUENCE header promising eighty nine bytes
+      // with four of them there. Pinned below, so that being recognised and being readable can be
+      // told apart - which is the one thing pinning never replaced.
+      NOT_A_KEY:array[0..3] of TRNLUInt8=($30,$59,$30,$13);
+var Fingerprint:TRNLDTLSVerification.TFingerprint;
+    Refusing,PinnedCertificate,PinnedGarbage,Chain:TRNLDTLSVerification;
+    Roots:TRNLX509.TChainEntries;
+    Leaf:TRNLX509Certificate;
+begin
+
+ TestBegin('a bare public key stands in for a certificate where it was offered');
+ Watchdog:=TRNLTestWatchdog.Create('DTLS raw public key',60000);
+ try
+  RandomGenerator:=TRNLRandomGenerator.Create;
+  try
+
+   // Pinned to the key itself rather than to a certificate carrying it, which is what an operator
+   // would read off their own server
+   TRNLDTLSVerification.ComputeFingerprint(Fingerprint,
+                                           TRNLTestCertificates.LeafPublicKeyInfo,
+                                           SizeOf(TRNLTestCertificates.LeafPublicKeyInfo));
+   Pinned.InitializeFingerprints;
+   Check(Pinned.AddFingerprint(Fingerprint),'the pin of the bare key has to go in');
+   Pinned.AllowRawPublicKey:=true;
+
+   // The same configuration in every respect but the switch. Everything it refuses, it refuses
+   // for that one reason.
+   Refusing:=Pinned;
+   Refusing.AllowRawPublicKey:=false;
+
+   // A pin on somebody else's key, so that a key which is not the pinned one is a different case
+   // from bytes which are not a key
+   TRNLDTLSVerification.ComputeFingerprint(Fingerprint,
+                                           TRNLTestCertificates.StrangerPublicKeyInfo,
+                                           SizeOf(TRNLTestCertificates.StrangerPublicKeyInfo));
+   Stranger.InitializeFingerprints;
+   Check(Stranger.AddFingerprint(Fingerprint),'the pin of the stranger''s key has to go in');
+   Stranger.AllowRawPublicKey:=true;
+
+   // A pin on the four bytes the malformed case actually sends, so that it gets past the
+   // fingerprint and fails at the reader
+   TRNLDTLSVerification.ComputeFingerprint(Fingerprint,NOT_A_KEY,SizeOf(NOT_A_KEY));
+   PinnedGarbage.InitializeFingerprints;
+   Check(PinnedGarbage.AddFingerprint(Fingerprint),'the pin of the four bytes has to go in');
+   PinnedGarbage.AllowRawPublicKey:=true;
+
+   // And a pin on the certificate the honest stubs present, for the case where the extension is
+   // offered and the relay simply has a certificate
+   TRNLDTLSVerification.ComputeFingerprint(Fingerprint,TRNLTestCertificates.Leaf,
+                                           SizeOf(TRNLTestCertificates.Leaf));
+   PinnedCertificate.InitializeFingerprints;
+   Check(PinnedCertificate.AddFingerprint(Fingerprint),'the pin of the certificate has to go in');
+   PinnedCertificate.AllowRawPublicKey:=true;
+
+   Expect12('a relay which sends the pinned bare key',
+            RNL_TEST_DTLS_SERVER_RAW_PUBLIC_KEY,Pinned,true,RNL_X509_VERDICT_ACCEPTED);
+   Expect13('a relay which sends the pinned bare key',
+            RNL_TEST_DTLS13_SERVER_RAW_PUBLIC_KEY,Pinned,true,RNL_X509_VERDICT_ACCEPTED);
+
+   // The switch, and what it is for: the very same server and the very same key, refused because
+   // nothing asked for it
+   // Refused at the hello, not at the certificate, which is what the alert says: an extension
+   // that was never offered is a mistake the server made before it sent anything
+   Expect12('a bare key nobody offered to take',
+            RNL_TEST_DTLS_SERVER_RAW_PUBLIC_KEY_UNASKED,Refusing,false,
+            RNL_X509_VERDICT_RAW_PUBLIC_KEY_NOT_OFFERED,
+            TRNLDTLS12Client.ALERT_UNSUPPORTED_EXTENSION);
+   Expect13('a bare key nobody offered to take',
+            RNL_TEST_DTLS13_SERVER_RAW_PUBLIC_KEY_UNASKED,Refusing,false,
+            RNL_X509_VERDICT_RAW_PUBLIC_KEY_NOT_OFFERED,
+            TRNLDTLS13Client.ALERT_UNSUPPORTED_EXTENSION);
+
+   // Offering the extension must not cost anything where it is not taken up: the same relay with
+   // the same certificate, talking to a client which would have accepted a bare key
+   Expect12('a relay which has a certificate and was offered the choice',
+            RNL_TEST_DTLS_SERVER_CORRECT,PinnedCertificate,true,RNL_X509_VERDICT_ACCEPTED);
+   Expect13('a relay which has a certificate and was offered the choice',
+            RNL_TEST_DTLS13_SERVER_CORRECT,PinnedCertificate,true,RNL_X509_VERDICT_ACCEPTED);
+
+   // Offered, and answered with a third thing. A different mistake and a different alert.
+   Expect12('a certificate type which was never in the list',
+            RNL_TEST_DTLS_SERVER_UNKNOWN_CERTIFICATE_TYPE,Pinned,false,
+            RNL_X509_VERDICT_RAW_PUBLIC_KEY_NOT_OFFERED,
+            TRNLDTLS12Client.ALERT_ILLEGAL_PARAMETER);
+   Expect13('a certificate type which was never in the list',
+            RNL_TEST_DTLS13_SERVER_UNKNOWN_CERTIFICATE_TYPE,Pinned,false,
+            RNL_X509_VERDICT_RAW_PUBLIC_KEY_NOT_OFFERED,
+            TRNLDTLS13Client.ALERT_ILLEGAL_PARAMETER);
+
+   Expect12('a bare key which is not the pinned one',
+            RNL_TEST_DTLS_SERVER_RAW_PUBLIC_KEY_STRANGER,Pinned,false,
+            RNL_X509_VERDICT_FINGERPRINT_MISMATCH);
+   Expect13('a bare key which is not the pinned one',
+            RNL_TEST_DTLS13_SERVER_RAW_PUBLIC_KEY_STRANGER,Pinned,false,
+            RNL_X509_VERDICT_FINGERPRINT_MISMATCH);
+
+   // Recognised and still refused: the pin says which bytes were expected, not that they are a
+   // key, and the signature has to be checked with something
+   Expect12('bytes which were pinned and are not a key',
+            RNL_TEST_DTLS_SERVER_RAW_PUBLIC_KEY_MALFORMED,PinnedGarbage,false,
+            RNL_X509_VERDICT_MALFORMED);
+   Expect13('bytes which were pinned and are not a key',
+            RNL_TEST_DTLS13_SERVER_RAW_PUBLIC_KEY_MALFORMED,PinnedGarbage,false,
+            RNL_X509_VERDICT_MALFORMED);
+
+   Expect13('two bare keys where one is allowed',
+            RNL_TEST_DTLS13_SERVER_RAW_PUBLIC_KEY_TWO_ENTRIES,Pinned,false,
+            RNL_X509_VERDICT_MALFORMED);
+
+   // The verifier is public, and a caller may reach it without a handshake in front of it. Both
+   // clients refuse an unoffered bare key at the hello and never get this far, so the guard inside
+   // it is only ever reached from outside - which is exactly where it has to hold.
+   Check(Refusing.VerifyRawPublicKey(TRNLTestCertificates.LeafPublicKeyInfo,
+                                     SizeOf(TRNLTestCertificates.LeafPublicKeyInfo),
+                                     Leaf)=RNL_X509_VERDICT_RAW_PUBLIC_KEY_NOT_OFFERED,
+         'the verifier refuses a bare key which the configuration never asked for, pin or no pin');
+
+   Chain.InitializeChain(RNL_TEST_CERTIFICATE_HOST_NAME,Roots,0,RNL_TEST_CERTIFICATE_NOW);
+   Chain.AllowRawPublicKey:=true;
+   Check(Chain.VerifyRawPublicKey(TRNLTestCertificates.LeafPublicKeyInfo,
+                                  SizeOf(TRNLTestCertificates.LeafPublicKeyInfo),
+                                  Leaf)=RNL_X509_VERDICT_RAW_PUBLIC_KEY_NOT_OFFERED,
+         'and in chain mode as well, where there is nothing to judge a bare key by');
+
+  finally
+   FreeAndNil(RandomGenerator);
+  end;
+ finally
+  FreeAndNil(Watchdog);
+ end;
+ TestEnd;
+
+end;
+
+// ---------------------------------------------------------------------------------------
 // Channel numbers come back
 // ---------------------------------------------------------------------------------------
 
@@ -11419,6 +11718,7 @@ begin
  TestDTLS13HandshakeCompletesAgainstEveryHonestServer;
  TestDTLS13HandshakeRefusesEveryBrokenServer;
  TestDTLSPinnedRelayNeedsNoChainOrClock;
+ TestDTLSRawPublicKeyStandsInForACertificate;
 
  // Pure configuration invariants first, they are instant and their failure explains a lot of
  // what the behavioural tests below would otherwise report in a much noisier way

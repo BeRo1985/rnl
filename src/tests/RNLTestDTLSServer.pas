@@ -111,7 +111,19 @@ type // ECDSA over P-256 the other way round from RNL, which only ever verifies.
        // Its Finished arrives in the clear, with no ChangeCipherSpec in front of it
        RNL_TEST_DTLS_SERVER_FINISHED_WITHOUT_CHANGE_CIPHER_SPEC,
        // A fatal alert where the flight should have been
-       RNL_TEST_DTLS_SERVER_FATAL_ALERT
+       RNL_TEST_DTLS_SERVER_FATAL_ALERT,
+       // RFC 7250: picks the bare key the client offered, and sends one instead of a chain
+       RNL_TEST_DTLS_SERVER_RAW_PUBLIC_KEY,
+       // Picks it whether or not it was offered, which is a server answering a question nobody
+       // asked - and the one case a client with the extension switched off has to survive
+       RNL_TEST_DTLS_SERVER_RAW_PUBLIC_KEY_UNASKED,
+       // Names certificate type one, which is the OpenPGP of RFC 6091 and was never in the list
+       RNL_TEST_DTLS_SERVER_UNKNOWN_CERTIFICATE_TYPE,
+       // Says bare key and then sends bytes which are not a SubjectPublicKeyInfo, which is where
+       // being recognised and being readable come apart
+       RNL_TEST_DTLS_SERVER_RAW_PUBLIC_KEY_MALFORMED,
+       // Says bare key and sends one which is a perfectly good key belonging to somebody else
+       RNL_TEST_DTLS_SERVER_RAW_PUBLIC_KEY_STRANGER
       );
 
      TRNLTestDTLSServer=class
@@ -157,6 +169,9 @@ type // ECDSA over P-256 the other way round from RNL, which only ever verifies.
        fClientKeys:TRNLDTLS12TrafficKeys;
        fServerKeys:TRNLDTLS12TrafficKeys;
        fUseExtendedMasterSecret:boolean;
+       // Whether the ClientHello named the bare key of RFC 7250 among the certificate types it
+       // would accept. An honest server only picks out of that list.
+       fClientOfferedRawPublicKey:boolean;
 
        fSendEpoch:TRNLUInt16;
        fSendSequenceNumbers:array[0..1] of TRNLUInt64;
@@ -213,6 +228,7 @@ type // ECDSA over P-256 the other way round from RNL, which only ever verifies.
        function AppendChangeCipherSpec:boolean;
 
        procedure BuildHelloVerifyRequest;
+       function SendsRawPublicKey:boolean;
        function BuildServerFlight:boolean;
        function BuildServerFinishedFlight:boolean;
 
@@ -278,7 +294,21 @@ type // ECDSA over P-256 the other way round from RNL, which only ever verifies.
        // The messages of its flight in the wrong order, Certificate before EncryptedExtensions
        RNL_TEST_DTLS13_SERVER_MESSAGES_OUT_OF_ORDER,
        // A fatal alert where the flight should have been
-       RNL_TEST_DTLS13_SERVER_FATAL_ALERT
+       RNL_TEST_DTLS13_SERVER_FATAL_ALERT,
+       // RFC 7250: names the bare key in its EncryptedExtensions and sends one in place of the
+       // chain
+       RNL_TEST_DTLS13_SERVER_RAW_PUBLIC_KEY,
+       // Names it whether or not the ClientHello offered it
+       RNL_TEST_DTLS13_SERVER_RAW_PUBLIC_KEY_UNASKED,
+       // Names certificate type one, which was never in the list
+       RNL_TEST_DTLS13_SERVER_UNKNOWN_CERTIFICATE_TYPE,
+       // Names the bare key and sends bytes which are not a SubjectPublicKeyInfo
+       RNL_TEST_DTLS13_SERVER_RAW_PUBLIC_KEY_MALFORMED,
+       // Names the bare key and sends somebody else's
+       RNL_TEST_DTLS13_SERVER_RAW_PUBLIC_KEY_STRANGER,
+       // Names the bare key and sends two entries, where RFC 8446 section 4.4.2 allows one. Two
+       // keys are two peers, and picking one of them would be the client choosing who it talks to.
+       RNL_TEST_DTLS13_SERVER_RAW_PUBLIC_KEY_TWO_ENTRIES
       );
 
      // The DTLS 1.3 counterpart of TRNLTestDTLSServer above, and the same idea: no socket, no
@@ -355,6 +385,8 @@ type // ECDSA over P-256 the other way round from RNL, which only ever verifies.
        fCountAlertsReceived:TRNLSizeInt;
        fLastAlertDescription:TRNLUInt8;
        fClientFinishedVerified:boolean;
+       // Whether the ClientHello named the bare key of RFC 7250
+       fClientOfferedRawPublicKey:boolean;
        fCountApplicationDataRecords:TRNLSizeInt;
        fLastApplicationData:TRNLTestDTLS13ServerDatagram;
        // Every application datagram, not only the last: a terminator in front of a relay
@@ -375,6 +407,7 @@ type // ECDSA over P-256 the other way round from RNL, which only ever verifies.
                               const aEpoch:TRNLUInt64;
                               const aInTranscript:boolean):boolean;
        function BuildServerHello(const aClientShare;const aClientShareSize:TRNLSizeInt):boolean;
+       function SendsRawPublicKey:boolean;
        function BuildRestOfFlight:boolean;
        procedure HandleClientHello(const aBody;const aBodySize:TRNLSizeInt);
        procedure HandleClientFinished(const aBody;const aBodySize:TRNLSizeInt);
@@ -639,6 +672,7 @@ begin
  fClientKeys.Clear;
  fServerKeys.Clear;
  fUseExtendedMasterSecret:=false;
+ fClientOfferedRawPublicKey:=false;
 
  fSendEpoch:=0;
  fSendSequenceNumbers[0]:=0;
@@ -881,6 +915,17 @@ begin
  EmitFlight;
 end;
 
+function TRNLTestDTLSServer.SendsRawPublicKey:boolean;
+begin
+ // The unasked one on purpose ignores what the client offered. Everything else only picks what
+ // was in the list, which is what a server is allowed to do.
+ result:=(fBehaviour=RNL_TEST_DTLS_SERVER_RAW_PUBLIC_KEY_UNASKED) or
+         (fClientOfferedRawPublicKey and
+          (fBehaviour in [RNL_TEST_DTLS_SERVER_RAW_PUBLIC_KEY,
+                          RNL_TEST_DTLS_SERVER_RAW_PUBLIC_KEY_MALFORMED,
+                          RNL_TEST_DTLS_SERVER_RAW_PUBLIC_KEY_STRANGER]));
+end;
+
 function TRNLTestDTLSServer.BuildServerFlight:boolean;
 var Body:array[0..1023] of TRNLUInt8;
     Chain:array[0..2047] of TRNLUInt8;
@@ -890,7 +935,7 @@ var Body:array[0..1023] of TRNLUInt8;
     K:array[0..TRNLTestECDSA.ElementSize-1] of TRNLUInt8;
     Digest:TRNLSHA256Hash;
     Context:TRNLSHA256Context;
-    Size,ParametersSize,SignatureSize,LeafSize,ChainSize:TRNLSizeInt;
+    Size,ParametersSize,SignatureSize,LeafSize,ChainSize,ExtensionsStart:TRNLSizeInt;
     Leaf:PRNLUInt8Array;
     NamedCurve:TRNLUInt16;
 begin
@@ -918,19 +963,30 @@ begin
  inc(Size,2);
  Body[Size]:=0;
  inc(Size);
+ // Two bytes of length written last, once there is something to count
+ ExtensionsStart:=Size;
+ inc(Size,2);
  if fUseExtendedMasterSecret then begin
   Body[Size]:=0;
-  Body[Size+1]:=4;
+  Body[Size+1]:=TRNLUInt8(TRNLDTLS12ClientHello.EXTENSION_EXTENDED_MASTER_SECRET);
   Body[Size+2]:=0;
-  Body[Size+3]:=TRNLUInt8(TRNLDTLS12ClientHello.EXTENSION_EXTENDED_MASTER_SECRET);
-  Body[Size+4]:=0;
-  Body[Size+5]:=0;
-  inc(Size,6);
- end else begin
-  Body[Size]:=0;
-  Body[Size+1]:=0;
-  inc(Size,2);
+  Body[Size+3]:=0;
+  inc(Size,4);
  end;
+ if SendsRawPublicKey or (fBehaviour=RNL_TEST_DTLS_SERVER_UNKNOWN_CERTIFICATE_TYPE) then begin
+  Body[Size]:=0;
+  Body[Size+1]:=TRNLUInt8(TRNLDTLS12ClientHello.EXTENSION_SERVER_CERTIFICATE_TYPE);
+  Body[Size+2]:=0;
+  Body[Size+3]:=1;
+  if fBehaviour=RNL_TEST_DTLS_SERVER_UNKNOWN_CERTIFICATE_TYPE then begin
+   Body[Size+4]:=1;
+  end else begin
+   Body[Size+4]:=TRNLDTLS12ClientHello.CERTIFICATE_TYPE_RAW_PUBLIC_KEY;
+  end;
+  inc(Size,5);
+ end;
+ Body[ExtensionsStart]:=TRNLUInt8(((Size-(ExtensionsStart+2)) shr 8) and $ff);
+ Body[ExtensionsStart+1]:=TRNLUInt8((Size-(ExtensionsStart+2)) and $ff);
  if not AppendMessage(TRNLDTLS12Handshake.TYPE_SERVER_HELLO,Body[0],Size,0,true) then begin
   exit;
  end;
@@ -947,6 +1003,32 @@ begin
   Leaf:=PRNLUInt8Array(TRNLPointer(@TRNLTestCertificates.Leaf[0]));
   LeafSize:=SizeOf(TRNLTestCertificates.Leaf);
  end;
+ // RFC 7250 section 3: where a bare key was agreed, the uint24 encloses the key itself and there
+ // is no list of anything inside it
+ if SendsRawPublicKey then begin
+  if fBehaviour=RNL_TEST_DTLS_SERVER_RAW_PUBLIC_KEY_MALFORMED then begin
+   // A SEQUENCE header promising more than follows, which reads as a key right up to the point
+   // where it has to be one
+   LeafSize:=4;
+   Chain[3]:=$30;
+   Chain[4]:=$59;
+   Chain[5]:=$30;
+   Chain[6]:=$13;
+  end else if fBehaviour=RNL_TEST_DTLS_SERVER_RAW_PUBLIC_KEY_STRANGER then begin
+   LeafSize:=SizeOf(TRNLTestCertificates.StrangerPublicKeyInfo);
+   Move(TRNLTestCertificates.StrangerPublicKeyInfo[0],Chain[3],LeafSize);
+  end else begin
+   LeafSize:=SizeOf(TRNLTestCertificates.LeafPublicKeyInfo);
+   Move(TRNLTestCertificates.LeafPublicKeyInfo[0],Chain[3],LeafSize);
+  end;
+  Chain[0]:=0;
+  Chain[1]:=TRNLUInt8((LeafSize shr 8) and $ff);
+  Chain[2]:=TRNLUInt8(LeafSize and $ff);
+  if not AppendMessage(TRNLDTLS12Handshake.TYPE_CERTIFICATE,Chain[0],3+LeafSize,0,true) then begin
+   exit;
+  end;
+ end else begin
+
  ChainSize:=3;
  Chain[ChainSize]:=0;
  Chain[ChainSize+1]:=TRNLUInt8((LeafSize shr 8) and $ff);
@@ -965,6 +1047,8 @@ begin
  Chain[2]:=TRNLUInt8(Size and $ff);
  if not AppendMessage(TRNLDTLS12Handshake.TYPE_CERTIFICATE,Chain[0],ChainSize,0,true) then begin
   exit;
+ end;
+
  end;
 
  // ServerKeyExchange
@@ -1086,6 +1170,7 @@ var Reader,Extensions:TRNLTLSReader;
     Major,Minor:TRNLUInt8;
     ExtensionType:TRNLUInt16;
     HasCookie:boolean;
+    Index:TRNLSizeInt;
 begin
 
  inc(fCountClientHellos);
@@ -1123,6 +1208,13 @@ begin
    if (ExtensionType=TRNLDTLS12ClientHello.EXTENSION_EXTENDED_MASTER_SECRET) and
       fEchoExtendedMasterSecret then begin
     fUseExtendedMasterSecret:=true;
+   end else if ExtensionType=TRNLDTLS12ClientHello.EXTENSION_SERVER_CERTIFICATE_TYPE then begin
+    // Whether the bare key is anywhere in the list. An honest server only ever picks from it.
+    for Index:=1 to Size-1 do begin
+     if Data^[Index]=TRNLDTLS12ClientHello.CERTIFICATE_TYPE_RAW_PUBLIC_KEY then begin
+      fClientOfferedRawPublicKey:=true;
+     end;
+    end;
    end;
   end;
  end;
@@ -1747,6 +1839,16 @@ begin
 
 end;
 
+function TRNLTestDTLS13Server.SendsRawPublicKey:boolean;
+begin
+ result:=(fBehaviour=RNL_TEST_DTLS13_SERVER_RAW_PUBLIC_KEY_UNASKED) or
+         (fClientOfferedRawPublicKey and
+          (fBehaviour in [RNL_TEST_DTLS13_SERVER_RAW_PUBLIC_KEY,
+                          RNL_TEST_DTLS13_SERVER_RAW_PUBLIC_KEY_MALFORMED,
+                          RNL_TEST_DTLS13_SERVER_RAW_PUBLIC_KEY_STRANGER,
+                          RNL_TEST_DTLS13_SERVER_RAW_PUBLIC_KEY_TWO_ENTRIES]));
+end;
+
 function TRNLTestDTLS13Server.BuildRestOfFlight:boolean;
 var Body:array[0..2047] of TRNLUInt8;
     Writer:TRNLTLSWriter;
@@ -1766,9 +1868,18 @@ begin
 
  result:=false;
 
- // EncryptedExtensions, empty
+ // EncryptedExtensions, which is where RFC 7250 puts the answer in 1.3 - empty otherwise
  Writer.Initialize(Body,SizeOf(Body));
  Inner:=Writer.BeginVector16;
+ if SendsRawPublicKey or (fBehaviour=RNL_TEST_DTLS13_SERVER_UNKNOWN_CERTIFICATE_TYPE) then begin
+  Writer.WriteUInt16(TRNLDTLS13ClientHello.EXTENSION_SERVER_CERTIFICATE_TYPE);
+  Writer.WriteUInt16(1);
+  if fBehaviour=RNL_TEST_DTLS13_SERVER_UNKNOWN_CERTIFICATE_TYPE then begin
+   Writer.WriteUInt8(1);
+  end else begin
+   Writer.WriteUInt8(TRNLDTLS13ClientHello.CERTIFICATE_TYPE_RAW_PUBLIC_KEY);
+  end;
+ end;
  Writer.EndVector16(Inner);
  if not (Writer.Valid and AppendMessage(8,Body[0],Writer.Size,EpochHandshake,true)) then begin
   exit;
@@ -1787,6 +1898,33 @@ begin
  // The request context, empty, and then straight into the list. There is no extension list at
  // this level - those hang off each entry, not off the message.
  Writer.WriteUInt8(0);
+ if SendsRawPublicKey then begin
+  // RFC 8446 section 4.4.2 keeps this framing for a bare key and allows one entry in it
+  if fBehaviour=RNL_TEST_DTLS13_SERVER_RAW_PUBLIC_KEY_MALFORMED then begin
+   Leaf:=PRNLUInt8Array(TRNLPointer(@TRNLTestCertificates.LeafPublicKeyInfo[0]));
+   LeafSize:=4;
+  end else if fBehaviour=RNL_TEST_DTLS13_SERVER_RAW_PUBLIC_KEY_STRANGER then begin
+   Leaf:=PRNLUInt8Array(TRNLPointer(@TRNLTestCertificates.StrangerPublicKeyInfo[0]));
+   LeafSize:=SizeOf(TRNLTestCertificates.StrangerPublicKeyInfo);
+  end else begin
+   Leaf:=PRNLUInt8Array(TRNLPointer(@TRNLTestCertificates.LeafPublicKeyInfo[0]));
+   LeafSize:=SizeOf(TRNLTestCertificates.LeafPublicKeyInfo);
+  end;
+  if fBehaviour=RNL_TEST_DTLS13_SERVER_RAW_PUBLIC_KEY_TWO_ENTRIES then begin
+   Size:=((3+LeafSize+2)*2);
+  end else begin
+   Size:=3+LeafSize+2;
+  end;
+  Writer.WriteUInt24(Size);
+  Writer.WriteUInt24(LeafSize);
+  Writer.WriteBytes(Leaf^[0],LeafSize);
+  Writer.WriteUInt16(0);
+  if fBehaviour=RNL_TEST_DTLS13_SERVER_RAW_PUBLIC_KEY_TWO_ENTRIES then begin
+   Writer.WriteUInt24(LeafSize);
+   Writer.WriteBytes(Leaf^[0],LeafSize);
+   Writer.WriteUInt16(0);
+  end;
+ end else begin
  // The certificate list is a uint24 vector, which the writer has no helper for, so it is measured
  // and written by hand
  Size:=(3+LeafSize+2)+(3+SizeOf(TRNLTestCertificates.Intermediate)+2);
@@ -1797,6 +1935,7 @@ begin
  Writer.WriteUInt24(SizeOf(TRNLTestCertificates.Intermediate));
  Writer.WriteBytes(TRNLTestCertificates.Intermediate,SizeOf(TRNLTestCertificates.Intermediate));
  Writer.WriteUInt16(0);
+ end;
  if not (Writer.Valid and AppendMessage(11,Body[0],Writer.Size,EpochHandshake,true)) then begin
   exit;
  end;
@@ -1862,6 +2001,7 @@ var Reader,Extensions,Shares,Share:TRNLTLSReader;
     Data:PRNLUInt8Array;
     Size:TRNLSizeInt;
     ExtensionType,Group:TRNLUInt16;
+    Index:TRNLSizeInt;
     Version:TRNLUInt16;
     ChosenShare:array[0..TRNLP256.PointSize-1] of TRNLUInt8;
     ChosenShareSize:TRNLSizeInt;
@@ -1919,6 +2059,13 @@ begin
     if (Group=WantedGroup) and (Size<=TRNLP256.PointSize) then begin
      Move(Data^[0],ChosenShare[0],Size);
      ChosenShareSize:=Size;
+    end;
+   end;
+  end else if ExtensionType=TRNLDTLS13ClientHello.EXTENSION_SERVER_CERTIFICATE_TYPE then begin
+   // Whether the bare key is in the list at all. An honest server picks only out of it.
+   for Index:=1 to Size-1 do begin
+    if Data^[Index]=TRNLDTLS13ClientHello.CERTIFICATE_TYPE_RAW_PUBLIC_KEY then begin
+     fClientOfferedRawPublicKey:=true;
     end;
    end;
   end;
