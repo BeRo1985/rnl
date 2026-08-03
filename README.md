@@ -155,8 +155,30 @@ are the typical case for egoshooters, racing games, and so forth. Or in other wo
          back into circulation after the delay RFC 8656 requires
        - IPv6 allocations through REQUESTED-ADDRESS-FAMILY, asked for only where it is needed, since
          the attribute is comprehension required and a relay which does not know it would refuse
-       - UDP or TCP as the transport to the relay. TCP is there for the network which lets no UDP out
-         at all, which is exactly the case a relay exists for
+       - UDP, TCP or DTLS as the transport to the relay. TCP is there for the network which lets no
+         UDP out at all, which is exactly the case a relay exists for; DTLS for the one which lets
+         datagrams out but wants to read them on the way, and for the relay one does not run oneself
+   - DTLS client (RFC 6347 for 1.2, RFC 9147 for 1.3), written for the relay transport above and
+     owning no socket and no clock of its own, so that a handshake can be driven a datagram at a
+     time in a test with the clock held still
+       - One cipher suite each, and the same one twice: ECDHE-ECDSA with ChaCha20-Poly1305 for 1.2,
+         TLS_CHACHA20_POLY1305_SHA256 for 1.3. RNL already has that cipher for its own packets, so
+         the record layer is new code and the cryptography under it is not
+       - 1.2 is tried first and 1.3 second where the version is left open, because 1.2 is what is
+         actually deployed on relays today. Fragmented handshake messages are reassembled in any
+         order and with overlap, flights are retransmitted with a doubling wait, and 1.3 sends and
+         reads the ACK of RFC 9147 section 7 so that a lost record does not cost a whole flight
+       - x25519 and secp256r1 shares both go out, since deployments disagree about which they want,
+         and the key exchange signature is checked against what the certificate actually carries
+       - Certificate verification the way RFC 5280 section 6 lays it out: signatures, issuer names,
+         basic constraints, key usage, path length, validity and the host name, over a DER reader
+         which parses no more of X.509 than that comes to. P-256 and P-384 with SHA-256 and SHA-384
+       - Or, instead of all of it, the SHA-256 of the certificate's own bytes against a configured
+         value. That is the case a relay one runs oneself is: no authority to appeal to, often no
+         trustworthy clock, and a host name which is whatever DNS says today. Several fingerprints
+         are accepted at once so that replacing a certificate is not a flag day. What pinning does
+         not replace is the reader - the key that checks the handshake signature sits inside the
+         certificate either way
    - Hash primitives
        - SHA-512 and BLAKE2B for the handshake, plus SHA-256, SHA-1 and MD5 for what STUN and TURN
          need of them. SHA-1 and MD5 are only ever used for the credentials of a relay which speaks
@@ -188,10 +210,20 @@ are the typical case for egoshooters, racing games, and so forth. Or in other wo
 
 # Planned features (a.k.a Todo) in random order of priorities
 
-   - TLS as a transport to the TURN relay. Plain TCP is there, which already covers a network that
-     blocks UDP; TLS additionally covers one which only lets TLS out. It needs a TLS stack, which RNL
-     does not have and which is a good deal larger than everything around it, so the sensible shape is
-     an external library behind a callback interface rather than own code
+   - TLS over TCP as a fourth transport to the TURN relay. DTLS covers the network which reads what
+     leaves it but still passes datagrams; TLS over a stream would cover the one which passes
+     nothing but a stream on port 443. Most of what it needs now exists - the same key schedule,
+     the same certificate handling, the same signatures - and what is missing is a record layer
+     over a stream, which is the easier half of the two: no cookie exchange, no epochs, no
+     fragment reassembly, no retransmission, because the stream underneath already does all of it
+   - The server side of DTLS. What is there is the client, which is what a TURN transport needs.
+     A server would have to choose suites rather than offer one, hold a certificate and a private
+     key, and answer a cookie exchange - and RNL has no use for it until something wants to be
+     talked to over DTLS rather than to talk over it
+   - Raw public keys (RFC 7250) instead of certificates, which is the natural pairing with pinning:
+     a fingerprint of a bare key rather than of a certificate that exists only to carry one. It
+     needs the client_certificate_type and server_certificate_type extensions on both sides, and no
+     relay measured so far offers them, so today it would only ever be RNL talking to RNL
    - TODO
 
 # General guidelines for code contributors 
