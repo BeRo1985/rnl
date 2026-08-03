@@ -10876,6 +10876,20 @@ function CongestionControlRun(const aInstance:TRNLInstance;
                               out aSettledRateBitsPerSecond:TRNLUInt32;
                               out aQueueingDelayMilliseconds:TRNLUInt32;
                               out aDroppedByBottleneck:TRNLUInt64;
+                              // What the link actually carried, which is a second reading of the
+                              // same thing and does not depend on what the application saw
+                              out aDeliveredByBottleneck:TRNLUInt64;
+                              // The set point over the whole run rather than at the end of it. The
+                              // end alone cannot tell a controller which sat on its floor from one
+                              // which passed through on its way somewhere.
+                              out aLowestRateBitsPerSecond:TRNLUInt32;
+                              out aMeanRateBitsPerSecond:TRNLUInt32;
+                              // The two halves of the loss ratio the controller regulates on
+                              out aFlightResolvedPackets:TRNLUInt32;
+                              out aFlightLostPackets:TRNLUInt32;
+                              // What the queueing delay is measured against, which is what a
+                              // threshold relative to the path would have to be built on
+                              out aBaselineRoundTripTime:TRNLUInt32;
                               out aPeersGivenUpOn:TRNLUInt64;
                               out aArrivedMessages:TRNLSizeInt;
                               out aElapsedMilliseconds:TRNLInt64;
@@ -10889,19 +10903,29 @@ var Network:TRNLVirtualNetwork;
     Bottleneck:TRNLTestNetworkBottleneck;
     HostPair:TRNLTestHostPair;
     ServerAddress:TRNLAddress;
-    LinkIndex,Index:TRNLSizeInt;
+    LinkIndex,Index,CountSamples:TRNLSizeInt;
     StartTime:TRNLTime;
+    Sampled:TRNLUInt32;
+    SumOfRates:TRNLUInt64;
 begin
 
  result:=false;
  aSettledRateBitsPerSecond:=0;
  aQueueingDelayMilliseconds:=0;
  aDroppedByBottleneck:=0;
+ aDeliveredByBottleneck:=0;
+ aLowestRateBitsPerSecond:=0;
+ aMeanRateBitsPerSecond:=0;
+ aFlightResolvedPackets:=0;
+ aFlightLostPackets:=0;
+ aBaselineRoundTripTime:=0;
  aPeersGivenUpOn:=0;
  aArrivedMessages:=0;
  aElapsedMilliseconds:=0;
  aMessageSize:=MESSAGE_SIZE;
  aBandwidthLimitsEvents:=0;
+ CountSamples:=0;
+ SumOfRates:=0;
 
  Network:=TRNLVirtualNetwork.Create(aInstance);
  try
@@ -10931,13 +10955,26 @@ begin
     StartTime:=aInstance.Time;
 
     // Kept fed rather than handed over in one go: a controller is only observable while there is
-    // something to send, and a single burst would be drained long before it has settled
+    // something to send, and a single burst would be drained long before it has settled.
+    //
+    // Reliable but UNORDERED, and that is the whole difference between a measurement and a
+    // coin toss. On an ordered channel one missing sequence number withholds every message behind
+    // it, so what the application has received is not what got through - it is whatever was
+    // released by the last retransmission to arrive. Landing that release before or after the
+    // fixed six second mark decided this test, which is why a controller sitting on its floor
+    // showed up green seven times out of eight. Ordering is not what a congestion test is about.
     for Index:=1 to COUNT_MESSAGES do begin
-     HostPair.ClientPeer.Channels[RNL_TEST_HOST_PAIR_CHANNEL_RELIABLE_ORDERED].SendMessageRawByteString(TestMessageText(Index,MESSAGE_SIZE));
+     HostPair.ClientPeer.Channels[RNL_TEST_HOST_PAIR_CHANNEL_RELIABLE_UNORDERED].SendMessageRawByteString(TestMessageText(Index,MESSAGE_SIZE));
      if (Index mod REFILL_EVERY)=0 then begin
       if not HostPair.Pump(PUMP_MILLISECONDS div (COUNT_MESSAGES div REFILL_EVERY)) then begin
        exit;
       end;
+      Sampled:=HostPair.ClientPeer.CongestionControlRate;
+      if (CountSamples=0) or (Sampled<aLowestRateBitsPerSecond) then begin
+       aLowestRateBitsPerSecond:=Sampled;
+      end;
+      inc(SumOfRates,Sampled);
+      inc(CountSamples);
      end;
     end;
 
@@ -10946,7 +10983,14 @@ begin
     aDroppedByBottleneck:=Bottleneck.LinkDroppedDatagrams(LinkIndex);
     aPeersGivenUpOn:=HostPair.Client.TotalPeersGivenUpOn;
     aArrivedMessages:=HostPair.ServerReceivedMessages.Count;
+    aDeliveredByBottleneck:=Bottleneck.LinkDeliveredDatagrams(LinkIndex);
     aBandwidthLimitsEvents:=HostPair.CountClientBandwidthLimitsEvents;
+    if CountSamples>0 then begin
+     aMeanRateBitsPerSecond:=TRNLUInt32(SumOfRates div TRNLUInt64(CountSamples));
+    end;
+    aBaselineRoundTripTime:=HostPair.ClientPeer.MinimumRoundTripTime;
+    aFlightResolvedPackets:=HostPair.ClientPeer.CountLastFlightResolvedPackets;
+    aFlightLostPackets:=HostPair.ClientPeer.CountLastFlightLostPackets;
     aElapsedMilliseconds:=TRNLTime.RelativeDifference(aInstance.Time,StartTime);
     if aElapsedMilliseconds<1 then begin
      aElapsedMilliseconds:=1;
@@ -10991,6 +11035,8 @@ var Instance:TRNLInstance;
     SettledRate,QueueingDelay:TRNLUInt32;
     Dropped,GivenUpOn:TRNLUInt64;
     Arrived,MessageSize,BandwidthLimitsEvents:TRNLSizeInt;
+    Delivered:TRNLUInt64;
+    LowestRate,MeanRate,FlightResolved,FlightLost,Baseline:TRNLUInt32;
     Elapsed:TRNLInt64;
     AvailableBytesPerSecond,ThroughputBytesPerSecond:TRNLInt64;
     Watchdog:TRNLTestWatchdog;
@@ -11014,6 +11060,12 @@ begin
                                       SettledRate,
                                       QueueingDelay,
                                       Dropped,
+                                      Delivered,
+                                      LowestRate,
+                                      MeanRate,
+                                      FlightResolved,
+                                      FlightLost,
+                                      Baseline,
                                       GivenUpOn,
                                       Arrived,
                                       Elapsed,
@@ -11034,10 +11086,18 @@ begin
     Info(CASES[Index].Name+': throughput '+TRNLRawByteString(IntToStr(ThroughputBytesPerSecond))+
          ' bytes per second, settled at '+TRNLRawByteString(IntToStr(SettledRate div 8))+
          ' of '+TRNLRawByteString(IntToStr(AvailableBytesPerSecond))+
-         ' bytes per second available, queueing delay '+TRNLRawByteString(IntToStr(QueueingDelay))+
-         ' ms of '+TRNLRawByteString(IntToStr(CASES[Index].QueueDepthMilliseconds))+
-         ' ms depth, dropped '+TRNLRawByteString(IntToStr(Dropped))+
-         ', arrived '+TRNLRawByteString(IntToStr(Arrived))+', given up on '+
+         ' bytes per second available, lowest '+
+         TRNLRawByteString(IntToStr(LowestRate div 8))+' and mean '+
+         TRNLRawByteString(IntToStr(MeanRate div 8))+
+         ' over the run, queueing delay '+TRNLRawByteString(IntToStr(QueueingDelay))+
+         ' ms over a baseline of '+TRNLRawByteString(IntToStr(Baseline))+
+         ' ms in a queue '+TRNLRawByteString(IntToStr(CASES[Index].QueueDepthMilliseconds))+
+         ' ms deep, dropped '+TRNLRawByteString(IntToStr(Dropped))+
+         ', the link carried '+TRNLRawByteString(IntToStr(Delivered))+
+         ', arrived '+TRNLRawByteString(IntToStr(Arrived))+
+         ', last flight '+TRNLRawByteString(IntToStr(FlightLost))+
+         ' lost of '+TRNLRawByteString(IntToStr(FlightResolved))+
+         ' settled, given up on '+
          TRNLRawByteString(IntToStr(GivenUpOn))+', rate reported '+
          TRNLRawByteString(IntToStr(BandwidthLimitsEvents))+' times');
 
@@ -11064,6 +11124,13 @@ begin
     // working controller from one pinned at its floor, which is what this check is for
     CheckAtLeastInt64(ThroughputBytesPerSecond,AvailableBytesPerSecond div 3,
                       TRNLRawByteString('and must not have collapsed for the ')+CASES[Index].Name);
+
+    // A ratio is only a ratio while its two halves count the same thing. The denominator is the
+    // first send attempt of each packet; a numerator which counted every expired timeout of the
+    // same packet would run past a hundred per cent and feed the controller a signal which cannot
+    // mean what it says.
+    CheckAtMostInt64(FlightLost,FlightResolved,
+                     TRNLRawByteString('no more packets lost than settled in a flight for the ')+CASES[Index].Name);
 
     // The reason a game library regulates at all. A queue this long is the bufferbloat the delay
     // signal exists to prevent, and a controller which tolerates it has understood nothing
@@ -11302,7 +11369,7 @@ begin
            TRNLRawByteString(IntToStr(HostPair.ClientPeer.MinimumRoundTripTime))+' ms, queueing delay '+
            TRNLRawByteString(IntToStr(HostPair.ClientPeer.QueueingDelay))+' ms, delivery rate '+
            TRNLRawByteString(IntToStr(HostPair.ClientPeer.DeliveryRate))+' bytes per second');
-      Info('last flight: '+TRNLRawByteString(IntToStr(HostPair.ClientPeer.CountLastFlightSentPackets))+
+      Info('last flight: '+TRNLRawByteString(IntToStr(HostPair.ClientPeer.CountLastFlightResolvedPackets))+
            ' sent, '+TRNLRawByteString(IntToStr(HostPair.ClientPeer.CountLastFlightLostPackets))+
            ' lost; simulator queued '+TRNLRawByteString(IntToStr(Bottleneck.LinkQueuedDatagrams(LinkIndex)))+
            ', dropped '+TRNLRawByteString(IntToStr(Bottleneck.LinkDroppedDatagrams(LinkIndex)))+
@@ -11344,7 +11411,7 @@ begin
       CheckAtMostInt64(HostPair.ClientPeer.DeliveryRate,(DRAIN_RATE_BYTES_PER_SECOND*3) div 2,
                        'and must not report more than the link can carry');
 
-      CheckAtLeastInt64(HostPair.ClientPeer.CountLastFlightSentPackets,1,
+      CheckAtLeastInt64(HostPair.ClientPeer.CountLastFlightResolvedPackets,1,
                         'and a flight has to have been accounted for, otherwise the loss figure '+
                        'below says nothing');
 

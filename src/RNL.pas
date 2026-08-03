@@ -660,6 +660,13 @@ const RNL_PROTOCOL_VERSION_MAJOR=1;
       // loss, expressed in percent. Below it, single retransmissions are treated as the noise they
       // usually are on a wireless path
       RNL_PEER_CONGESTION_CONTROL_LOSS_PERCENT=10;
+      // How many packets have to have settled before their loss ratio is allowed to mean anything.
+      // A ratio over a sample of one is not a ratio: it is either nought or a hundred per cent, and
+      // a threshold of ten reads the second of those as a catastrophe. Measured under Wine, where
+      // flights are short enough that a single settled packet was a whole window - the controller
+      // cut by a quarter per flight and ended on its floor at 13763 of 60000 bytes per second
+      // available, on a path which was dropping almost nothing.
+      RNL_PEER_CONGESTION_CONTROL_MINIMUM_LOSS_SAMPLE=8;
 
       // The floor. Low enough to be out of the way of any real path, high enough that acknowledgements,
       // pings and a trickle of payload always fit through - a controller which can throttle a
@@ -6594,9 +6601,9 @@ type PRNLVersion=^TRNLVersion;
        // One flight is one round trip time worth of sending. Counted while it runs, closed and
        // published when it is over
        fFlightStartTime:TRNLTime;
-       fCountFlightSentPackets:TRNLUInt32;
+       fCountFlightResolvedPackets:TRNLUInt32;
        fCountFlightLostPackets:TRNLUInt32;
-       fCountLastFlightSentPackets:TRNLUInt32;
+       fCountLastFlightResolvedPackets:TRNLUInt32;
        fCountLastFlightLostPackets:TRNLUInt32;
 
        // Bytes which the counter side actually acknowledged, per second. What was put on the wire
@@ -6881,7 +6888,10 @@ type PRNLVersion=^TRNLVersion;
        property BandwidthWeight:TRNLUInt32 read fBandwidthWeight write fBandwidthWeight;
        // What that claim currently amounts to in bits per second, or zero if the host is unlimited
        property OutgoingBandwidthShare:TRNLUInt32 read GetOutgoingBandwidthShare;
-       property CountLastFlightSentPackets:TRNLUInt32 read fCountLastFlightSentPackets;
+       // How many packets of the last flight had their fate settled - acknowledged or declared
+       // lost. Not how many were sent: a packet still in flight has not said anything yet, and
+       // counting it would put a pending outcome into the denominator of a ratio about outcomes.
+       property CountLastFlightResolvedPackets:TRNLUInt32 read fCountLastFlightResolvedPackets;
        property CountLastFlightLostPackets:TRNLUInt32 read fCountLastFlightLostPackets;
        // The rate the congestion controller has settled on, in bits per second, or zero while it is
        // switched off. What is actually enforced is the smaller of this and whatever the counter side
@@ -38882,7 +38892,16 @@ begin
    // both of those err on the safe side - only the statistics must not be told a story
    if TRNLTime.RelativeDifference(fHost.fTime,fHost.fPreviousTime)<BlockPacket.fRoundTripTimeout then begin
     inc(fPeer.fCountPacketLoss);
-    inc(fPeer.fCountFlightLostPackets);
+    // Settled, and settled badly. Counted once per packet and into both halves at the same
+    // moment, which is the only way the two of them describe one population: a numerator counting
+    // every backoff step against a denominator counting first transmissions measured 254 lost of
+    // 155 sent in one bottleneck run, and 164 per cent of something cannot be lost. Counting both
+    // where the fate is known also keeps them in the same window, which counting at the send and
+    // at the timeout never could - those are a round trip apart.
+    if BlockPacket.fCountSendAttempts=1 then begin
+     inc(fPeer.fCountFlightResolvedPackets);
+     inc(fPeer.fCountFlightLostPackets);
+    end;
    end else begin
     inc(fHost.fTotalStalledRetransmissions);
    end;
@@ -39324,6 +39343,11 @@ begin
      // made of. Counted here and not where the datagram was sent, because being sent is exactly
      // what does not prove anything about the capacity of the path
      fPeer.fDeliveryRateTracker.AddUnits(IndirectBlockPacket^.Size);
+     // Settled, and settled well. Only where it never timed out, because one which did was already
+     // counted the moment it was declared lost - each packet enters the denominator exactly once.
+     if IndirectBlockPacket^.fCountSendAttempts=1 then begin
+      inc(fPeer.fCountFlightResolvedPackets);
+     end;
      IndirectBlockPacket^.Remove;
      // It may still be waiting in the outgoing queue of the peer, queued for a retransmission which
      // the rate limiter has not let out yet. Sending it now would put a duplicate of an already
@@ -40645,9 +40669,9 @@ begin
  fMinimumRoundTripTime:=RNL_PEER_ROUND_TRIP_TIME_UNKNOWN;
 
  fFlightStartTime:=0;
- fCountFlightSentPackets:=0;
+ fCountFlightResolvedPackets:=0;
  fCountFlightLostPackets:=0;
- fCountLastFlightSentPackets:=0;
+ fCountLastFlightResolvedPackets:=0;
  fCountLastFlightLostPackets:=0;
 
  fDeliveryRateTracker.Reset;
@@ -41002,8 +41026,8 @@ begin
 
  Delay:=GetQueueingDelay;
 
- if fCountLastFlightSentPackets>0 then begin
-  LossPercent:=(TRNLInt64(fCountLastFlightLostPackets)*100) div TRNLInt64(fCountLastFlightSentPackets);
+ if fCountLastFlightResolvedPackets>=RNL_PEER_CONGESTION_CONTROL_MINIMUM_LOSS_SAMPLE then begin
+  LossPercent:=(TRNLInt64(fCountLastFlightLostPackets)*100) div TRNLInt64(fCountLastFlightResolvedPackets);
  end else begin
   LossPercent:=0;
  end;
@@ -41126,13 +41150,20 @@ begin
  FlightInterval:=Max(fRetransmissionTimeout shr 32,RNL_PEER_MINIMUM_FLIGHT_INTERVAL);
 
  if TRNLTime.RelativeDifference(fHost.fTime,fFlightStartTime)>=FlightInterval then begin
-  // A flight which carried nothing says nothing about loss, so it is not published as a flight with
-  // zero loss - that would drown a real signal in silence
-  if fCountFlightSentPackets>0 then begin
-   fCountLastFlightSentPackets:=fCountFlightSentPackets;
-   fCountLastFlightLostPackets:=fCountFlightLostPackets;
-  end;
-  fCountFlightSentPackets:=0;
+  // Published whatever it holds, including nothing. That reads oddly against "a flight which
+  // carried nothing says nothing about loss" - and it is the same statement: a flight with no
+  // settled packet publishes a sample of zero, which UpdateCongestionControl reads as no signal
+  // rather than as no loss, because a ratio needs a sample before it means anything.
+  //
+  // Keeping the previous reading instead is what does the damage, and it only became damaging when
+  // the denominator changed from packets sent to packets settled: sends happen every round, so the
+  // pair refreshed constantly, while settlements are sparse. Measured under Wine, where one stale
+  // reading of high loss then fired the quarter cut on every flight for the rest of the run and
+  // held the rate at its floor - 13763 of 60000 bytes per second available, on a path dropping
+  // fifty seven datagrams out of two hundred.
+  fCountLastFlightResolvedPackets:=fCountFlightResolvedPackets;
+  fCountLastFlightLostPackets:=fCountFlightLostPackets;
+  fCountFlightResolvedPackets:=0;
   fCountFlightLostPackets:=0;
   fFlightStartTime:=fHost.fTime;
   // Once per flight, which is once per round trip time: the fastest cadence at which the effect of
@@ -42008,12 +42039,6 @@ begin
 
     inc(OutgoingBlockPacket.fCountSendAttempts);
 
-    // Only the first attempt, because a flight is what was put on the wire once. Counting the
-    // retransmissions in here as well would make the denominator grow along with the numerator and
-    // the loss ratio would flatten out just when it matters
-    if OutgoingBlockPacket.fCountSendAttempts=1 then begin
-     inc(fCountFlightSentPackets);
-    end;
 
     if OutgoingBlockPacket.fRoundTripTimeout=0 then begin
      // fRoundTripTimeout is the initial retransmission timeout, derived from the smoothed
