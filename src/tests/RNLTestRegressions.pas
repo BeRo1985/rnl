@@ -6711,6 +6711,277 @@ begin
 end;
 
 // ---------------------------------------------------------------------------------------
+// Reaching the relay through a record layer
+// ---------------------------------------------------------------------------------------
+
+// Everything the DTLS client can be shown against the stubs it has already been shown, down to a
+// forged Finished. What none of that touches is the join: whether TRNLTURNNetwork, given a
+// transport of DTLS, actually puts its STUN through the record layer and gets a connection out of
+// it - allocation, permission, channel bind and every datagram after them.
+//
+// So this one runs the real thing. A terminator sits in front of the ordinary TURN stub, which is
+// how a deployment is built anyway: the relay speaks plain STUN and something ahead of it does the
+// record layer. TRNLTestTURNServer is not touched at all and does not know it is behind one.
+//
+// Two things make the result unambiguous. The relay counts what came out of the record layer, so
+// zero there means the handshake never finished rather than the relay having said no; and the
+// server sees the client at the relayed address, which nothing but the relay can hand out.
+//
+// Run against real loopback sockets, since the terminator is a thread with two sockets of its own,
+// and both versions in turn, because 1.2 and 1.3 share the transport and nothing else.
+procedure TestRelayReachedOverDTLS;
+const LOOPBACK='127.0.0.1';
+      MESSAGE_COUNT=8;
+var Watchdog:TRNLTestWatchdog;
+    Instance:TRNLInstance;
+    RealNetwork:TRNLRealNetwork;
+    TURNNetwork:TRNLTURNNetwork;
+    TURNServer:TRNLTestTURNServer;
+    Relay:TRNLTestDTLSRelay;
+    Server,Client:TRNLHost;
+    ServerAddress,TURNAddress,TerminatorAddress,SeenAtServer:TRNLAddress;
+    RelayedHost:TRNLHostAddress;
+    Verification:TRNLDTLSVerification;
+    Fingerprint:TRNLDTLSVerification.TFingerprint;
+    Peer:TRNLPeer;
+    Event:TRNLHostEvent;
+    StartTime:TRNLTime;
+    Index,CountServerReceived,CountClientReceived:TRNLSizeInt;
+    Connected:boolean;
+    Version:TRNLTURNDTLSVersion;
+    BasePort:TRNLUInt16;
+    VersionName:TRNLRawByteString;
+
+ function AddressOf(const aHost:TRNLRawByteString;const aPort:TRNLUInt16):TRNLAddress;
+ begin
+  FillChar(result,SizeOf(TRNLAddress),#0);
+  RealNetwork.AddressSetHost(result,aHost);
+  result.Port:=aPort;
+ end;
+
+ procedure Pump(const aMilliseconds:TRNLInt64);
+ var Until_:TRNLTime;
+ begin
+  Until_:=Instance.Time+aMilliseconds;
+  repeat
+   while Server.Service(Event,0)=RNL_HOST_SERVICE_STATUS_EVENT do begin
+    case Event.Type_ of
+     RNL_HOST_EVENT_TYPE_PEER_CONNECT:begin
+      SeenAtServer:=Event.Peer.Address^;
+     end;
+     RNL_HOST_EVENT_TYPE_PEER_RECEIVE:begin
+      inc(CountServerReceived);
+      if assigned(Event.Peer) and (Event.Peer.CountChannels>0) then begin
+       Event.Peer.Channels[0].SendMessageRawByteString('pong');
+      end;
+     end;
+     else begin
+     end;
+    end;
+    Event.Free;
+   end;
+   Event.Free;
+   while Client.Service(Event,0)=RNL_HOST_SERVICE_STATUS_EVENT do begin
+    case Event.Type_ of
+     RNL_HOST_EVENT_TYPE_PEER_APPROVAL:begin
+      Connected:=true;
+     end;
+     RNL_HOST_EVENT_TYPE_PEER_RECEIVE:begin
+      inc(CountClientReceived);
+     end;
+     else begin
+     end;
+    end;
+    Event.Free;
+   end;
+   Event.Free;
+   Sleep(1);
+  until Instance.Time>=Until_;
+ end;
+
+begin
+
+ TestBegin('a relay reached through a record layer carries a connection');
+ Watchdog:=TRNLTestWatchdog.Create('turn over dtls',300000);
+ try
+
+  for Version:=RNL_TURN_DTLS_VERSION_1_2 to RNL_TURN_DTLS_VERSION_1_3 do begin
+
+   if Version=RNL_TURN_DTLS_VERSION_1_2 then begin
+    BasePort:=34820;
+    VersionName:='1.2';
+   end else begin
+    BasePort:=34840;
+    VersionName:='1.3';
+   end;
+
+   Connected:=false;
+   CountServerReceived:=0;
+   CountClientReceived:=0;
+   FillChar(SeenAtServer,SizeOf(TRNLAddress),#0);
+
+   Instance:=TRNLInstance.Create;
+   try
+    RealNetwork:=TRNLRealNetwork.Create(Instance);
+    try
+
+     ServerAddress:=AddressOf(LOOPBACK,BasePort+4);
+     TURNAddress:=AddressOf(LOOPBACK,BasePort);
+     TerminatorAddress:=AddressOf(LOOPBACK,BasePort+1);
+     RelayedHost:=AddressOf(LOOPBACK,0).Host;
+
+     TURNServer:=TRNLTestTURNServer.Create(Instance,RealNetwork,BasePort,
+                                           RNL_TEST_TURN_SERVER_CORRECT,
+                                           RelayedHost,RelayedHost,
+                                           'rnl','secret','rnl.test');
+     try
+
+      Relay:=TRNLTestDTLSRelay.Create(Instance,RealNetwork,LOOPBACK,BasePort+1,
+                                      TURNAddress,RNL_IPV4,Version);
+      try
+
+       Server:=TRNLHost.Create(Instance,RealNetwork);
+       try
+
+        Server.Address.Host:=ServerAddress.Host;
+        Server.Address.Port:=ServerAddress.Port;
+        Server.Start(RNL_HOST_ADDRESS_FAMILY_WORK_MODE_IPV4_ONLY);
+
+        // The client aims at the terminator, not at the relay behind it
+        TURNNetwork:=TRNLTURNNetwork.Create(Instance,RealNetwork,TerminatorAddress,
+                                            'rnl','secret');
+        try
+
+         TURNNetwork.Transport:=RNL_TURN_TRANSPORT_KIND_DTLS;
+         TURNNetwork.DTLSVersion:=Version;
+
+         // Pinned rather than a chain, which is the case a relay of one's own is: there is no
+         // certificate authority to appeal to and the stub's leaf is a self made one
+         TRNLDTLSVerification.ComputeFingerprint(Fingerprint,
+                                                 TRNLTestCertificates.Leaf[0],
+                                                 SizeOf(TRNLTestCertificates.Leaf));
+         Verification.InitializeFingerprints;
+         Verification.AddFingerprint(Fingerprint);
+         TURNNetwork.DTLSVerification:=Verification;
+
+         Client:=TRNLHost.Create(Instance,TURNNetwork);
+         try
+
+          Client.Address.Host:=AddressOf(LOOPBACK,0).Host;
+          Client.Address.Port:=BasePort+5;
+          Client.Start(RNL_HOST_ADDRESS_FAMILY_WORK_MODE_IPV4_ONLY);
+
+          if not Check(TURNNetwork.TotalAllocations=1,
+                       'the allocation has to have been made through the record layer, DTLS '+
+                       VersionName) then begin
+           Info('failed handshakes: '+
+                TRNLRawByteString(IntToStr(TURNNetwork.TotalFailedDTLSHandshakes))+
+                ', failed allocations '+
+                TRNLRawByteString(IntToStr(TURNNetwork.TotalFailedAllocations)));
+           exit;
+          end;
+
+          Peer:=Client.Connect(ServerAddress);
+          if not Check(assigned(Peer),'the client can start a connection attempt') then begin
+           exit;
+          end;
+          Peer.IncRef;
+          try
+
+           StartTime:=Instance.Time;
+           Event.Initialize;
+           try
+            repeat
+             Pump(10);
+            until Connected or (TRNLTime.RelativeDifference(Instance.Time,StartTime)>=8000);
+
+            if Connected and (Peer.CountChannels>0) then begin
+             for Index:=1 to MESSAGE_COUNT do begin
+              Peer.Channels[0].SendMessageRawByteString(TestMessageText(Index,64));
+             end;
+            end;
+
+            StartTime:=Instance.Time;
+            repeat
+             Pump(10);
+            until ((CountServerReceived>=MESSAGE_COUNT) and (CountClientReceived>=MESSAGE_COUNT)) or
+                  (TRNLTime.RelativeDifference(Instance.Time,StartTime)>=8000);
+           finally
+            Event.Free;
+           end;
+
+          finally
+           Peer.DecRef;
+          end;
+
+          Info('DTLS '+VersionName+': the terminator passed '+
+               TRNLRawByteString(IntToStr(Relay.CountForwarded))+
+               ' datagram(s) on, the server saw the client at '+
+               TRNLRawByteString(SeenAtServer.ToString)+
+               ' and got '+TRNLRawByteString(IntToStr(CountServerReceived))+
+               ' of '+TRNLRawByteString(IntToStr(MESSAGE_COUNT))+
+               ' message(s), client got '+
+               TRNLRawByteString(IntToStr(CountClientReceived))+' back');
+
+          // Nothing whatsoever reaches the relay except through the record layer, so this is the
+          // handshake having finished and the protection being right in both directions
+          CheckAtLeastInt64(Relay.CountForwarded,1,
+                            'the terminator has to have decrypted something to pass on, DTLS '+
+                            VersionName);
+
+          CheckEqualsInt64(TURNNetwork.TotalFailedDTLSHandshakes,0,
+                           'and no handshake may have been given up on, DTLS '+VersionName);
+
+          Check(Connected,'the connection has to come up through the record layer, DTLS '+
+                          VersionName);
+
+          CheckAtLeastInt64(CountServerReceived,MESSAGE_COUNT,
+                            'and every message has to arrive, DTLS '+VersionName);
+
+          CheckAtLeastInt64(CountClientReceived,MESSAGE_COUNT,
+                            'and every answer has to find its way back, DTLS '+VersionName);
+
+          Check(SeenAtServer.Port<>Client.Address.Port,
+                'and the server has to see the client at the relayed address rather than at its '+
+                'own, DTLS '+VersionName);
+
+         finally
+          FreeAndNil(Client);
+         end;
+
+        finally
+         FreeAndNil(TURNNetwork);
+        end;
+
+       finally
+        FreeAndNil(Server);
+       end;
+
+      finally
+       FreeAndNil(Relay);
+      end;
+
+     finally
+      FreeAndNil(TURNServer);
+     end;
+
+    finally
+     FreeAndNil(RealNetwork);
+    end;
+   finally
+    FreeAndNil(Instance);
+   end;
+
+  end;
+
+ finally
+  FreeAndNil(Watchdog);
+  TestEnd;
+ end;
+
+end;
+
+// ---------------------------------------------------------------------------------------
 // A connection over a relay
 // ---------------------------------------------------------------------------------------
 
@@ -11109,6 +11380,7 @@ begin
  TestSTUNMessageIntegrityMatchesTheRFC5769Vector;
  TestConnectionOverATURNRelay;
  TestRelayReachedOverAStream;
+ TestRelayReachedOverDTLS;
  TestRelayAddressGetsItsOwnFloodingBudget;
  TestRelayClientsGetABucketEachUnderACeiling;
  TestTURNChannelNumbersAreReleasedAndReused;

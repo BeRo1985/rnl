@@ -43,6 +43,7 @@ interface
 
 uses SysUtils,
      Classes,
+     SyncObjs,
      RNL,
      RNLTestCertificates;
 
@@ -191,6 +192,12 @@ type // ECDSA over P-256 the other way round from RNL, which only ever verifies.
        fClientFinishedVerified:boolean;
        fCountApplicationDataRecords:TRNLSizeInt;
        fLastApplicationData:TRNLTestDTLSServerDatagram;
+       // Every application datagram, not only the last: a terminator in front of a relay
+       // has to pass each one on, and dropping all but the newest would lose exactly the
+       // request whose answer the test is waiting for.
+       fIncoming:array[0..7] of TRNLTestDTLSServerDatagram;
+       fIncomingHead:TRNLSizeInt;
+       fCountIncoming:TRNLSizeInt;
 
        procedure QueuePacking;
        procedure EmitRecord(const aContentType:TRNLUInt8;const aEpoch:TRNLUInt16;
@@ -229,6 +236,8 @@ type // ECDSA over P-256 the other way round from RNL, which only ever verifies.
        // Whether the last application data record to arrive said exactly this. A comparison rather
        // than a window into the buffer, so that nothing outside can hold on to it.
        function LastApplicationDataMatches(const aData;const aDataSize:TRNLSizeInt):boolean;
+       function TakeApplicationData(out aData;out aSize:TRNLSizeInt;
+                                    const aMaximumSize:TRNLSizeInt):boolean;
 
        property CountClientHellos:TRNLSizeInt read fCountClientHellos;
        property CountFlightsSent:TRNLSizeInt read fCountFlightsSent;
@@ -348,6 +357,12 @@ type // ECDSA over P-256 the other way round from RNL, which only ever verifies.
        fClientFinishedVerified:boolean;
        fCountApplicationDataRecords:TRNLSizeInt;
        fLastApplicationData:TRNLTestDTLS13ServerDatagram;
+       // Every application datagram, not only the last: a terminator in front of a relay
+       // has to pass each one on, and dropping all but the newest would lose exactly the
+       // request whose answer the test is waiting for.
+       fIncoming:array[0..7] of TRNLTestDTLS13ServerDatagram;
+       fIncomingHead:TRNLSizeInt;
+       fCountIncoming:TRNLSizeInt;
 
        procedure QueuePacking;
        procedure EmitRecord(const aContentType:TRNLUInt8;const aEpoch:TRNLUInt64;
@@ -377,6 +392,8 @@ type // ECDSA over P-256 the other way round from RNL, which only ever verifies.
                                     const aMaximumDataSize:TRNLSizeInt):boolean;
        function Send(const aData;const aDataSize:TRNLSizeInt):boolean;
        function LastApplicationDataMatches(const aData;const aDataSize:TRNLSizeInt):boolean;
+       function TakeApplicationData(out aData;out aSize:TRNLSizeInt;
+                                    const aMaximumSize:TRNLSizeInt):boolean;
 
        property CountClientHellos:TRNLSizeInt read fCountClientHellos;
        property CountFlightsSent:TRNLSizeInt read fCountFlightsSent;
@@ -384,6 +401,62 @@ type // ECDSA over P-256 the other way round from RNL, which only ever verifies.
        property LastAlertDescription:TRNLUInt8 read fLastAlertDescription;
        property ClientFinishedVerified:boolean read fClientFinishedVerified;
        property CountApplicationDataRecords:TRNLSizeInt read fCountApplicationDataRecords;
+
+     end;
+
+type // A DTLS terminator in front of a relay, which is how a real deployment is built: the relay
+     // itself speaks plain STUN and something in front of it does the record layer. Composing the
+     // two stubs that way costs nothing - TRNLTestTURNServer is not touched at all, and both DTLS
+     // stubs are already driven exactly like this, by datagrams in and out.
+     //
+     // One client at a time, because a test has one. A second one arriving would have to start its
+     // own handshake, and the address of the first is simply replaced - which is wrong for a real
+     // terminator and irrelevant here.
+     TRNLTestDTLSRelay=class(TThread)
+      private
+
+       fInstance:TRNLInstance;
+       fNetwork:TRNLNetwork;
+       fFamily:TRNLAddressFamily;
+
+       // What the client talks to, and what the relay behind this talks to
+       fListenSocket:TRNLSocket;
+       fForwardSocket:TRNLSocket;
+       fTargetAddress:TRNLAddress;
+
+       fClientAddress:TRNLAddress;
+       fHasClient:boolean;
+
+       fVersion:TRNLTURNDTLSVersion;
+       fServer12:TRNLTestDTLSServer;
+       fServer13:TRNLTestDTLS13Server;
+
+       fLock:TCriticalSection;
+       fCountClientDatagrams:TRNLSizeInt;
+       fCountForwarded:TRNLSizeInt;
+       fCountReturned:TRNLSizeInt;
+
+       function GetCountForwarded:TRNLSizeInt;
+       procedure Flush;
+
+      protected
+
+       procedure Execute; override;
+
+      public
+
+       constructor Create(const aInstance:TRNLInstance;
+                          const aNetwork:TRNLNetwork;
+                          const aListenHost:TRNLRawByteString;
+                          const aListenPort:TRNLUInt16;
+                          const aTargetAddress:TRNLAddress;
+                          const aFamily:TRNLAddressFamily;
+                          const aVersion:TRNLTURNDTLSVersion); reintroduce;
+       destructor Destroy; override;
+
+       // How many datagrams came out of the record layer and went on to the relay. Zero means the
+       // handshake never finished, which is a different failure from a relay which said no.
+       property CountForwarded:TRNLSizeInt read GetCountForwarded;
 
      end;
 
@@ -587,6 +660,8 @@ begin
  fClientFinishedVerified:=false;
  fCountApplicationDataRecords:=0;
  fLastApplicationData.Size:=0;
+ fIncomingHead:=0;
+ fCountIncoming:=0;
 
 end;
 
@@ -1207,6 +1282,7 @@ end;
 
 procedure TRNLTestDTLSServer.HandleRecord(const aContentType:TRNLUInt8;
                                           const aContent;const aContentSize:TRNLSizeInt);
+var Index:TRNLSizeInt;
 begin
 
  if aContentType=TRNLDTLS12Record.CONTENT_TYPE_ALERT then begin
@@ -1230,6 +1306,12 @@ begin
   if (aContentSize>0) and (aContentSize<=MaximumDatagramSize) then begin
    Move(aContent,fLastApplicationData.Data[0],aContentSize);
    fLastApplicationData.Size:=aContentSize;
+   if fCountIncoming<length(fIncoming) then begin
+    Index:=(fIncomingHead+fCountIncoming) mod length(fIncoming);
+    Move(aContent,fIncoming[Index].Data[0],aContentSize);
+    fIncoming[Index].Size:=aContentSize;
+    inc(fCountIncoming);
+   end;
   end;
  end;
 
@@ -1299,6 +1381,21 @@ begin
  result:=true;
 end;
 
+function TRNLTestDTLSServer.TakeApplicationData(out aData;out aSize:TRNLSizeInt;
+                                             const aMaximumSize:TRNLSizeInt):boolean;
+begin
+ aSize:=0;
+ result:=false;
+ if (fCountIncoming=0) or (fIncoming[fIncomingHead].Size>aMaximumSize) then begin
+  exit;
+ end;
+ aSize:=fIncoming[fIncomingHead].Size;
+ Move(fIncoming[fIncomingHead].Data[0],aData,aSize);
+ fIncomingHead:=(fIncomingHead+1) mod length(fIncoming);
+ dec(fCountIncoming);
+ result:=true;
+end;
+
 function TRNLTestDTLSServer.LastApplicationDataMatches(const aData;
                                                        const aDataSize:TRNLSizeInt):boolean;
 begin
@@ -1364,6 +1461,8 @@ begin
  fClientFinishedVerified:=false;
  fCountApplicationDataRecords:=0;
  fLastApplicationData.Size:=0;
+ fIncomingHead:=0;
+ fCountIncoming:=0;
 
 end;
 
@@ -1919,6 +2018,7 @@ end;
 
 procedure TRNLTestDTLS13Server.HandleRecord(const aContentType:TRNLUInt8;
                                             const aContent;const aContentSize:TRNLSizeInt);
+var Index:TRNLSizeInt;
 begin
  if aContentType=TRNLDTLSRecord.CONTENT_TYPE_ALERT then begin
   inc(fCountAlertsReceived);
@@ -1932,6 +2032,12 @@ begin
   if (aContentSize>0) and (aContentSize<=MaximumDatagramSize) then begin
    Move(aContent,fLastApplicationData.Data[0],aContentSize);
    fLastApplicationData.Size:=aContentSize;
+   if fCountIncoming<length(fIncoming) then begin
+    Index:=(fIncomingHead+fCountIncoming) mod length(fIncoming);
+    Move(aContent,fIncoming[Index].Data[0],aContentSize);
+    fIncoming[Index].Size:=aContentSize;
+    inc(fCountIncoming);
+   end;
   end;
  end;
  // An ACK is read and dropped: this stub never repeats a subset of a flight
@@ -2022,6 +2128,21 @@ begin
  QueuePacking;
 end;
 
+function TRNLTestDTLS13Server.TakeApplicationData(out aData;out aSize:TRNLSizeInt;
+                                             const aMaximumSize:TRNLSizeInt):boolean;
+begin
+ aSize:=0;
+ result:=false;
+ if (fCountIncoming=0) or (fIncoming[fIncomingHead].Size>aMaximumSize) then begin
+  exit;
+ end;
+ aSize:=fIncoming[fIncomingHead].Size;
+ Move(fIncoming[fIncomingHead].Data[0],aData,aSize);
+ fIncomingHead:=(fIncomingHead+1) mod length(fIncoming);
+ dec(fCountIncoming);
+ result:=true;
+end;
+
 function TRNLTestDTLS13Server.LastApplicationDataMatches(const aData;
                                                          const aDataSize:TRNLSizeInt):boolean;
 begin
@@ -2029,5 +2150,167 @@ begin
          TRNLMemory.SecureIsEqual(fLastApplicationData.Data[0],aData,TRNLSizeUInt(aDataSize));
 end;
 
+
+constructor TRNLTestDTLSRelay.Create(const aInstance:TRNLInstance;
+                                     const aNetwork:TRNLNetwork;
+                                     const aListenHost:TRNLRawByteString;
+                                     const aListenPort:TRNLUInt16;
+                                     const aTargetAddress:TRNLAddress;
+                                     const aFamily:TRNLAddressFamily;
+                                     const aVersion:TRNLTURNDTLSVersion);
+var Address:TRNLAddress;
+begin
+
+ fInstance:=aInstance;
+ fNetwork:=aNetwork;
+ fFamily:=aFamily;
+ fTargetAddress:=aTargetAddress;
+ fVersion:=aVersion;
+ fHasClient:=false;
+ fCountClientDatagrams:=0;
+ fCountForwarded:=0;
+ fCountReturned:=0;
+ fLock:=TCriticalSection.Create;
+
+ if fVersion=RNL_TURN_DTLS_VERSION_1_3 then begin
+  fServer13:=TRNLTestDTLS13Server.Create(RNL_TEST_DTLS13_SERVER_CORRECT);
+ end else begin
+  fServer12:=TRNLTestDTLSServer.Create(RNL_TEST_DTLS_SERVER_CORRECT,false);
+ end;
+
+ FillChar(Address,SizeOf(TRNLAddress),#0);
+ fNetwork.AddressSetHost(Address,aListenHost);
+ Address.Port:=aListenPort;
+ fListenSocket:=fNetwork.SocketCreate(RNL_SOCKET_TYPE_DATAGRAM,fFamily);
+ if fListenSocket<>RNL_SOCKET_NULL then begin
+  fNetwork.SocketBind(fListenSocket,@Address,fFamily);
+ end;
+
+ // A second socket towards the relay, so that what comes back from it can be told apart from what
+ // comes from the client by which socket it arrived on
+ fForwardSocket:=fNetwork.SocketCreate(RNL_SOCKET_TYPE_DATAGRAM,fFamily);
+ if fForwardSocket<>RNL_SOCKET_NULL then begin
+  fNetwork.SocketBind(fForwardSocket,nil,fFamily);
+ end;
+
+ inherited Create(false);
+
+end;
+
+destructor TRNLTestDTLSRelay.Destroy;
+begin
+ Terminate;
+ WaitFor;
+ if fListenSocket<>RNL_SOCKET_NULL then begin
+  fNetwork.SocketDestroy(fListenSocket);
+ end;
+ if fForwardSocket<>RNL_SOCKET_NULL then begin
+  fNetwork.SocketDestroy(fForwardSocket);
+ end;
+ FreeAndNil(fServer12);
+ FreeAndNil(fServer13);
+ FreeAndNil(fLock);
+ inherited Destroy;
+end;
+
+function TRNLTestDTLSRelay.GetCountForwarded:TRNLSizeInt;
+begin
+ fLock.Acquire;
+ try
+  result:=fCountForwarded;
+ finally
+  fLock.Release;
+ end;
+end;
+
+procedure TRNLTestDTLSRelay.Flush;
+var Datagram:array[0..2047] of TRNLUInt8;
+    DatagramSize:TRNLSizeInt;
+begin
+ if not fHasClient then begin
+  exit;
+ end;
+ if assigned(fServer12) then begin
+  while fServer12.PopOutgoingDatagram(Datagram,DatagramSize,SizeOf(Datagram)) do begin
+   fNetwork.Send(fListenSocket,@fClientAddress,Datagram,DatagramSize,fFamily);
+  end;
+ end else begin
+  while fServer13.PopOutgoingDatagram(Datagram,DatagramSize,SizeOf(Datagram)) do begin
+   fNetwork.Send(fListenSocket,@fClientAddress,Datagram,DatagramSize,fFamily);
+  end;
+ end;
+end;
+
+procedure TRNLTestDTLSRelay.Execute;
+var Sockets:array[0..1] of TRNLSocket;
+    WaitConditions:TRNLSocketWaitConditions;
+    Datagram:array[0..2047] of TRNLUInt8;
+    Plain:array[0..2047] of TRNLUInt8;
+    Address:TRNLAddress;
+    Size,PlainSize:TRNLSizeInt;
+begin
+
+ if (fListenSocket=RNL_SOCKET_NULL) or (fForwardSocket=RNL_SOCKET_NULL) then begin
+  exit;
+ end;
+
+ Sockets[0]:=fListenSocket;
+ Sockets[1]:=fForwardSocket;
+
+ while not Terminated do begin
+
+  WaitConditions:=[RNL_SOCKET_WAIT_CONDITION_IO_RECEIVE];
+  if not fNetwork.SocketWait(Sockets,WaitConditions,10,nil) then begin
+   continue;
+  end;
+  if not (RNL_SOCKET_WAIT_CONDITION_IO_RECEIVE in WaitConditions) then begin
+   continue;
+  end;
+
+  // From the client: a record. What comes out of it goes on to the relay, and what the record
+  // layer wants to say back goes out at once.
+  Size:=fNetwork.Receive(fListenSocket,@Address,Datagram,SizeOf(Datagram),fFamily);
+  if Size>0 then begin
+   fLock.Acquire;
+   try
+    fClientAddress:=Address;
+    fHasClient:=true;
+    inc(fCountClientDatagrams);
+    if assigned(fServer12) then begin
+     fServer12.ProcessDatagram(Datagram,Size);
+    end else begin
+     fServer13.ProcessDatagram(Datagram,Size);
+    end;
+    Flush;
+    while ((assigned(fServer12) and fServer12.TakeApplicationData(Plain,PlainSize,SizeOf(Plain))) or
+           (assigned(fServer13) and fServer13.TakeApplicationData(Plain,PlainSize,SizeOf(Plain)))) do begin
+     fNetwork.Send(fForwardSocket,@fTargetAddress,Plain,PlainSize,fFamily);
+     inc(fCountForwarded);
+    end;
+   finally
+    fLock.Release;
+   end;
+  end;
+
+  // From the relay: plaintext, which goes back to the client through the record layer
+  Size:=fNetwork.Receive(fForwardSocket,@Address,Datagram,SizeOf(Datagram),fFamily);
+  if (Size>0) and Address.Equals(fTargetAddress) then begin
+   fLock.Acquire;
+   try
+    if assigned(fServer12) then begin
+     fServer12.Send(Datagram,Size);
+    end else begin
+     fServer13.Send(Datagram,Size);
+    end;
+    Flush;
+    inc(fCountReturned);
+   finally
+    fLock.Release;
+   end;
+  end;
+
+ end;
+
+end;
 
 end.
