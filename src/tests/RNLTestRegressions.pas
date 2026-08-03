@@ -10890,6 +10890,8 @@ function CongestionControlRun(const aInstance:TRNLInstance;
                               // What the queueing delay is measured against, which is what a
                               // threshold relative to the path would have to be built on
                               out aBaselineRoundTripTime:TRNLUInt32;
+                              // What the path lets a queue grow to, as the peer estimates it
+                              out aQueueDepthEstimate:TRNLUInt32;
                               out aPeersGivenUpOn:TRNLUInt64;
                               out aArrivedMessages:TRNLSizeInt;
                               out aElapsedMilliseconds:TRNLInt64;
@@ -10919,6 +10921,7 @@ begin
  aFlightResolvedPackets:=0;
  aFlightLostPackets:=0;
  aBaselineRoundTripTime:=0;
+ aQueueDepthEstimate:=0;
  aPeersGivenUpOn:=0;
  aArrivedMessages:=0;
  aElapsedMilliseconds:=0;
@@ -10989,6 +10992,7 @@ begin
      aMeanRateBitsPerSecond:=TRNLUInt32(SumOfRates div TRNLUInt64(CountSamples));
     end;
     aBaselineRoundTripTime:=HostPair.ClientPeer.MinimumRoundTripTime;
+    aQueueDepthEstimate:=HostPair.ClientPeer.QueueDepth;
     aFlightResolvedPackets:=HostPair.ClientPeer.CountLastFlightResolvedPackets;
     aFlightLostPackets:=HostPair.ClientPeer.CountLastFlightLostPackets;
     aElapsedMilliseconds:=TRNLTime.RelativeDifference(aInstance.Time,StartTime);
@@ -11036,7 +11040,7 @@ var Instance:TRNLInstance;
     Dropped,GivenUpOn:TRNLUInt64;
     Arrived,MessageSize,BandwidthLimitsEvents:TRNLSizeInt;
     Delivered:TRNLUInt64;
-    LowestRate,MeanRate,FlightResolved,FlightLost,Baseline:TRNLUInt32;
+    LowestRate,MeanRate,FlightResolved,FlightLost,Baseline,DepthEstimate:TRNLUInt32;
     Elapsed:TRNLInt64;
     AvailableBytesPerSecond,ThroughputBytesPerSecond:TRNLInt64;
     Watchdog:TRNLTestWatchdog;
@@ -11066,6 +11070,7 @@ begin
                                       FlightResolved,
                                       FlightLost,
                                       Baseline,
+                                      DepthEstimate,
                                       GivenUpOn,
                                       Arrived,
                                       Elapsed,
@@ -11092,7 +11097,8 @@ begin
          ' over the run, queueing delay '+TRNLRawByteString(IntToStr(QueueingDelay))+
          ' ms over a baseline of '+TRNLRawByteString(IntToStr(Baseline))+
          ' ms in a queue '+TRNLRawByteString(IntToStr(CASES[Index].QueueDepthMilliseconds))+
-         ' ms deep, dropped '+TRNLRawByteString(IntToStr(Dropped))+
+         ' ms deep and estimated at '+TRNLRawByteString(IntToStr(DepthEstimate))+
+         ' ms, dropped '+TRNLRawByteString(IntToStr(Dropped))+
          ', the link carried '+TRNLRawByteString(IntToStr(Delivered))+
          ', arrived '+TRNLRawByteString(IntToStr(Arrived))+
          ', last flight '+TRNLRawByteString(IntToStr(FlightLost))+
@@ -11131,6 +11137,22 @@ begin
     // mean what it says.
     CheckAtMostInt64(FlightLost,FlightResolved,
                      TRNLRawByteString('no more packets lost than settled in a flight for the ')+CASES[Index].Name);
+
+    // The estimate the threshold is derived from has to be an estimate of something. Only where a
+    // competitor is holding the link, because those are the two cases which actually fill the
+    // buffer - without one this side never puts enough in to find out how much fits, and the
+    // estimate then honestly reads lower than the link would hold.
+    if CASES[Index].CrossTrafficBytesPerSecond>0 then begin
+     CheckAtLeastInt64(DepthEstimate,CASES[Index].QueueDepthMilliseconds div 2,
+                       TRNLRawByteString('the queue depth has to be estimated in the region of what ')+
+                       TRNLRawByteString('the link holds for the ')+CASES[Index].Name);
+    end;
+
+    // And never above it. A ring of maxima which did not expire its entries would keep reporting
+    // the deepest queue this connection ever saw, which on a path that has changed is a number
+    // about the past.
+    CheckAtMostInt64(DepthEstimate,TRNLInt64(CASES[Index].QueueDepthMilliseconds)+50,
+                     TRNLRawByteString('and not above what the link holds for the ')+CASES[Index].Name);
 
     // The reason a game library regulates at all. A queue this long is the bufferbloat the delay
     // signal exists to prevent, and a controller which tolerates it has understood nothing
@@ -11784,129 +11806,129 @@ begin
 
  // The cryptographic primitives first of all, because everything else rests on them and
  // because until now nothing ever checked them
-// TestCryptographySelfTestsPass;
-// TestHashesStreamInChunksAndHMACHandlesKeyLengths;
-// TestHKDFStretchesAndRefusesPastTheVectors;
-// TestP256AgreementIsSymmetricAndRefusesTheEdges;
-// TestCertificateChainRejectsEveryBrokenPath;
-// TestDTLSRecordLayerRejectsWhatDoesNotAddUp;
-// TestDTLSHandshakeCompletesAgainstEveryHonestServer;
-// TestDTLSHandshakeRefusesEveryBrokenServer;
-// TestDTLS13HandshakeCompletesAgainstEveryHonestServer;
-// TestDTLS13HandshakeRefusesEveryBrokenServer;
-// TestDTLSPinnedRelayNeedsNoChainOrClock;
-// TestDTLSRawPublicKeyStandsInForACertificate;
+ TestCryptographySelfTestsPass;
+ TestHashesStreamInChunksAndHMACHandlesKeyLengths;
+ TestHKDFStretchesAndRefusesPastTheVectors;
+ TestP256AgreementIsSymmetricAndRefusesTheEdges;
+ TestCertificateChainRejectsEveryBrokenPath;
+ TestDTLSRecordLayerRejectsWhatDoesNotAddUp;
+ TestDTLSHandshakeCompletesAgainstEveryHonestServer;
+ TestDTLSHandshakeRefusesEveryBrokenServer;
+ TestDTLS13HandshakeCompletesAgainstEveryHonestServer;
+ TestDTLS13HandshakeRefusesEveryBrokenServer;
+ TestDTLSPinnedRelayNeedsNoChainOrClock;
+ TestDTLSRawPublicKeyStandsInForACertificate;
 
  // Pure configuration invariants first, they are instant and their failure explains a lot of
  // what the behavioural tests below would otherwise report in a much noisier way
-// TestRetransmissionTimeoutConfigurationIsConsistent;
-// TestHostBringsUpTheExpectedSockets;
+ TestRetransmissionTimeoutConfigurationIsConsistent;
+ TestHostBringsUpTheExpectedSockets;
 
  // The STUN client, which is where a parser meets datagrams from a stranger
-// TestSTUNClientReadsItsMappedAddressAndRejectsMalformedAnswers;
-// TestSTUNQueryWhileTheHostIsRunning;
-// TestSTUNMessageIntegrityMatchesTheRFC5769Vector;
-// TestConnectionOverATURNRelay;
-// TestRelayReachedOverAStream;
-// TestRelayReachedOverDTLS;
-// TestRelayAddressGetsItsOwnFloodingBudget;
-// TestRelayClientsGetABucketEachUnderACeiling;
-// TestTURNChannelNumbersAreReleasedAndReused;
-// TestTURNAllocationSaysWhyItWasRefused;
+ TestSTUNClientReadsItsMappedAddressAndRejectsMalformedAnswers;
+ TestSTUNQueryWhileTheHostIsRunning;
+ TestSTUNMessageIntegrityMatchesTheRFC5769Vector;
+ TestConnectionOverATURNRelay;
+ TestRelayReachedOverAStream;
+ TestRelayReachedOverDTLS;
+ TestRelayAddressGetsItsOwnFloodingBudget;
+ TestRelayClientsGetABucketEachUnderACeiling;
+ TestTURNChannelNumbersAreReleasedAndReused;
+ TestTURNAllocationSaysWhyItWasRefused;
 
  // The NAT simulator, which every later punching test will rest on
-// TestNATNetworkSimulatesTheFourNATKinds;
+ TestNATNetworkSimulatesTheFourNATKinds;
 
  // The candidate types, which are pure arithmetic plus one more parser for untrusted input
-// TestCandidatePriorityOrderAndSerialisation;
-// TestGatherCandidatesFindsHostAndServerReflexive;
-// TestHolePunchingOpensTheWayForAnIncomingConnection;
-// TestCandidateFanOutStaysBoundedForALongCandidateList;
-// TestOneSocketPerInterfaceIsPairedWithEveryCandidate;
-// TestNATMappingBehaviourIsDetectedForEveryNATKind;
-// TestSimultaneousConnectResolvesToOneConnection;
+ TestCandidatePriorityOrderAndSerialisation;
+ TestGatherCandidatesFindsHostAndServerReflexive;
+ TestHolePunchingOpensTheWayForAnIncomingConnection;
+ TestCandidateFanOutStaysBoundedForALongCandidateList;
+ TestOneSocketPerInterfaceIsPairedWithEveryCandidate;
+ TestNATMappingBehaviourIsDetectedForEveryNATKind;
+ TestSimultaneousConnectResolvesToOneConnection;
 
  // The rate limiters, on their own before anything drives them over a network
-// TestBandwidthRateLimiterHonoursItsPeriodLength;
-// TestConnectionRequestBudgetSurvivesAHashCollision;
+ TestBandwidthRateLimiterHonoursItsPeriodLength;
+ TestConnectionRequestBudgetSurvivesAHashCollision;
 
  // Test tooling correctness, everything which follows relies on it
-// TestOutgoingBitFlippingSimulationActuallyFlipsBits;
-// TestHandshakeFieldRewritingKeepsThePacketChecksumValid;
+ TestOutgoingBitFlippingSimulationActuallyFlipsBits;
+ TestHandshakeFieldRewritingKeepsThePacketChecksumValid;
 
  // Handshake authenticity
-// TestTranscriptBindingInteroperabilityMatrix;
-// TestTranscriptBindingCoversTheCleartextHandshakeFields;
-// TestTranscriptBindingDowngrade;
-// TestRemoteLongTermPublicKeyIsVisibleAndPinnable;
-// TestCertificateIsCheckedBeforeTheTokenIsHandedOver;
+ TestTranscriptBindingInteroperabilityMatrix;
+ TestTranscriptBindingCoversTheCleartextHandshakeFields;
+ TestTranscriptBindingDowngrade;
+ TestRemoteLongTermPublicKeyIsVisibleAndPinnable;
+ TestCertificateIsCheckedBeforeTheTokenIsHandedOver;
 
  // Socket level error classification
-// TestSoftSendFailuresDoNotTerminateHost;
-// TestHardSendFailureTerminatesHost;
-// TestSoftReceiveFailuresDoNotTerminateHost;
-// TestOversizedDatagramsDoNotTerminateHost;
-// TestRealSocketReceiveErrorClassification;
-// TestRealSocketReportsItsBoundAddress;
+ TestSoftSendFailuresDoNotTerminateHost;
+ TestHardSendFailureTerminatesHost;
+ TestSoftReceiveFailuresDoNotTerminateHost;
+ TestOversizedDatagramsDoNotTerminateHost;
+ TestRealSocketReceiveErrorClassification;
+ TestRealSocketReportsItsBoundAddress;
 
  // Retransmission behaviour
-// TestSingleLostReliablePacketIsRecoveredQuickly;
-// TestReliableTransferUnderPacketLossIsTimely;
+ TestSingleLostReliablePacketIsRecoveredQuickly;
+ TestReliableTransferUnderPacketLossIsTimely;
 
  // Bandwidth limits
-// TestBandwidthLimitsReachCounterSide;
-// TestBandwidthLimitedHostKeepsSendingAfterTheFirstPeriod;
-// TestTightBandwidthLimitDelaysInsteadOfCountingLoss;
+ TestBandwidthLimitsReachCounterSide;
+ TestBandwidthLimitedHostKeepsSendingAfterTheFirstPeriod;
+ TestTightBandwidthLimitDelaysInsteadOfCountingLoss;
 
  // The bottleneck simulator itself, before anything is measured against it
-// TestBottleneckSimulatorQueuesDelaysAndDrops;
+ TestBottleneckSimulatorQueuesDelaysAndDrops;
 
  // What a congestion controller would have to work with
-// TestMeasurementsSeparateThePathFromTheQueue;
+ TestMeasurementsSeparateThePathFromTheQueue;
 
  // Enforcing a rate by spreading it out instead of by throwing datagrams away
-// TestPacingSpreadsTheRateAndDropsStaleUnreliableData;
+ TestPacingSpreadsTheRateAndDropsStaleUnreliableData;
 
  // And finally deciding the rate rather than being told it
  TestCongestionControlFindsTheCapacityOfFourBottlenecks;
 
  // Several peers on one host, sharing its uplink instead of racing for it
-// TestHostBandwidthIsDividedAmongItsPeers;
+ TestHostBandwidthIsDividedAmongItsPeers;
 
  // A LAN lobby which fills up while it is being advertised
-// TestDiscoveryMetadataCanBeChangedWhileRunning;
+ TestDiscoveryMetadataCanBeChangedWhileRunning;
 
  // MTU probing
-// TestMTUProbingTerminatesAndReportsAMTU;
-// TestMTUProbingStaysWithinTheDeclaredLimits;
-// TestShrinkingMTUDoesNotBlockTheOutgoingQueue;
+ TestMTUProbingTerminatesAndReportsAMTU;
+ TestMTUProbingStaysWithinTheDeclaredLimits;
+ TestShrinkingMTUDoesNotBlockTheOutgoingQueue;
 
  // The unreliable channels and their shared fragmentation
-// TestUnreliableChannelsTransportShortAndLongMessages;
+ TestUnreliableChannelsTransportShortAndLongMessages;
 
  // Message size constraints and keep alive independence
-// TestOversizedReliableMessageDoesNotStallTheChannel;
-// TestKeepAliveSurvivesOutstandingReliableBlockPackets;
+ TestOversizedReliableMessageDoesNotStallTheChannel;
+ TestKeepAliveSurvivesOutstandingReliableBlockPackets;
 
  // Container behaviour
-// TestQueueGrowthIsNotQuadratic;
+ TestQueueGrowthIsNotQuadratic;
 
  // Peer capacity and connection flooding protection
-// TestHostAcceptsExactlyItsConfiguredPeerCapacity;
-// TestConnectionAttemptHistoryStaysInsideItsRingBuffer;
-// TestRepeatedHandshakeRequestsDoNotEatTheFloodingBudget;
+ TestHostAcceptsExactlyItsConfiguredPeerCapacity;
+ TestConnectionAttemptHistoryStaysInsideItsRingBuffer;
+ TestRepeatedHandshakeRequestsDoNotEatTheFloodingBudget;
 
  // Address changes, disconnecting and exactly once delivery
-// TestPeerFollowsAnAuthenticatedAddressChange;
-// TestDelayedDisconnectAlwaysTerminates;
-// TestUndeliverableReliablePacketGivesUpOnThePeer;
-// TestReliableUnorderedChannelDeliversEachMessageOnce;
-// TestCompressedTransferStaysIntact;
+ TestPeerFollowsAnAuthenticatedAddressChange;
+ TestDelayedDisconnectAlwaysTerminates;
+ TestUndeliverableReliablePacketGivesUpOnThePeer;
+ TestReliableUnorderedChannelDeliversEachMessageOnce;
+ TestCompressedTransferStaysIntact;
 
  // The platform specific poll and select code paths
-// TestInterruptibleHostBlocksUntilItsTimeout;
-// TestInterruptibleHostWakesUpOnInterrupt;
-// TestSocketWaitDoesNotChurnKernelObjects;
+ TestInterruptibleHostBlocksUntilItsTimeout;
+ TestInterruptibleHostWakesUpOnInterrupt;
+ TestSocketWaitDoesNotChurnKernelObjects;
 
 end;
 

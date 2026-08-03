@@ -615,6 +615,17 @@ const RNL_PROTOCOL_VERSION_MAJOR=1;
       // wrong forever. Ten intervals of a second is long enough to survive a burst of queueing and
       // short enough to follow a genuine change within a few seconds
       RNL_PEER_MINIMUM_ROUND_TRIP_TIME_INTERVALS=10;
+      // The same ring the other way round, over the queueing delay instead of the round trip time.
+      // What it estimates is how much queue the path is willing to hold before it starts dropping -
+      // the one thing which separates a bottleneck with a deep buffer from one with a shallow one,
+      // and the thing no threshold could be chosen without: see ratelimitplan.md, where an absolute
+      // threshold, a baseline relative one and an own-share one each failed for one of the two.
+      //
+      // Maxima decay for the same reason minima do. A queue which stood once, two minutes ago,
+      // says nothing about the path now - and it says even less because the deepest queue this
+      // side ever sees is usually one it caused itself while finding the capacity.
+      RNL_PEER_QUEUE_DEPTH_INTERVALS=10;
+      RNL_PEER_QUEUE_DEPTH_INTERVAL=1000;
 
       RNL_PEER_MINIMUM_ROUND_TRIP_TIME_INTERVAL=1000;
 
@@ -667,19 +678,18 @@ const RNL_PROTOCOL_VERSION_MAJOR=1;
       // cut by a quarter per flight and ended on its floor at 13763 of 60000 bytes per second
       // available, on a path which was dropping almost nothing.
       RNL_PEER_CONGESTION_CONTROL_MINIMUM_LOSS_SAMPLE=8;
-      // How much of the standing queue may be this flow's own, in bytes, before the rate comes down
-      // - and how little before it may go up again. Bytes and not milliseconds, because the point
-      // of the whole exercise is that a delay is not attributable and a byte count is: by Little's
-      // law, what this flow has waiting in a queue is what it pushes through that queue times how
-      // long it waits in it. Everything else standing there belongs to somebody else and does not
-      // leave because this side sends less.
+      // How much of what the path lets a queue grow to this flow is willing to see standing before
+      // it comes down. A share and not a fixed number of milliseconds, because the number which is
+      // right for a bottleneck holding a hundred milliseconds is wrong for one holding fifteen
+      // hundred, and the two are told apart by nothing else - three thresholds failed on exactly
+      // that, see ratelimitplan.md.
       //
-      // Reading them as delays makes the self scaling visible: two packets' worth at 60000 bytes
-      // per second is 50 ms, and at 8000 bytes per second it is 375 ms. A fast path is held to a
-      // short queue, and a flow which has already been squeezed into a corner is not asked to
-      // squeeze further to fix a queue which is not its doing.
-      RNL_PEER_CONGESTION_CONTROL_HIGH_OWN_QUEUE_BYTES=3000;
-      RNL_PEER_CONGESTION_CONTROL_LOW_OWN_QUEUE_BYTES=1000;
+      // Bounded on both sides. Below, so that a path which has not been seen to queue at all is
+      // not given a threshold of zero; above, so that a pathologically deep buffer cannot talk
+      // this side into tolerating half a second of standing queue. Within those bounds the share
+      // reads 25 ms on a hundred millisecond buffer and 100 ms on a fifteen hundred millisecond
+      // one, which is the discrimination no constant could give.
+      RNL_PEER_CONGESTION_CONTROL_QUEUE_DEPTH_PERCENT=33;
 
       // The floor. Low enough to be out of the way of any real path, high enough that acknowledgements,
       // pings and a trickle of payload always fit through - a controller which can throttle a
@@ -6606,6 +6616,9 @@ type PRNLVersion=^TRNLVersion;
        // The sliding window of per interval minima and the baseline derived from it. fRoundTripTime
        // is smoothed and therefore climbs along with a filling queue, which makes it useless as the
        // reference the queueing delay is measured against - that is what this is for
+       fQueueDepthIntervals:array[0..RNL_PEER_QUEUE_DEPTH_INTERVALS-1] of TRNLInt64;
+       fQueueDepthIntervalIndex:TRNLSizeInt;
+       fQueueDepthIntervalTime:TRNLTime;
        fMinimumRoundTripTimeIntervals:array[0..RNL_PEER_MINIMUM_ROUND_TRIP_TIME_INTERVALS-1] of TRNLInt64;
        fMinimumRoundTripTimeIntervalIndex:TRNLSizeInt;
        fMinimumRoundTripTimeIntervalTime:TRNLTime;
@@ -6760,6 +6773,7 @@ type PRNLVersion=^TRNLVersion;
 
        // Feeds one measurement into the sliding window of minima and rederives the baseline
        procedure UpdateMinimumRoundTripTime(const aRoundTripTime:TRNLInt64);
+       procedure UpdateQueueDepth(const aQueueingDelay:TRNLInt64);
 
        // Closes the running flight once a round trip time has passed and publishes its counts
        // Feeds the current delivery rate into the sliding window of maxima
@@ -6777,6 +6791,7 @@ type PRNLVersion=^TRNLVersion;
 
        function GetMinimumRoundTripTime:TRNLUInt32;
        function GetQueueingDelay:TRNLUInt32;
+       function GetQueueDepth:TRNLUInt32;
        function GetDeliveryRate:TRNLUInt32;
        function GetMaximumDeliveryRate:TRNLUInt32;
 
@@ -6885,6 +6900,10 @@ type PRNLVersion=^TRNLVersion;
        // delay is a queue somewhere on the way rather than the path itself. The signal a delay based
        // controller works with
        property QueueingDelay:TRNLUInt32 read GetQueueingDelay;
+       // How deep this path lets a queue get, taken as the largest queueing delay seen in the last
+       // ten seconds. An estimate and nothing more: it can only ever have seen what somebody put
+       // there, so a quiet path reads as a shallow one until something fills it.
+       property QueueDepth:TRNLUInt32 read GetQueueDepth;
        // Acknowledged bytes per second. Not what was put on the wire but what arrived, which is the
        // difference between the capacity of the path and the rate this side is attempting
        property DeliveryRate:TRNLUInt32 read GetDeliveryRate;
@@ -40679,6 +40698,11 @@ begin
  end;
  fMinimumRoundTripTimeIntervalIndex:=0;
  fMinimumRoundTripTimeIntervalTime:=0;
+ for MinimumRoundTripTimeIntervalIndex:=0 to RNL_PEER_QUEUE_DEPTH_INTERVALS-1 do begin
+  fQueueDepthIntervals[MinimumRoundTripTimeIntervalIndex]:=0;
+ end;
+ fQueueDepthIntervalIndex:=0;
+ fQueueDepthIntervalTime:=0;
  fMinimumRoundTripTime:=RNL_PEER_ROUND_TRIP_TIME_UNKNOWN;
 
  fFlightStartTime:=0;
@@ -40950,6 +40974,53 @@ begin
  end;
 end;
 
+procedure TRNLPeer.UpdateQueueDepth(const aQueueingDelay:TRNLInt64);
+var Index,Steps:TRNLSizeInt;
+begin
+
+ if fQueueDepthIntervalTime.Value=0 then begin
+  fQueueDepthIntervalTime:=fHost.fTime;
+ end;
+
+ // Rotated exactly like the ring of minima next to it, and computed rather than counted for the
+ // same reason: a peer which was silent must not carry a stale maximum forward
+ Steps:=TRNLTime.RelativeDifference(fHost.fTime,fQueueDepthIntervalTime) div
+        RNL_PEER_QUEUE_DEPTH_INTERVAL;
+
+ if Steps>0 then begin
+  if Steps>=RNL_PEER_QUEUE_DEPTH_INTERVALS then begin
+   for Index:=0 to RNL_PEER_QUEUE_DEPTH_INTERVALS-1 do begin
+    fQueueDepthIntervals[Index]:=0;
+   end;
+   fQueueDepthIntervalIndex:=0;
+  end else begin
+   for Index:=1 to Steps do begin
+    fQueueDepthIntervalIndex:=(fQueueDepthIntervalIndex+1) mod RNL_PEER_QUEUE_DEPTH_INTERVALS;
+    fQueueDepthIntervals[fQueueDepthIntervalIndex]:=0;
+   end;
+  end;
+  inc(fQueueDepthIntervalTime.fValue,TRNLUInt64(Steps)*TRNLUInt64(RNL_PEER_QUEUE_DEPTH_INTERVAL));
+ end;
+
+ if aQueueingDelay>fQueueDepthIntervals[fQueueDepthIntervalIndex] then begin
+  fQueueDepthIntervals[fQueueDepthIntervalIndex]:=aQueueingDelay;
+ end;
+
+end;
+
+function TRNLPeer.GetQueueDepth:TRNLUInt32;
+var Index:TRNLSizeInt;
+    Maximum:TRNLInt64;
+begin
+ Maximum:=0;
+ for Index:=0 to RNL_PEER_QUEUE_DEPTH_INTERVALS-1 do begin
+  if fQueueDepthIntervals[Index]>Maximum then begin
+   Maximum:=fQueueDepthIntervals[Index];
+  end;
+ end;
+ result:=TRNLUInt32(Maximum);
+end;
+
 procedure TRNLPeer.UpdateMinimumRoundTripTime(const aRoundTripTime:TRNLInt64);
 var Index,Steps:TRNLSizeInt;
     Minimum:TRNLInt64;
@@ -41018,7 +41089,7 @@ end;
 
 procedure TRNLPeer.UpdateCongestionControl;
 var Rate,Ceiling,DeliveryCeiling,Delay,Capacity,QueuedBits:TRNLInt64;
-    LossPercent,OwnQueuedBytes:TRNLInt64;
+    LossPercent,HighDelay:TRNLInt64;
 begin
 
  if not fHost.fCongestionControl then begin
@@ -41039,6 +41110,14 @@ begin
 
  Delay:=GetQueueingDelay;
 
+ // What this path is willing to hold, and therefore what counts as too much standing in it
+ HighDelay:=(TRNLInt64(GetQueueDepth)*RNL_PEER_CONGESTION_CONTROL_QUEUE_DEPTH_PERCENT) div 100;
+ if HighDelay<RNL_PEER_CONGESTION_CONTROL_LOW_DELAY then begin
+  HighDelay:=RNL_PEER_CONGESTION_CONTROL_LOW_DELAY;
+ end else if HighDelay>(RNL_PEER_CONGESTION_CONTROL_HIGH_DELAY*2) then begin
+  HighDelay:=RNL_PEER_CONGESTION_CONTROL_HIGH_DELAY*2;
+ end;
+
  if fCountLastFlightResolvedPackets>=RNL_PEER_CONGESTION_CONTROL_MINIMUM_LOSS_SAMPLE then begin
   LossPercent:=(TRNLInt64(fCountLastFlightLostPackets)*100) div TRNLInt64(fCountLastFlightResolvedPackets);
  end else begin
@@ -41051,14 +41130,6 @@ begin
  end else begin
   DeliveryCeiling:=0;
  end;
-
- // This flow's own share of whatever is standing in the queue. The delay says a queue exists; it
- // does not say whose, and with a competitor holding half the capacity a standing queue exists no
- // matter what this side does. What sending less can actually remove is this much and no more.
- //
- // The same product the panic branch below already forms out of the capacity and the delay - used
- // there to decide how far to fall, and now also to decide whether to fall at all.
- OwnQueuedBytes:=(TRNLInt64(GetMaximumDeliveryRate)*TRNLInt64(Delay)) div 1000;
 
  // Delay first, because it is the earlier signal of the two: a queue which is filling up says so
  // before it overflows. A controller which waits for loss on a path with a deep buffer has already
@@ -41091,20 +41162,13 @@ begin
   if Rate<((Capacity*RNL_PEER_CONGESTION_CONTROL_DRAIN_FLOOR_PERCENT) div 100) then begin
    Rate:=(Capacity*RNL_PEER_CONGESTION_CONTROL_DRAIN_FLOOR_PERCENT) div 100;
   end;
- end else if OwnQueuedBytes>=RNL_PEER_CONGESTION_CONTROL_HIGH_OWN_QUEUE_BYTES then begin
+ end else if Delay>=HighDelay then begin
   dec(Rate,Rate div 8);
  end else if LossPercent>=RNL_PEER_CONGESTION_CONTROL_LOSS_PERCENT then begin
   // The second, independent reason. A path can be lossy without any queue in front of it, and a
   // purely delay based controller would never notice
   dec(Rate,Rate div 4);
- end else if (OwnQueuedBytes<=RNL_PEER_CONGESTION_CONTROL_LOW_OWN_QUEUE_BYTES) and
-             (Delay<=RNL_PEER_CONGESTION_CONTROL_HIGH_DELAY) then begin
-  // Asymmetric on purpose, and this is where the asymmetry earns its keep. Shrinking is answered
-  // with the own share, because that is all shrinking can remove. Growing is answered with the
-  // absolute delay as well, because a queue somebody else is holding is still a queue, and adding
-  // to it is how a flow which has been squeezed into a corner takes a shallow buffer apart -
-  // measured at 65 ms of standing queue and 222 dropped datagrams when the growth was allowed to
-  // go by the own share alone, against 16 ms and 138 before.
+ end else if Delay<=RNL_PEER_CONGESTION_CONTROL_LOW_DELAY then begin
   inc(Rate,Rate div 8);
   // Raising the rate beyond what the path delivers only lengthens the queue, so the ceiling bounds
   // the increase. It bounds ONLY the increase, on purpose: applied unconditionally it would drag the
@@ -41302,6 +41366,12 @@ procedure TRNLPeer.UpdateRoundTripTime(const aRoundTripTime:TRNLInt64);
 var ValueError:TRNLInt64;
 begin
  UpdateMinimumRoundTripTime(aRoundTripTime);
+ if (fMinimumRoundTripTime<>RNL_PEER_ROUND_TRIP_TIME_UNKNOWN) and
+    (aRoundTripTime>fMinimumRoundTripTime) then begin
+  UpdateQueueDepth(aRoundTripTime-fMinimumRoundTripTime);
+ end else begin
+  UpdateQueueDepth(0);
+ end;
  if fRoundTripTimeFirst then begin
   fRoundTripTimeFirst:=false;
   fRoundTripTime:=aRoundTripTime shl 32;
