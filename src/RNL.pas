@@ -5751,7 +5751,17 @@ type PRNLVersion=^TRNLVersion;
       public
        constructor Create(const aInstance:TRNLInstance); reintroduce; virtual;
        destructor Destroy; override;
-       function AddressSetHost(var aAddress:TRNLAddress;const aName:TRNLRawByteString):boolean; virtual;
+       // aFamily is which kind of address is wanted of a name that has both. Left at
+       // RNL_NO_ADDRESS_FAMILY the resolver picks, which on a dual stacked machine means v6 and is the
+       // right answer for simply reaching the thing.
+       //
+       // It is the wrong answer for asking a STUN server what this side looks like from outside, because
+       // there the point is the mapping, and a mapping belongs to one family: v6 usually has no NAT in
+       // front of it, so the v6 answer merely repeats an address already known, while the v4 one - the
+       // only one that matters for getting through - is never learned at all. Hence the ability to name
+       // the family, the same way every socket call here already does.
+       function AddressSetHost(var aAddress:TRNLAddress;const aName:TRNLRawByteString;
+                               const aFamily:TRNLAddressFamily=RNL_NO_ADDRESS_FAMILY):boolean; virtual;
        function AddressGetHost(const aAddress:TRNLAddress;out aName;const aNameLength:TRNLInt32;const aFlags:TRNLInt32=0):boolean; virtual;
        function AddressGetHostIP(const aAddress:TRNLAddress;out aName;const aNameLength:TRNLInt32):boolean; virtual;
        function AddressGetPrimaryInterfaceHostIP(var aAddress:TRNLAddress;const aFamily:TRNLAddressFamily;const aInterfaceHostAddressType:TRNLInterfaceHostAddressType=RNL_INTERFACE_HOST_ADDRESS_UNICAST):boolean; virtual;
@@ -5838,7 +5848,8 @@ type PRNLVersion=^TRNLVersion;
        constructor Create(const aInstance:TRNLInstance); override;
        destructor Destroy; override;
        property TotalCreatedSocketWaitEvents:TRNLUInt64 read fTotalCreatedSocketWaitEvents;
-       function AddressSetHost(var aAddress:TRNLAddress;const aName:TRNLRawByteString):boolean; override;
+       function AddressSetHost(var aAddress:TRNLAddress;const aName:TRNLRawByteString;
+                               const aFamily:TRNLAddressFamily=RNL_NO_ADDRESS_FAMILY):boolean; override;
        function AddressGetHost(const aAddress:TRNLAddress;out aName;const aNameLength:TRNLInt32;const aFlags:TRNLInt32=0):boolean; override;
        function AddressGetHostIP(const aAddress:TRNLAddress;out aName;const aNameLength:TRNLInt32):boolean; override;
        function AddressGetPrimaryInterfaceHostIP(var aAddress:TRNLAddress;const aFamily:TRNLAddressFamily;const aInterfaceHostAddressType:TRNLInterfaceHostAddressType=RNL_INTERFACE_HOST_ADDRESS_UNICAST):boolean; override;
@@ -5906,7 +5917,8 @@ type PRNLVersion=^TRNLVersion;
       public
        constructor Create(const aInstance:TRNLInstance); override;
        destructor Destroy; override;
-       function AddressSetHost(var aAddress:TRNLAddress;const aName:TRNLRawByteString):boolean; override;
+       function AddressSetHost(var aAddress:TRNLAddress;const aName:TRNLRawByteString;
+                               const aFamily:TRNLAddressFamily=RNL_NO_ADDRESS_FAMILY):boolean; override;
        function AddressGetHost(const aAddress:TRNLAddress;out aName;const aNameLength:TRNLInt32;const aFlags:TRNLInt32=0):boolean; override;
        function AddressGetHostIP(const aAddress:TRNLAddress;out aName;const aNameLength:TRNLInt32):boolean; override;
        function SocketCreate(const aType:TRNLSocketType;const aFamily:TRNLAddressFamily):TRNLSocket; override;
@@ -5981,7 +5993,8 @@ type PRNLVersion=^TRNLVersion;
       public
        constructor Create(const aInstance:TRNLInstance;const aNetwork:TRNLNetwork); reintroduce;
        destructor Destroy; override;
-       function AddressSetHost(var aAddress:TRNLAddress;const aName:TRNLRawByteString):boolean; override;
+       function AddressSetHost(var aAddress:TRNLAddress;const aName:TRNLRawByteString;
+                               const aFamily:TRNLAddressFamily=RNL_NO_ADDRESS_FAMILY):boolean; override;
        function AddressGetHost(const aAddress:TRNLAddress;out aName;const aNameLength:TRNLInt32;const aFlags:TRNLInt32=0):boolean; override;
        function AddressGetHostIP(const aAddress:TRNLAddress;out aName;const aNameLength:TRNLInt32):boolean; override;
        function SocketCreate(const aType:TRNLSocketType;const aFamily:TRNLAddressFamily):TRNLSocket; override;
@@ -8248,7 +8261,8 @@ type PRNLVersion=^TRNLVersion;
        // The allocation belonging to that socket, or nil if there is none. Read only: everything on it
        // that changes state is private.
        function AllocationOf(const aSocket:TRNLSocket):TRNLTURNAllocation;
-       function AddressSetHost(var aAddress:TRNLAddress;const aName:TRNLRawByteString):boolean; override;
+       function AddressSetHost(var aAddress:TRNLAddress;const aName:TRNLRawByteString;
+                               const aFamily:TRNLAddressFamily=RNL_NO_ADDRESS_FAMILY):boolean; override;
        function AddressGetHost(const aAddress:TRNLAddress;out aName;const aNameLength:TRNLInt32;const aFlags:TRNLInt32=0):boolean; override;
        function AddressGetHostIP(const aAddress:TRNLAddress;out aName;const aNameLength:TRNLInt32):boolean; override;
        function AddressGetPrimaryInterfaceHostIP(var aAddress:TRNLAddress;const aFamily:TRNLAddressFamily;const aInterfaceHostAddressType:TRNLInterfaceHostAddressType=RNL_INTERFACE_HOST_ADDRESS_UNICAST):boolean; override;
@@ -31920,7 +31934,8 @@ begin
  inherited Destroy;
 end;
 
-function TRNLNetwork.AddressSetHost(var aAddress:TRNLAddress;const aName:TRNLRawByteString):boolean;
+function TRNLNetwork.AddressSetHost(var aAddress:TRNLAddress;const aName:TRNLRawByteString;
+                                    const aFamily:TRNLAddressFamily):boolean;
 begin
  result:=false;
 end;
@@ -32687,7 +32702,8 @@ begin
 end;
 {$ifend}
 
-function TRNLRealNetwork.AddressSetHost(var aAddress:TRNLAddress;const aName:TRNLRawByteString):boolean;
+function TRNLRealNetwork.AddressSetHost(var aAddress:TRNLAddress;const aName:TRNLRawByteString;
+                                        const aFamily:TRNLAddressFamily):boolean;
 {$if defined(Windows)}
 var TempPort:TRNLUInt16;
     Hints:TAddrInfo;
@@ -32696,7 +32712,10 @@ begin
  TempPort:=aAddress.Port;
  FillChar(Hints,SizeOf(TAddrInfo),AnsiChar(#0));
  hints.ai_flags:=AI_ADDRCONFIG;
- hints.ai_family:=AF_UNSPEC;
+ // Which comes out as AF_UNSPEC for RNL_NO_ADDRESS_FAMILY, so a caller that names no family gets what
+ // it always got. Asking for one this machine has no address in is a resolver failure and returns
+ // false, which is the honest answer: there is nothing there to reach it by.
+ hints.ai_family:=aFamily.GetAddressFamily;
  if getaddrinfo(PAnsiChar(aName),nil,@hints,@r)<>0 then begin
   result:=false;
   exit;
@@ -32727,7 +32746,9 @@ begin
  TempPort:=aAddress.Port;
  FillChar(Hints,SizeOf(TAddrInfo),#0);
  hints.ai_flags:=AI_ADDRCONFIG;
- hints.ai_family:=AF_UNSPEC;
+ // See the branch above: AF_UNSPEC when no family was named, and a resolver failure when one was named
+ // that this machine cannot speak.
+ hints.ai_family:=aFamily.GetAddressFamily;
  if getaddrinfo({$ifdef NEXTGEN}MarshaledAString{$else}PAnsiChar{$endif}(aName),nil,{$ifdef fpc}@hints,@r{$else}hints,r{$endif})<>0 then begin
   result:=false;
   exit;
@@ -34500,10 +34521,16 @@ begin
  result:=nil;
 end;
 
-function TRNLVirtualNetwork.AddressSetHost(var aAddress:TRNLAddress;const aName:TRNLRawByteString):boolean;
+function TRNLVirtualNetwork.AddressSetHost(var aAddress:TRNLAddress;const aName:TRNLRawByteString;
+                                           const aFamily:TRNLAddressFamily):boolean;
 begin
  aAddress:=TRNLAddress.CreateFromString(aName);
  result:=aAddress.ScopeID<>TRNLUInt32($deadc0d3);
+ // A name here is one address and no resolver stands behind it, so a family that was asked for and is
+ // not the one that name is can only be answered with no.
+ if result and (aFamily<>RNL_NO_ADDRESS_FAMILY) and (aAddress.GetAddressFamily<>aFamily) then begin
+  result:=false;
+ end;
 end;
 
 function TRNLVirtualNetwork.AddressGetHost(const aAddress:TRNLAddress;out aName;const aNameLength:TRNLInt32;const aFlags:TRNLInt32=0):boolean;
@@ -36369,9 +36396,10 @@ begin
 
 end;
 
-function TRNLTURNNetwork.AddressSetHost(var aAddress:TRNLAddress;const aName:TRNLRawByteString):boolean;
+function TRNLTURNNetwork.AddressSetHost(var aAddress:TRNLAddress;const aName:TRNLRawByteString;
+                                        const aFamily:TRNLAddressFamily):boolean;
 begin
- result:=fNetwork.AddressSetHost(aAddress,aName);
+ result:=fNetwork.AddressSetHost(aAddress,aName,aFamily);
 end;
 
 function TRNLTURNNetwork.AddressGetHost(const aAddress:TRNLAddress;out aName;const aNameLength:TRNLInt32;const aFlags:TRNLInt32=0):boolean;
@@ -36823,10 +36851,11 @@ begin
 
 end;
 
-function TRNLNetworkInterferenceSimulator.AddressSetHost(var aAddress:TRNLAddress;const aName:TRNLRawByteString):boolean;
+function TRNLNetworkInterferenceSimulator.AddressSetHost(var aAddress:TRNLAddress;const aName:TRNLRawByteString;
+                                                         const aFamily:TRNLAddressFamily):boolean;
 begin
  Update;
- result:=fNetwork.AddressSetHost(aAddress,aName);
+ result:=fNetwork.AddressSetHost(aAddress,aName,aFamily);
 end;
 
 function TRNLNetworkInterferenceSimulator.AddressGetHost(const aAddress:TRNLAddress;out aName;const aNameLength:TRNLInt32;const aFlags:TRNLInt32=0):boolean;
