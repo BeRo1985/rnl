@@ -180,7 +180,8 @@ type TRNLTestNetworkBottleneck=class(TRNLNetwork)
        function TotalDroppedDatagrams:TRNLUInt64;
        function TotalDeliveredDatagrams:TRNLUInt64;
 
-       function AddressSetHost(var aAddress:TRNLAddress;const aName:TRNLRawByteString):boolean; override;
+       function AddressSetHost(var aAddress:TRNLAddress;const aName:TRNLRawByteString;
+                               const aFamily:TRNLAddressFamily=RNL_NO_ADDRESS_FAMILY):boolean; override;
        function AddressGetHost(const aAddress:TRNLAddress;out aName;const aNameLength:TRNLInt32;const aFlags:TRNLInt32=0):boolean; override;
        function AddressGetHostIP(const aAddress:TRNLAddress;out aName;const aNameLength:TRNLInt32):boolean; override;
        function SocketCreate(const aType:TRNLSocketType;const aFamily:TRNLAddressFamily):TRNLSocket; override;
@@ -698,9 +699,10 @@ begin
  Update;
 end;
 
-function TRNLTestNetworkBottleneck.AddressSetHost(var aAddress:TRNLAddress;const aName:TRNLRawByteString):boolean;
+function TRNLTestNetworkBottleneck.AddressSetHost(var aAddress:TRNLAddress;const aName:TRNLRawByteString;
+                                                  const aFamily:TRNLAddressFamily):boolean;
 begin
- result:=fNetwork.AddressSetHost(aAddress,aName);
+ result:=fNetwork.AddressSetHost(aAddress,aName,aFamily);
 end;
 
 function TRNLTestNetworkBottleneck.AddressGetHost(const aAddress:TRNLAddress;out aName;const aNameLength:TRNLInt32;const aFlags:TRNLInt32=0):boolean;

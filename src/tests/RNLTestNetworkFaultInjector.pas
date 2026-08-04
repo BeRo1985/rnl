@@ -185,7 +185,8 @@ type TRNLNetworkFaultInjector=class(TRNLNetwork)
                                                const aValueLength:TRNLSizeUInt);
        procedure StopRewritingOutgoingHandshakeFields;
 
-       function AddressSetHost(var aAddress:TRNLAddress;const aName:TRNLRawByteString):boolean; override;
+       function AddressSetHost(var aAddress:TRNLAddress;const aName:TRNLRawByteString;
+                               const aFamily:TRNLAddressFamily=RNL_NO_ADDRESS_FAMILY):boolean; override;
        function AddressGetHost(const aAddress:TRNLAddress;out aName;const aNameLength:TRNLInt32;const aFlags:TRNLInt32=0):boolean; override;
        function AddressGetHostIP(const aAddress:TRNLAddress;out aName;const aNameLength:TRNLInt32):boolean; override;
        function SocketCreate(const aType:TRNLSocketType;const aFamily:TRNLAddressFamily):TRNLSocket; override;
@@ -474,9 +475,10 @@ begin
  end;
 end;
 
-function TRNLNetworkFaultInjector.AddressSetHost(var aAddress:TRNLAddress;const aName:TRNLRawByteString):boolean;
+function TRNLNetworkFaultInjector.AddressSetHost(var aAddress:TRNLAddress;const aName:TRNLRawByteString;
+                                                 const aFamily:TRNLAddressFamily):boolean;
 begin
- result:=fNetwork.AddressSetHost(aAddress,aName);
+ result:=fNetwork.AddressSetHost(aAddress,aName,aFamily);
 end;
 
 function TRNLNetworkFaultInjector.AddressGetHost(const aAddress:TRNLAddress;out aName;const aNameLength:TRNLInt32;const aFlags:TRNLInt32=0):boolean;
