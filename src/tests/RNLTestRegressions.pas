@@ -9621,6 +9621,7 @@ const NAMES:array[TRNLCryptographySelfTestGroup] of TRNLRawByteString=
         'the cipher vectors pass',
         'the hash and mac vectors pass',
         'the key derivation vectors pass',
+        'the encoding and credential vectors pass',
         'the record layer vectors pass'
        );
       // Every group has to carry something. A group which quietly stopped running anything would
