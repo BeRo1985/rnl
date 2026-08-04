@@ -607,6 +607,75 @@ begin
 
 end;
 
+// Resolving a name has to be able to say which kind of address it wants back.
+//
+// Left to itself the resolver hands out v6 first on a machine that has both, which is the right answer
+// for reaching something and the wrong one for asking a STUN server what this side looks like from
+// outside: a mapping belongs to one family, v6 is usually not translated at all, and so the v4 mapping -
+// the only one that gets a peer through a NAT - was never learned. Every socket call here has taken a
+// family since the beginning; this one did not, and that was the whole gap.
+//
+// Numeric addresses throughout, so nothing here depends on a resolver, a hosts file or a network.
+procedure TestAddressResolutionHonoursTheAskedFamily;
+var Instance:TRNLInstance;
+    Network:TRNLRealNetwork;
+    Address:TRNLAddress;
+    HasIPV6:boolean;
+begin
+
+ TestBegin('resolving an address honours the family it was asked for');
+ try
+
+  Instance:=TRNLInstance.Create;
+  try
+   Network:=TRNLRealNetwork.Create(Instance);
+   try
+
+    // Asking for nothing in particular is what every caller before this did, and it has to keep
+    // working exactly as it did
+    FillChar(Address,SizeOf(TRNLAddress),#0);
+    Check(Network.AddressSetHost(Address,'127.0.0.1'),
+          'a name with no family asked for resolves, the way it always has');
+
+    FillChar(Address,SizeOf(TRNLAddress),#0);
+    if Check(Network.AddressSetHost(Address,'127.0.0.1',RNL_IPV4),
+             'and asking for the family it actually is resolves too') then begin
+     CheckEqualsInt64(Address.GetAddressFamily,RNL_IPV4,
+                      'and what comes back has to be in that family');
+    end;
+
+    // The half that matters. Answered from the wrong family this would look like a working STUN
+    // server reporting an address nothing can be reached at.
+    FillChar(Address,SizeOf(TRNLAddress),#0);
+    Check(not Network.AddressSetHost(Address,'127.0.0.1',RNL_IPV6),
+          'and a v4 address asked for as v6 has to fail rather than come back as something else');
+
+    // Only if this machine has v6 at all, since AI_ADDRCONFIG rightly refuses a family there is no
+    // address in and a test must not fail over how the machine under it is connected
+    FillChar(Address,SizeOf(TRNLAddress),#0);
+    HasIPV6:=Network.AddressSetHost(Address,'::1',RNL_IPV6);
+    Info('this machine resolves v6: '+TRNLRawByteString(BoolToStr(HasIPV6,true)));
+    if HasIPV6 then begin
+     CheckEqualsInt64(Address.GetAddressFamily,RNL_IPV6,
+                      'and a v6 address asked for as v6 comes back in that family');
+     FillChar(Address,SizeOf(TRNLAddress),#0);
+     Check(not Network.AddressSetHost(Address,'::1',RNL_IPV4),
+           'and the same address asked for as v4 has to fail, the other way round');
+    end;
+
+   finally
+    FreeAndNil(Network);
+   end;
+  finally
+   FreeAndNil(Instance);
+  end;
+
+ finally
+  TestEnd;
+ end;
+
+end;
+
 procedure TestRealSocketReceiveErrorClassification;
 const CLOSED_PORT=19387;
       COUNT_ATTEMPTS=200;
@@ -11913,6 +11982,7 @@ begin
  TestOversizedDatagramsDoNotTerminateHost;
  TestRealSocketReceiveErrorClassification;
  TestRealSocketReportsItsBoundAddress;
+ TestAddressResolutionHonoursTheAskedFamily;
 
  // Retransmission behaviour
  TestSingleLostReliablePacketIsRecoveredQuickly;
