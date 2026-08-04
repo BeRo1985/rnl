@@ -511,6 +511,8 @@ type PPRNLInt8=^PRNLInt8;
      PRNLString=^TRNLString;
      TRNLString=String;
 
+     TRNLUInt8DynamicArray=array of TRNLUInt8;
+
      PRNLInt8Array=^TRNLInt8Array;
      TRNLInt8Array=array[0..65535] of TRNLInt8;
 
@@ -1560,14 +1562,17 @@ type PRNLVersion=^TRNLVersion;
        class procedure SelfTest; static;
      end;
 
-// SHA-1 and MD5 exist here for one reason: a TURN server which speaks RFC 5389 rather than RFC 8489
-// asks for MESSAGE-INTEGRITY over HMAC-SHA-1, and its long term credential key is
-// MD5(username:realm:password). Neither is used for anything RNL itself protects, and neither is
-// offered for that purpose. Switching this off drops both, and with them the ability to talk to a
-// relay that only knows the older revision.
-{$define RNL_TURN_RFC5389_COMPAT}
-
-{$if defined(RNL_TURN_RFC5389_COMPAT)}
+// SHA-1 and MD5 exist here for TURN and for nothing else. Neither is used for anything RNL itself
+// protects, and neither is offered for that purpose.
+//
+// They were behind a switch once, on the reading that they belong to RFC 5389 and that RFC 8489
+// supersedes it. That reading was wrong twice over. MESSAGE-INTEGRITY over HMAC-SHA-1 is still in
+// RFC 8489 - MESSAGE-INTEGRITY-SHA256 was added beside it, not in place of it, and which of the two
+// a server wants is negotiated through PASSWORD-ALGORITHM - so a build without SHA-1 could only
+// speak to a relay that offers the SHA-256 one, which almost none do. And the REST credentials of
+// draft-uberti-behave-turn-rest are HMAC-SHA-1 whatever revision the server speaks, so they never
+// belonged to that question at all. What is left of the older revision is MD5, and one primitive is
+// not worth a second way through this file.
      PRNLSHA1State=^TRNLSHA1State;
      TRNLSHA1State=array[0..4] of TRNLUInt32;
 
@@ -1719,7 +1724,6 @@ type PRNLVersion=^TRNLVersion;
        class function Descriptor:TRNLHashDescriptor; static;
        class procedure SelfTest; static;
      end;
-{$ifend}
 
      // One padded key block, sized for the largest block any of the hashes has
      PRNLHMACKeyBlock=^TRNLHMACKeyBlock;
@@ -1791,7 +1795,6 @@ type PRNLVersion=^TRNLVersion;
        class procedure SelfTest; static;
      end;
 
-{$if defined(RNL_TURN_RFC5389_COMPAT)}
      PRNLHMACSHA1=^TRNLHMACSHA1;
      TRNLHMACSHA1=record
       public
@@ -1800,7 +1803,6 @@ type PRNLVersion=^TRNLVersion;
                                const aMessage;const aMessageSize:TRNLSizeUInt); static;
        class procedure SelfTest; static;
      end;
-{$ifend}
 
      // RFC 5869, the extract-then-expand key derivation function, over any hash TRNLHMAC will take.
      // Extract condenses whatever entropy the input keying material holds into one pseudorandom key
@@ -5013,7 +5015,10 @@ type PRNLVersion=^TRNLVersion;
 
      TRNLInstance=class;
 
-     TRNLRawByteDataArray=array of TRNLUInt8;
+     // The same shape under the name the rest of the file reaches for when the bytes are just bytes
+     // rather than the payload of something. An alias and not a second declaration of its own, so
+     // that the two stay assignable to each other.
+     TRNLRawByteDataArray=TRNLUInt8DynamicArray;
 
      PRNLMessageFlag=^TRNLMessageFlag;
      TRNLMessageFlag=
@@ -5413,6 +5418,23 @@ type PRNLVersion=^TRNLVersion;
 
      TRNLHostPeerList=TRNLObjectList<TRNLPeer>;
 
+     // RFC 4648 section 4, the alphabet with plus and slash and with padding. Not cryptography, and
+     // here for the one thing in this file that needs it: the REST credentials of a TURN server carry
+     // their MAC this way, because they travel as a user name and a password rather than as bytes.
+     PRNLBase64=^TRNLBase64;
+     TRNLBase64=record
+      public
+       // Three bytes become four characters, and a last group of one or two is padded out with '='
+       // so that the length of the result always says how many bytes went in.
+       class function Encode(const aData;const aDataSize:TRNLSizeUInt):TRNLRawByteString; static;
+       // False, and nothing written, for anything that is not what Encode would have produced: a
+       // character outside the alphabet, a length which is not a multiple of four, padding anywhere
+       // but at the end. Line breaks and spaces are the one exception and are skipped, because text
+       // that has been through a file or a header is usually wrapped.
+       class function Decode(const aText:TRNLRawByteString;out aData:TRNLUInt8DynamicArray):boolean; static;
+       class procedure SelfTest; static;
+     end;
+
      // Called once per cryptographic self test vector, with its name and its verdict. It exists so
      // that a test harness can count each vector as one of its own checks; without it the results
      // only ever reach the console, where a human has to notice them.
@@ -5431,6 +5453,10 @@ type PRNLVersion=^TRNLVersion;
        RNL_CRYPTOGRAPHY_SELF_TEST_GROUP_CIPHERS,
        RNL_CRYPTOGRAPHY_SELF_TEST_GROUP_HASHES,
        RNL_CRYPTOGRAPHY_SELF_TEST_GROUP_KEY_DERIVATION,
+       // Neither of the two in here is cryptography of its own - a text encoding and a credential
+       // recipe made of the pieces above - but both are checked the same way and by the same
+       // harness, so they are one more group rather than a second mechanism.
+       RNL_CRYPTOGRAPHY_SELF_TEST_GROUP_ENCODINGS_AND_CREDENTIALS,
        RNL_CRYPTOGRAPHY_SELF_TEST_GROUP_RECORD_LAYERS
       );
 
@@ -7840,6 +7866,28 @@ type PRNLVersion=^TRNLVersion;
        // choice of algorithm, changes.
        procedure DeriveKey;
        function HasRealm:boolean;
+       // The time limited credentials of draft-uberti-behave-turn-rest, which is how a relay is
+       // usually run when it serves people who have no account on it: the operator configures one
+       // shared secret, and everybody who is entitled to use the relay is handed a name and a
+       // password derived from it. The name IS the moment the pair stops being valid, in seconds
+       // since the epoch; the password is the Base64 of HMAC-SHA-1 over that name under the secret.
+       // The relay checks the time, recomputes the MAC and lets the caller in, without keeping
+       // anything between one session and the next.
+       //
+       // aValidSeconds is how long from now the pair should last, and is raised to a minute if less
+       // is asked for: a credential which expires while the request carrying it is still in flight
+       // is no credential at all.
+       //
+       // aNowSecondsSinceUnixEpoch is the clock, supplied by the caller the way every other date in
+       // this file is - see TRNLX509.VerifyChain. Zero, the default, means "read the system clock
+       // here", which is the convenient thing on a desktop and the wrong thing on a target which
+       // has no clock of its own.
+       class procedure MakeFromSecret(const aSecret:TRNLRawByteString;
+                                      const aValidSeconds:TRNLSizeInt;
+                                      out aUser:TRNLRawByteString;
+                                      out aPassword:TRNLRawByteString;
+                                      const aNowSecondsSinceUnixEpoch:TRNLInt64=0); static;
+       class procedure SelfTest; static;
      end;
 
      PRNLSTUNResult=^TRNLSTUNResult;
@@ -12226,7 +12274,6 @@ begin
 end;
 
 
-{$if defined(RNL_TURN_RFC5389_COMPAT)}
 // Three plain procedures rather than methods, because a procedural variable cannot point at a
 // method of a record. They do nothing but cast the opaque context back to what it is.
 procedure RNLSHA1Initialize(var aContext);
@@ -12244,9 +12291,6 @@ begin
  PRNLSHA1Context(TRNLPointer(@aContext))^.Finalize(aHash);
 end;
 
-{$ifend}
-
-{$if defined(RNL_TURN_RFC5389_COMPAT)}
 // Three plain procedures rather than methods, because a procedural variable cannot point at a
 // method of a record. They do nothing but cast the opaque context back to what it is.
 procedure RNLMD5Initialize(var aContext);
@@ -12263,8 +12307,6 @@ procedure RNLMD5Finalize(var aContext;out aHash);
 begin
  PRNLMD5Context(TRNLPointer(@aContext))^.Finalize(aHash);
 end;
-
-{$ifend}
 
 // Three plain procedures rather than methods, because a procedural variable cannot point at a
 // method of a record. They do nothing but cast the opaque context back to what it is.
@@ -12564,7 +12606,6 @@ begin
  Context.Finalize(aHash);
 end;
 
-{$if defined(RNL_TURN_RFC5389_COMPAT)}
 class function TRNLSHA1Context.RotateLeft32(const aValue:TRNLUInt32;const aBits:TRNLUInt32):TRNLUInt32;
 begin
 {$ifdef fpc}
@@ -12851,7 +12892,6 @@ begin
  Context.Update(aMessage,aMessageSize);
  Context.Finalize(aHash);
 end;
-{$ifend}
 
 class procedure TRNLHMAC.XorKeyBlock(var aKeyBlock:TRNLHMACKeyBlock;
                                      const aBlockSize:TRNLSizeInt;
@@ -12972,14 +13012,12 @@ begin
  TRNLHMAC.Process(TRNLSHA512.Descriptor,aMAC,aKey,aKeySize,aMessage,aMessageSize);
 end;
 
-{$if defined(RNL_TURN_RFC5389_COMPAT)}
 class procedure TRNLHMACSHA1.Process(out aMAC;
                                      const aKey;const aKeySize:TRNLSizeUInt;
                                      const aMessage;const aMessageSize:TRNLSizeUInt);
 begin
  TRNLHMAC.Process(TRNLSHA1.Descriptor,aMAC,aKey,aKeySize,aMessage,aMessageSize);
 end;
-{$ifend}
 
 class function TRNLHKDF.Extract(const aDescriptor:TRNLHashDescriptor;
                                 out aPseudoRandomKey;
@@ -13298,7 +13336,6 @@ begin
 
 end;
 
-{$if defined(RNL_TURN_RFC5389_COMPAT)}
 class procedure TRNLSHA1.SelfTest;
 const Expected0:TRNLSHA1Hash=
        (
@@ -13447,7 +13484,6 @@ begin
 
 end;
 
-{$ifend}
 class procedure TRNLHMACSHA256.SelfTest;
 const Expected0:TRNLSHA256Hash=
        (
@@ -13564,7 +13600,6 @@ begin
 
 end;
 
-{$if defined(RNL_TURN_RFC5389_COMPAT)}
 class procedure TRNLHMACSHA1.SelfTest;
 const Expected0:TRNLSHA1Hash=
        (
@@ -13648,8 +13683,6 @@ begin
  end;
 
 end;
-
-{$ifend}
 
 // The first vector of the NIST CAVP set for the ECC CDH primitive over P-256, which is the one
 // document that says what this curve is supposed to do rather than what it is. Both halves of it are
@@ -31436,11 +31469,9 @@ begin
     TRNLSHA256.SelfTest;
     TRNLHMACSHA256.SelfTest;
     TRNLHMACSHA512.SelfTest;
-{$if defined(RNL_TURN_RFC5389_COMPAT)}
     TRNLSHA1.SelfTest;
     TRNLHMACSHA1.SelfTest;
     TRNLMD5.SelfTest;
-{$ifend}
     TRNLBLAKE2B.SelfTest;
    end;
    RNL_CRYPTOGRAPHY_SELF_TEST_GROUP_KEY_DERIVATION:begin
@@ -31448,6 +31479,10 @@ begin
     TRNLTLS13KeySchedule.SelfTest;
     TRNLDTLS13KeySchedule.SelfTest;
     TRNLTLS12PRF.SelfTest;
+   end;
+   RNL_CRYPTOGRAPHY_SELF_TEST_GROUP_ENCODINGS_AND_CREDENTIALS:begin
+    TRNLBase64.SelfTest;
+    TRNLTURNCredentials.SelfTest;
    end;
    else {RNL_CRYPTOGRAPHY_SELF_TEST_GROUP_RECORD_LAYERS:}begin
     TRNLDTLSRecord.SelfTest;
@@ -47544,11 +47579,7 @@ begin
  result:=false;
 
  if aAttributeType=RNL_STUN_ATTRIBUTE_MESSAGE_INTEGRITY then begin
-{$if defined(RNL_TURN_RFC5389_COMPAT)}
   MACSize:=SizeOf(TRNLSHA1Hash);
-{$else}
-  exit;
-{$ifend}
  end else begin
   MACSize:=SizeOf(TRNLSHA256Hash);
  end;
@@ -47564,15 +47595,11 @@ begin
  try
   TRNLMemoryAccess.StoreBigEndianUInt16(fData[2],
                                         TRNLUInt16(((aOverSize-HeaderSize)+AttributeHeaderSize)+MACSize));
-{$if defined(RNL_TURN_RFC5389_COMPAT)}
   if aAttributeType=RNL_STUN_ATTRIBUTE_MESSAGE_INTEGRITY then begin
    TRNLHMACSHA1.Process(aMAC,aKey,aKeySize,fData[0],aOverSize);
   end else begin
    TRNLHMACSHA256.Process(aMAC,aKey,aKeySize,fData[0],aOverSize);
   end;
-{$else}
-  TRNLHMACSHA256.Process(aMAC,aKey,aKeySize,fData[0],aOverSize);
-{$ifend}
   result:=true;
  finally
   fData[2]:=Saved[0];
@@ -47581,7 +47608,6 @@ begin
 
 end;
 
-{$if defined(RNL_TURN_RFC5389_COMPAT)}
 procedure TRNLSTUNMessage.AddMessageIntegrity(const aKey;const aKeySize:TRNLSizeInt);
 var MAC:TRNLSHA1Hash;
 begin
@@ -47591,13 +47617,6 @@ begin
  end;
  AddAttribute(RNL_STUN_ATTRIBUTE_MESSAGE_INTEGRITY,MAC,SizeOf(TRNLSHA1Hash));
 end;
-{$else}
-procedure TRNLSTUNMessage.AddMessageIntegrity(const aKey;const aKeySize:TRNLSizeInt);
-begin
- // Without the RFC 5389 compatibility there is no SHA-1 to compute it with
- fValid:=false;
-end;
-{$ifend}
 
 procedure TRNLSTUNMessage.AddMessageIntegritySHA256(const aKey;const aKeySize:TRNLSizeInt);
 var MAC:TRNLSHA256Hash;
@@ -47681,7 +47700,6 @@ begin
 end;
 
 function TRNLSTUNMessage.VerifyMessageIntegrity(const aKey;const aKeySize:TRNLSizeInt):boolean;
-{$if defined(RNL_TURN_RFC5389_COMPAT)}
 var ValuePosition,ValueSize:TRNLSizeInt;
     Expected:TRNLSHA1Hash;
 begin
@@ -47699,11 +47717,6 @@ begin
  end;
  result:=TRNLMemory.SecureIsEqual(fData[ValuePosition],Expected[0],SizeOf(TRNLSHA1Hash));
 end;
-{$else}
-begin
- result:=false;
-end;
-{$ifend}
 
 function TRNLSTUNMessage.VerifyMessageIntegritySHA256(const aKey;const aKeySize:TRNLSizeInt):boolean;
 var ValuePosition,ValueSize:TRNLSizeInt;
@@ -47884,6 +47897,316 @@ begin
  result:=TRNLMemory.SecureIsEqual(fTransactionID[0],aTransactionID[0],TransactionIDSize);
 end;
 
+class function TRNLBase64.Encode(const aData;const aDataSize:TRNLSizeUInt):TRNLRawByteString;
+const Alphabet:array[0..63] of TRNLRawByteChar=('A','B','C','D','E','F','G','H','I','J','K','L','M','N','O','P',
+                                                'Q','R','S','T','U','V','W','X','Y','Z','a','b','c','d','e','f',
+                                                'g','h','i','j','k','l','m','n','o','p','q','r','s','t','u','v',
+                                                'w','x','y','z','0','1','2','3','4','5','6','7','8','9','+','/');
+var Bytes:PRNLUInt8Array;
+    Index,Position:TRNLSizeUInt;
+    Triplet:TRNLUInt32;
+begin
+
+ result:='';
+ if aDataSize=0 then begin
+  exit;
+ end;
+
+ Bytes:=PRNLUInt8Array(TRNLPointer(@aData));
+
+ // Four characters per group of three bytes, and the last group is padded rather than shortened, so
+ // the length is known before the first one is written.
+ SetLength(result,((aDataSize+2) div 3)*4);
+ Position:=1;
+
+ Index:=0;
+ while Index<aDataSize do begin
+
+  // The three bytes as one number, most significant first, with the missing ones of a short last
+  // group left at zero. Their bits do not reach the characters which are replaced by padding.
+  Triplet:=TRNLUInt32(Bytes^[Index]) shl 16;
+  if (Index+1)<aDataSize then begin
+   Triplet:=Triplet or (TRNLUInt32(Bytes^[Index+1]) shl 8);
+  end;
+  if (Index+2)<aDataSize then begin
+   Triplet:=Triplet or TRNLUInt32(Bytes^[Index+2]);
+  end;
+
+  result[Position]:=Alphabet[(Triplet shr 18) and 63];
+  result[Position+1]:=Alphabet[(Triplet shr 12) and 63];
+  if (Index+1)<aDataSize then begin
+   result[Position+2]:=Alphabet[(Triplet shr 6) and 63];
+  end else begin
+   result[Position+2]:='=';
+  end;
+  if (Index+2)<aDataSize then begin
+   result[Position+3]:=Alphabet[Triplet and 63];
+  end else begin
+   result[Position+3]:='=';
+  end;
+
+  inc(Position,4);
+  inc(Index,3);
+
+ end;
+
+end;
+
+class function TRNLBase64.Decode(const aText:TRNLRawByteString;out aData:TRNLUInt8DynamicArray):boolean;
+var Index,Count:TRNLSizeInt;
+    Value:TRNLInt32;
+    Group:TRNLUInt32;
+    GroupLength,PadCount:TRNLSizeInt;
+    Character:TRNLRawByteChar;
+begin
+
+ result:=false;
+ aData:=nil;
+
+ // At most three bytes per four characters, and fewer when the text is wrapped or padded. Grown once
+ // to the upper bound and cut to the real length at the end, rather than reallocated per group.
+ SetLength(aData,((length(aText)+3) div 4)*3);
+ Count:=0;
+
+ Group:=0;
+ GroupLength:=0;
+ PadCount:=0;
+
+ for Index:=1 to length(aText) do begin
+
+  Character:=aText[Index];
+
+  // Wrapped text is still the same text. Everything else outside the alphabet is not.
+  if Character in [#9,#10,#13,#32] then begin
+   continue;
+  end;
+
+  if Character='=' then begin
+   // Padding closes the last group and nothing may follow it but more padding. Two is the most there
+   // can ever be, since three would mean a group carrying no bytes at all.
+   inc(PadCount);
+   if PadCount>2 then begin
+    aData:=nil;
+    exit;
+   end;
+   Group:=Group shl 6;
+   inc(GroupLength);
+  end else begin
+   // A character after the padding means the padding was not at the end.
+   if PadCount>0 then begin
+    aData:=nil;
+    exit;
+   end;
+   case Character of
+    'A'..'Z':begin
+     Value:=ord(Character)-ord('A');
+    end;
+    'a'..'z':begin
+     Value:=(ord(Character)-ord('a'))+26;
+    end;
+    '0'..'9':begin
+     Value:=(ord(Character)-ord('0'))+52;
+    end;
+    '+':begin
+     Value:=62;
+    end;
+    '/':begin
+     Value:=63;
+    end;
+    else begin
+     aData:=nil;
+     exit;
+    end;
+   end;
+   Group:=(Group shl 6) or TRNLUInt32(Value);
+   inc(GroupLength);
+  end;
+
+  if GroupLength=4 then begin
+   // Three bytes out of the four characters, less one for each padding character: those bytes were
+   // never there, and their bits in the group are the zeros shifted in above.
+   aData[Count]:=TRNLUInt8((Group shr 16) and $ff);
+   inc(Count);
+   if PadCount<2 then begin
+    aData[Count]:=TRNLUInt8((Group shr 8) and $ff);
+    inc(Count);
+   end;
+   if PadCount<1 then begin
+    aData[Count]:=TRNLUInt8(Group and $ff);
+    inc(Count);
+   end;
+   Group:=0;
+   GroupLength:=0;
+  end;
+
+ end;
+
+ // A trailing part group is not short input, it is input that was cut.
+ if GroupLength<>0 then begin
+  aData:=nil;
+  exit;
+ end;
+
+ SetLength(aData,Count);
+ result:=true;
+
+end;
+
+class procedure TRNLBase64.SelfTest;
+ // The seven vectors of RFC 4648 section 10, which walk the encoder through every length a last
+ // group can have: full, one byte short, two bytes short.
+ procedure CheckEncode(const aName,aPlain,aExpected:TRNLRawByteString);
+ var Encoded:TRNLRawByteString;
+ begin
+  RNLSelfTestBegin('[Base64] RFC 4648 vector '+aName+' ... ');
+  if length(aPlain)>0 then begin
+   Encoded:=Encode(aPlain[1],length(aPlain));
+  end else begin
+   Encoded:=Encode(aPlain,0);
+  end;
+  if Encoded=aExpected then begin
+   RNLSelfTestSucceeded;
+  end else begin
+   RNLSelfTestFailure;
+  end;
+ end;
+ procedure CheckDecode(const aName,aText,aExpected:TRNLRawByteString);
+ var Decoded:TRNLUInt8DynamicArray;
+     Plain:TRNLRawByteString;
+     Index:TRNLSizeInt;
+ begin
+  RNLSelfTestBegin('[Base64] back again from '+aName+' ... ');
+  Plain:='';
+  if Decode(aText,Decoded) then begin
+   SetLength(Plain,length(Decoded));
+   for Index:=0 to length(Decoded)-1 do begin
+    Plain[Index+1]:=TRNLRawByteChar(Decoded[Index]);
+   end;
+  end;
+  if Plain=aExpected then begin
+   RNLSelfTestSucceeded;
+  end else begin
+   RNLSelfTestFailure;
+  end;
+ end;
+ procedure CheckRefused(const aName,aText:TRNLRawByteString);
+ var Decoded:TRNLUInt8DynamicArray;
+ begin
+  RNLSelfTestBegin('[Base64] refuses '+aName+' ... ');
+  if Decode(aText,Decoded) then begin
+   RNLSelfTestFailure;
+  end else begin
+   RNLSelfTestSucceeded;
+  end;
+ end;
+begin
+
+ CheckEncode('""','','');
+ CheckEncode('"f"','f','Zg==');
+ CheckEncode('"fo"','fo','Zm8=');
+ CheckEncode('"foo"','foo','Zm9v');
+ CheckEncode('"foob"','foob','Zm9vYg==');
+ CheckEncode('"fooba"','fooba','Zm9vYmE=');
+ CheckEncode('"foobar"','foobar','Zm9vYmFy');
+
+ CheckDecode('"Zg=="','Zg==','f');
+ CheckDecode('"Zm8="','Zm8=','fo');
+ CheckDecode('"Zm9vYmFy"','Zm9vYmFy','foobar');
+
+ // Wrapped the way a certificate or a header carries it
+ CheckDecode('wrapped text','Zm9v'#13#10'YmFy','foobar');
+
+ CheckRefused('a character outside the alphabet','Zm9*YmFy');
+ CheckRefused('a length which is not a multiple of four','Zm9vY');
+ CheckRefused('padding in the middle','Zm=vYmFy');
+
+end;
+
+class procedure TRNLTURNCredentials.MakeFromSecret(const aSecret:TRNLRawByteString;
+                                                   const aValidSeconds:TRNLSizeInt;
+                                                   out aUser:TRNLRawByteString;
+                                                   out aPassword:TRNLRawByteString;
+                                                   const aNowSecondsSinceUnixEpoch:TRNLInt64);
+var MAC:TRNLSHA1Hash;
+    Now:TRNLInt64;
+    Lifetime:TRNLSizeInt;
+begin
+
+ Now:=aNowSecondsSinceUnixEpoch;
+ if Now=0 then begin
+  // 25569 is the first of January 1970 in the day count this platform's date type uses, so the
+  // difference in days times the seconds in one is the epoch time. The same conversion the random
+  // seed uses, only in seconds rather than milliseconds.
+  Now:=trunc((SysUtils.Now-25569.0)*86400.0);
+ end;
+
+ Lifetime:=aValidSeconds;
+ if Lifetime<60 then begin
+  Lifetime:=60;
+ end;
+
+ // The name IS the expiry. A relay reads it, checks it has not passed, and then checks the password
+ // against it - no account, no list, nothing kept between one session and the next.
+ aUser:=TRNLRawByteString(IntToStr(Now+Lifetime));
+
+ if length(aSecret)>0 then begin
+  TRNLHMACSHA1.Process(MAC,aSecret[1],length(aSecret),aUser[1],length(aUser));
+ end else begin
+  // No secret is not a short secret. HMAC would take it and produce a MAC which anybody could
+  // reproduce, so nothing is produced at all.
+  FillChar(MAC,SizeOf(TRNLSHA1Hash),#0);
+  aPassword:='';
+  exit;
+ end;
+
+ aPassword:=TRNLBase64.Encode(MAC,SizeOf(TRNLSHA1Hash));
+
+end;
+
+class procedure TRNLTURNCredentials.SelfTest;
+const Secret='north';
+      // Both values were computed outside this file, with
+      //   printf '%s' '1003600' | openssl dgst -sha1 -hmac 'north' -binary | base64
+      // so that the test says what the recipe is supposed to produce rather than what this code
+      // happens to produce.
+      ExpectedUser='1003600';
+      ExpectedPassword='zH74LKcZ6fuvFNrDOvoRR4v6Nak=';
+var User,Password:TRNLRawByteString;
+begin
+
+ RNLSelfTestBegin('[TURN REST] the user name is the expiry ... ');
+ MakeFromSecret(Secret,3600,User,Password,1000000);
+ if User=ExpectedUser then begin
+  RNLSelfTestSucceeded;
+ end else begin
+  RNLSelfTestFailure;
+ end;
+
+ RNLSelfTestBegin('[TURN REST] the password is Base64 of HMAC-SHA-1 over it ... ');
+ if Password=ExpectedPassword then begin
+  RNLSelfTestSucceeded;
+ end else begin
+  RNLSelfTestFailure;
+ end;
+
+ RNLSelfTestBegin('[TURN REST] a lifetime under a minute is raised to one ... ');
+ MakeFromSecret(Secret,0,User,Password,1000000);
+ if User='1000060' then begin
+  RNLSelfTestSucceeded;
+ end else begin
+  RNLSelfTestFailure;
+ end;
+
+ RNLSelfTestBegin('[TURN REST] no secret yields no password ... ');
+ MakeFromSecret('',3600,User,Password,1000000);
+ if length(Password)=0 then begin
+  RNLSelfTestSucceeded;
+ end else begin
+  RNLSelfTestFailure;
+ end;
+
+end;
+
 procedure TRNLTURNCredentials.Clear;
 begin
  Username:='';
@@ -47918,13 +48241,8 @@ begin
   TRNLSHA256.Process(Key,Material[1],length(Material));
   KeySize:=SizeOf(TRNLSHA256Hash);
  end else begin
-{$if defined(RNL_TURN_RFC5389_COMPAT)}
   TRNLMD5.Process(Key,Material[1],length(Material));
   KeySize:=SizeOf(TRNLMD5Hash);
-{$else}
-  // No MD5 to derive it with, so there is no long term key of the older shape either
-  KeySize:=0;
-{$ifend}
  end;
 end;
 
