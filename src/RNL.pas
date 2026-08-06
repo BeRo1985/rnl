@@ -43627,6 +43627,10 @@ begin
  FreeAndNil(fRandomGenerator);
 
  if assigned(fConnectionCandidateHashTable) then begin
+  // Emptied before the table itself goes: every candidate that was still mid-handshake carries its own
+  // GetMem'd data block, and freeing only the table would leave those behind. The same two steps in the
+  // same order as where the table is set up again for a host that starts accepting connections.
+  fConnectionCandidateHashTable^.Free;
   FreeMem(fConnectionCandidateHashTable);
   fConnectionCandidateHashTable:=nil;
  end;
