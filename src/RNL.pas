@@ -8559,6 +8559,7 @@ function RNLSocketConnect(const aSocket:TRNLSocket;const aAddress:TRNLAddress;co
 function RNLSocketShutdownWrite(const aSocket:TRNLSocket):Boolean;
 function RNLSocketAccept(const aSocket:TRNLSocket;const aAddress:PRNLAddress;const aFamily:TRNLAddressFamily):TRNLSocket;
 function RNLSocketSelectWriteError(const aSocket:TRNLSocket;out aWriteSet,aErrorSet:TRNLSocketSet;const aTimeout:TRNLInt64):TRNLInt32;
+function RNLSocketPollWriteError(const aSocket:TRNLSocket;const aTimeout:TRNLInt64):TRNLInt32;
 function RNLSocketSelectRead(const aSocket:TRNLSocket;out aReadSet:TRNLSocketSet;const aTimeout:TRNLInt64):TRNLInt32;
 function RNLSocketSendStream(const aSocket:TRNLSocket;const aData;const aDataLength:TRNLSizeInt):TRNLSizeInt;
 function RNLSocketReceiveStream(const aSocket:TRNLSocket;out aData;const aDataLength:TRNLSizeInt):TRNLSizeInt;
@@ -49158,6 +49159,37 @@ begin
   aAddress^.SetAddress(@SIN);
  end;
 end;
+
+// Asks the same question as RNLSocketSelectWriteError - has this socket become
+// writable, or failed - but without select()'s ceiling. On Unix an fd_set holds
+// exactly FD_SETSIZE (1024) bits, so a descriptor at or above that cannot be
+// expressed: FD_SET refuses to set the bit, and passing nfds=fd+1 makes the kernel
+// read and write FDS_BYTES(nfds) bytes against a 128 byte object, i.e. past the
+// caller's variable. poll() takes the descriptor as a number and has no such limit.
+//
+// Windows keeps select(): its fd_set is a count plus an array rather than a bitmask,
+// _select ignores nfds, and WSAPoll is not reliably declared across the toolchains
+// this unit builds with.
+function RNLSocketPollWriteError(const aSocket:TRNLSocket;const aTimeout:TRNLInt64):TRNLInt32;
+{$if defined(fpc) and defined(Unix) and declared(fppoll) and not defined(Darwin)}
+type TPollFDArray=array[0..0] of pollfd;
+var PollFDs:TPollFDArray;
+begin
+ PollFDs[0].fd:=aSocket;
+ PollFDs[0].events:=POLLOUT;
+ PollFDs[0].revents:=0;
+ result:=fppoll(@PollFDs[0],1,aTimeout);
+ if (result>0) and ((PollFDs[0].revents and (POLLOUT or POLLERR or POLLHUP or POLLNVAL))=0) then begin
+  result:=0;
+ end;
+end;
+{$else}
+var WriteSet,ErrorSet:TRNLSocketSet;
+begin
+ // No poll here, so this is the old behaviour including its limits
+ result:=RNLSocketSelectWriteError(aSocket,WriteSet,ErrorSet,aTimeout);
+end;
+{$ifend}
 
 function RNLSocketSelectWriteError(const aSocket:TRNLSocket;out aWriteSet,aErrorSet:TRNLSocketSet;const aTimeout:TRNLInt64):TRNLInt32;
 var TimeValue:{$if defined(Windows)}TTimeVal{$elseif defined(fpc)}TTimeVal{$else}TimeVal{$ifend};
