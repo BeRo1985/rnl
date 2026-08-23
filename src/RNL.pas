@@ -4192,7 +4192,13 @@ type PRNLVersion=^TRNLVersion;
        RNL_SOCKET_OPTION_ERROR,
        RNL_SOCKET_OPTION_NODELAY,
        RNL_SOCKET_OPTION_DONTFRAGMENT,
-       RNL_SOCKET_OPTION_IPV6_V6ONLY
+       RNL_SOCKET_OPTION_IPV6_V6ONLY,
+       // Appended, so the ordinals of everything above stay as they were.
+       // Asks the kernel to report ICMP errors for a datagram socket even when it
+       // is not connected. Without it Linux silently drops them, so a port
+       // unreachable coming back for an unconnected UDP socket is never visible.
+       // Read the error afterwards with RNL_SOCKET_OPTION_ERROR.
+       RNL_SOCKET_OPTION_RECVERR
       );
 
      PRNLSocketShutdown=^TRNLSocketShutdown;
@@ -8545,6 +8551,7 @@ function RNLSocketCreateWithProtocol(const aType:TRNLSocketType;const aFamily:TR
 procedure RNLSocketDestroy(const aSocket:TRNLSocket);
 function RNLSocketSetNonBlock(const aSocket:TRNLSocket):Boolean;
 function RNLSocketSetReuseAddr(const aSocket:TRNLSocket):Boolean;
+function RNLSocketSetRecvErr(const aSocket:TRNLSocket):Boolean;
 function RNLSocketGetError(const aSocket:TRNLSocket;out aError:TRNLInt32):Boolean;
 function RNLSocketBind(const aSocket:TRNLSocket;const aAddress:PRNLAddress;const aFamily:TRNLAddressFamily):Boolean;
 function RNLSocketListen(const aSocket:TRNLSocket;const aBackLog:TRNLInt32):Boolean;
@@ -29182,6 +29189,10 @@ const SOCKET_ERROR=-1;
       IP_MTU_DISCOVER=10;
       IP_MTU=14;
 
+      // Report ICMP errors for datagram sockets, including unconnected ones
+      RNL_IP_RECVERR=11;
+      RNL_IPV6_RECVERR=25;
+
       IP_NODEFRAG=22;
 
       IP_PMTUDISC_DONT=0;
@@ -33245,6 +33256,10 @@ begin
   RNL_SOCKET_OPTION_IPV6_V6ONLY:begin
    r:=setsockopt(aSocket,IPPROTO_IPV6,IPV6_V6ONLY,TRNLPointer(@aValue),SizeOf(TRNLInt32));
   end;
+  RNL_SOCKET_OPTION_RECVERR:begin
+   // Winsock has no counterpart, so this stays unsupported rather than silently
+   // pretending to have worked
+  end;
  end;
  result:=r<>SOCKET_ERROR;
 end;
@@ -33299,6 +33314,11 @@ begin
   end;
   RNL_SOCKET_OPTION_IPV6_V6ONLY:begin
    r:=fpsetsockopt(aSocket,IPPROTO_IPV6,IPV6_V6ONLY,TRNLPointer(@aValue),SizeOf(TRNLInt32));
+  end;
+  RNL_SOCKET_OPTION_RECVERR:begin
+{$if defined(Linux) or defined(Android)}
+   r:=fpsetsockopt(aSocket,IPPROTO_IP,RNL_IP_RECVERR,TRNLPointer(@aValue),SizeOf(TRNLInt32));
+{$ifend}
   end;
  end;
  result:=r<>SOCKET_ERROR;
@@ -33355,6 +33375,12 @@ begin
   RNL_SOCKET_OPTION_IPV6_V6ONLY:begin
    r:=setsockopt(aSocket,IPPROTO_IPV6,IPV6_V6ONLY,aValue,SizeOf(TRNLInt32));
   end;
+  RNL_SOCKET_OPTION_RECVERR:begin
+{$if defined(Linux) or defined(Android)}
+   t:=aValue;
+   r:=setsockopt(aSocket,IPPROTO_IP,RNL_IP_RECVERR,t,SizeOf(TRNLInt32));
+{$ifend}
+  end;
  end;
  result:=r<>SOCKET_ERROR;
 end;
@@ -33363,11 +33389,16 @@ end;
 function TRNLRealNetwork.SocketGetOption(const aSocket:TRNLSocket;const aOption:TRNLSocketOption;out aValue:TRNLInt32):boolean;
 {$if defined(Windows)}
 var r:TRNLInt32;
+    OptLen:TRNLInt32;
 begin
  r:=SOCKET_ERROR;
  case aOption of
   RNL_SOCKET_OPTION_ERROR:begin
-   r:=setsockopt(aSocket,SOL_SOCKET,SO_ERROR,TRNLPointer(@aValue),SizeOf(TRNLInt32));
+   // getsockopt, not setsockopt: SO_ERROR is read-only, and writing it left aValue
+   // untouched while still reporting success, so callers got whatever happened to
+   // be in their variable. Same shape as RNLSocketGetError, which had it right.
+   OptLen:=SizeOf(TRNLInt32);
+   r:=getsockopt(aSocket,SOL_SOCKET,SO_ERROR,TRNLPointer(@aValue),OptLen);
   end;
  end;
  result:=r<>SOCKET_ERROR;
@@ -48971,6 +49002,28 @@ begin
  result:=setsockopt(aSocket,SOL_SOCKET,SO_REUSEADDR,Value,SizeOf(TRNLInt32))<>SOCKET_ERROR;
 {$ifend}
 end;
+
+// Asks the kernel to report ICMP errors for a datagram socket even when it is not
+// connected. Without it Linux drops them, so a port unreachable coming back for an
+// unconnected UDP socket never becomes visible. Read the error with
+// RNLSocketGetError afterwards, which also clears it.
+function RNLSocketSetRecvErr(const aSocket:TRNLSocket):Boolean;
+{$if defined(Linux) or defined(Android)}
+var Value:TRNLInt32;
+begin
+ Value:=1;
+{$ifdef fpc}
+ result:=fpsetsockopt(aSocket,IPPROTO_IP,RNL_IP_RECVERR,TRNLPointer(@Value),SizeOf(TRNLInt32))<>SOCKET_ERROR;
+{$else}
+ result:=setsockopt(aSocket,IPPROTO_IP,RNL_IP_RECVERR,Value,SizeOf(TRNLInt32))<>SOCKET_ERROR;
+{$endif}
+end;
+{$else}
+begin
+ // No counterpart elsewhere, so say so rather than pretend it worked
+ result:=false;
+end;
+{$ifend}
 
 function RNLSocketGetError(const aSocket:TRNLSocket;out aError:TRNLInt32):Boolean;
 {$if defined(Windows)}
